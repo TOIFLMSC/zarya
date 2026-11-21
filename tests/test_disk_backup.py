@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,7 +67,10 @@ def test_transfer_can_exceed_three_minutes_with_progress(transport, monkeypatch,
     assert transport.rclone(command, "fixture") == "completed"
 
 
-def test_damaged_old_manifest_does_not_block_newer_snapshot(transport, tmp_path, monkeypatch):
+@pytest.mark.parametrize("damage", ["missing fields", "deep JSON", "UTF-8 BOM", "extra evidence"])
+def test_damaged_old_manifest_does_not_block_newer_snapshot(
+    transport, tmp_path, monkeypatch, damage
+):
     cd = importlib.import_module("deployer")
     monkeypatch.setattr(cd, "ROOT", tmp_path)
     monkeypatch.setattr(cd, "DATA", tmp_path / "data")
@@ -81,7 +85,25 @@ def test_damaged_old_manifest_does_not_block_newer_snapshot(transport, tmp_path,
     new = queue / ("20261121T060000Z-" + "b" * 32)
     for path in (old, new):
         (path / "backup").mkdir(parents=True)
-    (old / "backup/manifest.json").write_text("{}")
+    payload = b"fixture"
+    (old / "backup/zarya.sqlite3").write_bytes(payload)
+    evidence = {
+        "size": len(payload),
+        "sha256": transport.sha256(old / "backup/zarya.sqlite3"),
+    }
+    if damage == "extra evidence":
+        evidence["extra"] = "unexpected"
+    manifest = json.dumps(
+        {"format": 1, "created_at": "2026-11-20T06:00:00Z", "files": {"zarya.sqlite3": evidence}}
+    )
+    if damage == "missing fields":
+        manifest = "{}"
+    elif damage == "deep JSON":
+        depth = sys.getrecursionlimit() * 2
+        manifest = "[" * depth + "0" + "]" * depth
+    elif damage == "UTF-8 BOM":
+        manifest = "\ufeff" + manifest
+    (old / "backup/manifest.json").write_text(manifest, encoding="utf-8")
     (new / "backup/manifest.json").write_text('{"format":1}')
     publish = transport.publish
     delivered = []

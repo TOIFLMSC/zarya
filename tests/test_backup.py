@@ -3,6 +3,8 @@ import importlib
 import json
 import shutil
 import sqlite3
+import stat
+import sys
 import tarfile
 from pathlib import Path
 
@@ -110,6 +112,8 @@ async def test_disk_restore_cleans_plaintext_when_final_copy_runs_out_of_space(
     monkeypatch.setattr(shutil, "copyfile", original_copy)
     recovery.recover(archive, tmp_path / "identity", target)
     assert (target / MARKER).is_file()
+    if sys.platform != "win32":
+        assert stat.S_IMODE(target.stat().st_mode) & 0o077 == 0
     assert verify(target) == verify(snapshot)
 
 

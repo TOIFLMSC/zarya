@@ -177,7 +177,7 @@ def restore(source: Path, target: Path) -> dict[str, Any]:
     manifest = verify(source)
     with tempfile.TemporaryDirectory(prefix=".zarya-restore-", dir=target.parent) as temp:
         stage = Path(temp) / "snapshot"
-        stage.mkdir()
+        stage.mkdir(mode=0o700)
         # Publish only a verified, quarantined installation. No runtime/keys are started.
         for name in manifest["files"]:
             (stage / name).parent.mkdir(parents=True, exist_ok=True)

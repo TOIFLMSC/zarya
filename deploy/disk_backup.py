@@ -49,9 +49,9 @@ def snapshot_files(snapshot):
     if path.stat().st_size > 8_000_000:
         raise ValueError("backup manifest too large")
     try:
-        manifest = json.loads(path.read_bytes())
-    except UnicodeError as error:
-        raise ValueError("invalid backup manifest encoding") from error
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeError, RecursionError) as error:
+        raise ValueError("invalid backup manifest") from error
     files = manifest.get("files") if isinstance(manifest, dict) else None
     if (
         not isinstance(files, dict)
@@ -66,6 +66,7 @@ def snapshot_files(snapshot):
             name == "manifest.json"
             or not member(name)
             or not isinstance(evidence, dict)
+            or evidence.keys() != {"size", "sha256"}
             or type(evidence.get("size")) is not int
             or evidence["size"] < 0
             or not isinstance(evidence.get("sha256"), str)
