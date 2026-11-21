@@ -10,9 +10,11 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import urlopen
 
+import disk_backup
 from pull_release import configured
 
 ROOT = Path("/var/lib/zarya-cd")
@@ -82,7 +84,7 @@ def python(release, *args):
 
 def launch():
     state = load()
-    if state["phase"] not in {"idle", "admitted", "returning"}:
+    if state["phase"] not in {"idle", "admitted", "returning", "night-returning"}:
         raise SystemExit(75)
     executable, env = runtime(state["live"])
     os.execve(executable, [str(executable), "-u", "-m", "zarya"], env)
@@ -172,7 +174,15 @@ def rollback(state):
                 run / "backup/zarya.sqlite3",
                 DATA / "zarya.sqlite3",
             )
-    save(state, "returning", live=state["old"], rejected=state["target"])
+    if state["phase"] != "returning":
+        retry = state["phase"] == "preupload"
+        save(
+            state,
+            "returning",
+            live=state["old"],
+            rejected=None if retry else state["target"],
+            disk_retry_at=time.time() + 3600 if retry else 0,
+        )
     systemctl("start")
     if not healthy(state["live"]):
         raise RuntimeError("previous service needs operator attention")
@@ -199,6 +209,10 @@ def deploy(state, target, run):
             raise RuntimeError("service still active")
         python(state["old"], "-m", "zarya.backup", "backup", DATA, run / "backup")
         subprocess.run(["sync", "-f", str(run)], check=True)
+        save(state, "preupload")
+        disk_backup.publish(run / "backup", run, "predeploy", disk_backup.new_id())
+        save(state, "stopping", disk_retry_at=0)
+        (run / "snapshot.age").unlink(missing_ok=True)
         with lock(DATA / "instance.lock"):
             python(
                 target,
@@ -221,7 +235,7 @@ def deploy(state, target, run):
         # A failed fsync/rename may already have published an admission record.
         # Re-read durable intent. Never restore a snapshot past the admission boundary.
         state = load()
-        if state["phase"] in {"stopping", "switching"}:
+        if state["phase"] in {"stopping", "preupload", "switching"}:
             rollback(state)
         raise
     systemctl("start")
@@ -243,7 +257,10 @@ def in_flight():
 def cycle():
     state = load()
     phase = state["phase"]
-    if phase in {"stopping", "switching", "returning"}:
+    if phase in {"night-capture", "night-returning"}:
+        recover_night(state)
+        return
+    if phase in {"stopping", "preupload", "switching", "returning"}:
         rollback(state)
         return
     if phase == "admitted":
@@ -253,7 +270,7 @@ def cycle():
         if phase == "blocked" and active():
             systemctl("stop")
         raise RuntimeError("deployment held; inspect state and journal")
-    if not active():
+    if not active() or state.get("disk_retry_at", 0) > time.time():
         return
     # Retain both sides of the last deployment; age out only expendable code/venvs.
     for folder in (ROOT / "releases").iterdir():
@@ -274,6 +291,7 @@ def cycle():
         return
     if in_flight():
         return
+    disk_backup.listing("predeploy")
     if (DATA / "restore-quarantine.json").exists():
         raise RuntimeError("quarantined installation")
     size = sum(p.stat().st_size for p in DATA.rglob("*") if p.is_file() and not p.is_symlink())
@@ -301,12 +319,77 @@ def cycle():
     deploy(state, target, run)
 
 
+def recover_night(state):
+    directory = ROOT / "nightly" / state["night_id"]
+    done = (directory / "backup" / "manifest.json").is_file()
+    if state["night_restart"]:
+        save(state, "night-returning")
+        systemctl("start")
+        if not healthy(state["live"]):
+            raise RuntimeError("service needs attention after nightly snapshot")
+    save(state, "idle", last_night=directory.name[:8] if done else state.get("last_night"))
+    if not done:
+        # Only scratch from this interrupted capture. Committed snapshots stay queued.
+        shutil.rmtree(directory, ignore_errors=False)
+
+
+def nightly():
+    state = load()
+    if state["phase"] in {"night-capture", "night-returning"}:
+        recover_night(state)
+    if state["phase"] != "idle":
+        return
+    if (DATA / "restore-quarantine.json").exists():
+        raise RuntimeError("quarantined installation")
+    queue = ROOT / "nightly"
+    queue.mkdir(mode=0o700, exist_ok=True)
+    now = datetime.now(UTC)
+    running = active()
+    due = not state.get("last_night") or (
+        now.hour >= 3 and state["last_night"] != now.strftime("%Y%m%d")
+    )
+    if due and not (running and in_flight()):
+        size = sum(p.stat().st_size for p in DATA.rglob("*") if p.is_file() and not p.is_symlink())
+        if shutil.disk_usage(queue).free >= size * 2 + 128 * 1024**2:
+            folder = queue / disk_backup.new_id()
+            folder.mkdir(mode=0o700)
+            sync(queue)
+            save(state, "night-capture", night_id=folder.name, night_restart=running)
+            try:
+                if running:
+                    systemctl("stop")
+                python(state["live"], "-m", "zarya.backup", "backup", DATA, folder / "backup")
+                subprocess.run(["sync", "-f", str(folder)], check=True)
+            finally:
+                recover_night(state)
+        else:
+            print("Low disk space; keeping pending snapshots and deferring capture", flush=True)
+    # A completed local capture survives process/host restart and failed uploads.
+    for folder in sorted(queue.iterdir()):
+        if re.fullmatch(r"sent-\d{8}T\d{6}Z-[a-f0-9]{32}", folder.name):
+            shutil.rmtree(folder)
+            continue
+        if not re.fullmatch(r"\d{8}T\d{6}Z-[a-f0-9]{32}", folder.name):
+            continue
+        if (folder / "backup/manifest.json").is_file():
+            disk_backup.publish(folder / "backup", folder, "nightly", folder.name)
+            delivered = folder.with_name("sent-" + folder.name)
+            folder.rename(delivered)
+            sync(queue)
+            shutil.rmtree(delivered)
+    for kind in ("nightly", "predeploy"):
+        disk_backup.prune(kind, now)
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["launch"]:
         launch()
-    elif sys.argv[1:] == ["poll"]:
+    elif sys.argv[1:] in (["poll"], ["nightly"]):
         with lock(ROOT / "deploy.lock"):
-            cycle()
+            if sys.argv[1] == "poll":
+                cycle()
+            else:
+                nightly()
     elif sys.argv[1:] == ["resume-current"]:
         with lock(ROOT / "deploy.lock"):
             held = load()

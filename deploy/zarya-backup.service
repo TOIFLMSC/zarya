@@ -1,0 +1,19 @@
+[Unit]
+Description=Make and deliver encrypted Zarya snapshots
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=zarya-svc
+Group=zarya-svc
+ExecStart=/usr/bin/python3 /usr/local/lib/zarya-cd/deployer.py nightly
+LoadCredential=age-recipient:/etc/zarya-cd/age-recipient
+Environment=PYTHONDONTWRITEBYTECODE=1
+TimeoutStartSec=1h
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/zarya /var/lib/zarya-cd /var/lib/zarya-backup

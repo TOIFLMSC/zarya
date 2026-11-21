@@ -27,6 +27,10 @@ ROOT_FILES = {
     "deploy/pull_release.py",
     "deploy/sqlite_release.py",
     "deploy/rehearse.py",
+    "deploy/disk_backup.py",
+    "deploy/restore_disk.py",
+    "deploy/zarya-backup.service",
+    "deploy/zarya-backup.timer",
 }
 DOCS = {
     "setup.md",
@@ -35,6 +39,7 @@ DOCS = {
     "privacy.md",
     "operations.md",
     "pull-deployment.md",
+    "disk-backup.md",
     "codegraph.md",
     "memory-retrieval.md",
 }
@@ -48,6 +53,8 @@ WEB_FILES = {
 }
 ASSET = "web/src/assets/zarya-avatar-v1.png"
 SECRETS = (
+    re.compile(r"AGE-SECRET-KEY-1[0-9A-Z]{50,}"),
+    re.compile(r"y[0-9]_[A-Za-z0-9_-]{35,}"),
     re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}"),
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})"),
     re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b"),

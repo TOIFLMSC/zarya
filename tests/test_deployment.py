@@ -99,7 +99,7 @@ def test_busy_model_call_defers_cutover(modules, tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="controller uses Linux flock/fsync/systemd")
-@pytest.mark.parametrize("fault", ["none", "prepare", "interrupt", "post-admission"])
+@pytest.mark.parametrize("fault", ["none", "cloud", "prepare", "interrupt", "post-admission"])
 def test_deploy_recovery_boundaries(modules, tmp_path, monkeypatch, fault):
     cd, _, adapter = modules
     data = tmp_path / "data"
@@ -113,6 +113,12 @@ def test_deploy_recovery_boundaries(modules, tmp_path, monkeypatch, fault):
         conn.execute("INSERT INTO users VALUES ('fixture',NULL,'original')")
     monkeypatch.setattr(cd, "ROOT", tmp_path)
     monkeypatch.setattr(cd, "DATA", data)
+
+    def publish(*_):
+        if fault == "cloud":
+            raise RuntimeError("cloud outage")
+
+    monkeypatch.setattr(cd.disk_backup, "publish", publish)
     running = True
 
     def control(action):
@@ -147,6 +153,10 @@ def test_deploy_recovery_boundaries(modules, tmp_path, monkeypatch, fault):
             cd.deploy(state, target, run)
         assert cd.load()["phase"] == "switching"
         cd.cycle()
+    elif fault == "cloud":
+        with pytest.raises(RuntimeError, match="cloud outage"):
+            cd.deploy(state, target, run)
+        assert running and cd.load()["rejected"] is None and cd.load()["disk_retry_at"] > 0
     elif fault == "prepare":
         with pytest.raises(ValueError, match="before promotion"):
             cd.deploy(state, target, run)
