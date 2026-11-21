@@ -4,6 +4,7 @@ import ctypes
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -97,7 +98,7 @@ def remove_owned(root: Path, name: str, expected: str) -> None:
     with fs.parents(root, name) as path:
         if not path.exists():
             return
-        if os.name == "nt":
+        if sys.platform == "win32":
             import msvcrt
             from ctypes import wintypes
 

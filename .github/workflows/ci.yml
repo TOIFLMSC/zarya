@@ -44,6 +44,7 @@ jobs:
           uv run --no-sync python scripts/check-publication.py
           uv run --no-sync ruff check src tests scripts
           uv run --no-sync mypy
+          uv run --no-sync mypy --platform win32
           pnpm --dir web run build
       - name: Upgrade a synthetic database from the base commit
         env:

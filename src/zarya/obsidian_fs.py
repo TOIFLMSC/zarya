@@ -4,6 +4,7 @@ import ctypes
 import hashlib
 import os
 import stat
+import sys
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -38,7 +39,7 @@ def parents(root: Path, relative: str, *, create: bool = False) -> Iterator[Path
             no_link(item)
             if not item.is_dir():
                 raise ValueError("Путь синхронизации не является папкой")
-            if os.name == "nt":
+            if sys.platform == "win32":
                 # Holding each parent without FILE_SHARE_DELETE prevents directory replacement.
                 # Metadata-only access (0) does not enforce Windows delete sharing.
                 handles.append(win_open(item, 1, 3, 0x02000000 | 0x00200000, 3))
@@ -49,6 +50,8 @@ def parents(root: Path, relative: str, *, create: bool = False) -> Iterator[Path
 
 
 def win_open(path: Path, access: int, disposition: int, flags: int, share: int = 0) -> int:
+    if sys.platform != "win32":
+        raise OSError("Windows file handles require Windows")
     from ctypes import wintypes
 
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -91,6 +94,8 @@ def win_open(path: Path, access: int, disposition: int, flags: int, share: int =
 
 
 def win_close(handle: int) -> None:
+    if sys.platform != "win32":
+        raise OSError("Windows file handles require Windows")
     from ctypes import wintypes
 
     fn = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
@@ -101,7 +106,7 @@ def win_close(handle: int) -> None:
 
 @contextmanager
 def opened(path: Path, *, create: bool = False, write: bool = False) -> Iterator[BinaryIO]:
-    if os.name == "nt":
+    if sys.platform == "win32":
         import msvcrt
 
         handle = win_open(
