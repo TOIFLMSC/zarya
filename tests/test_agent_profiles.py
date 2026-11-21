@@ -1,8 +1,11 @@
+import runpy
 import shutil
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,8 +21,9 @@ def test_sync_preserves_private_instructions_and_only_updates_complete_profiles(
     codex = tmp_path / ".codex"
     (codex / "agents").mkdir(parents=True)
     original = (
-        b'model = "old" # keep comment\r\nmodel_reasoning_effort = "low"\r\n'
         b'developer_instructions = """Preserve this contract.\r\nmodel = "example"\r\n"""\r\n'
+        b"model = 'old' # keep comment\r\n"
+        b'model_reasoning_effort = "low"\r\n'
     )
     targets = {codex / "config.toml": profiles["primary"]}
     targets.update({codex / "agents" / f"{k}.toml": v for k, v in profiles.items()})
@@ -39,5 +43,20 @@ def test_sync_preserves_private_instructions_and_only_updates_complete_profiles(
     assert sync("--check") == 0
     for path, values in targets.items():
         assert path.read_bytes() == original.replace(
-            b'"old"', f'"{values["model"]}"'.encode()
+            b"'old'", f"'{values['model']}'".encode()
         ).replace(b'"low"', f'"{values["model_reasoning_effort"]}"'.encode())
+
+
+def test_failed_write_preserves_profile(tmp_path: Path, monkeypatch):
+    path = tmp_path / "reviewer.toml"
+    path.write_bytes(b"private instructions")
+    replace_profile = runpy.run_path(str(ROOT / "scripts/sync-agent-models.py"))["replace_profile"]
+
+    def disk_full(_fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("os.fsync", disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        replace_profile(path, "new content")
+    assert path.read_bytes() == b"private instructions"
+    assert list(tmp_path.iterdir()) == [path]
