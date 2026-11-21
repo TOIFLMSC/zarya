@@ -1,0 +1,18 @@
+{
+  "name": "example",
+  "github": {
+    "repository": "OWNER/REPOSITORY",
+    "branch": "main",
+    "workflow": "ci-pull.yml",
+    "prefix": "app"
+  },
+  "health_url": "http://127.0.0.1:18787/healthz",
+  "health_timeout_seconds": 45,
+  "poll_seconds": 120,
+  "backup_retry_seconds": 600,
+  "backup": {
+    "remote": "vault:pull-cd/v1",
+    "keep_nightly": 30,
+    "keep_predeploy": 10
+  }
+}

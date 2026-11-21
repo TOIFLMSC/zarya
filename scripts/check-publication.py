@@ -17,6 +17,7 @@ ROOT_FILES = {
     "uv.lock",
     "start.ps1",
     ".github/workflows/ci.yml",
+    ".github/workflows/pull-cd-template.yml",
     "config/codex-agent-models.toml",
     "scripts/sync-agent-models.py",
     "deploy/install.sh",
@@ -45,6 +46,24 @@ DOCS = {
     "codegraph.md",
     "memory-retrieval.md",
 }
+PULL_CD_FILES = {
+    "VERSION",
+    "README.md",
+    "backup.py",
+    "bundle.py",
+    "controller.py",
+    "demo/adapter.py",
+    "demo/app.py",
+    "install.py",
+    "install-skill.py",
+    "project.example.json",
+    "pull_release.py",
+    "scaffold.py",
+    "skill/pull-cd-onboarding/SKILL.md",
+    "tests/feed.py",
+    "tests/systemd_drill.py",
+    "workflow.yml",
+}
 WEB_FILES = {
     "index.html",
     "package.json",
@@ -68,6 +87,8 @@ def allowed(path: str) -> bool:
     p = PurePosixPath(path)
     if path in ROOT_FILES or path == ASSET:
         return True
+    if path.startswith("templates/pull-cd/"):
+        return path.removeprefix("templates/pull-cd/") in PULL_CD_FILES
     if any(part.startswith(".") or part in {"node_modules", "__pycache__"} for part in p.parts):
         return False
     if p.parent.as_posix() == "docs":
