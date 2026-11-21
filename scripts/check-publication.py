@@ -17,6 +17,8 @@ ROOT_FILES = {
     "uv.lock",
     "start.ps1",
     ".github/workflows/ci.yml",
+    "config/codex-agent-models.toml",
+    "scripts/sync-agent-models.py",
     "deploy/install.sh",
     "deploy/check-systemd.sh",
     "deploy/80-pull-cd.conf",

@@ -1,0 +1,30 @@
+# Sections match the local role filenames. The main chat uses primary.
+# ПРОГРЕСС — implementation and coordination
+[primary]
+model = "gpt-6.2-sol"
+model_reasoning_effort = "high"
+
+# ИСКРА — architecture and diagnosis
+[oracle]
+model = "gpt-6.2-astra"
+model_reasoning_effort = "high"
+
+# МАЯК — documentation and external APIs
+[librarian]
+model = "gpt-6.2-sol"
+model_reasoning_effort = "medium"
+
+# ТАЙГА — code and data flow discovery
+[finder]
+model = "gpt-6.2-sol"
+model_reasoning_effort = "medium"
+
+# КОНТУР — independent code review
+[reviewer]
+model = "gpt-6.2-astra"
+model_reasoning_effort = "high"
+
+# РУБИН — interaction design and visual review
+[designer]
+model = "gpt-6.2-sol"
+model_reasoning_effort = "high"
