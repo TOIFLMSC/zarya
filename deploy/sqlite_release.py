@@ -41,9 +41,11 @@ def preserved(before, after):
             if name == "schema_migrations":
                 continue
             table = quoted(name)
-            columns = ",".join(
-                quoted(r[1]) for r in db.execute(f"PRAGMA prior.table_info({table})")
-            )
+            previous = [r[1] for r in db.execute(f"PRAGMA prior.table_info({table})")]
+            current_columns = {r[1] for r in db.execute(f"PRAGMA main.table_info({table})")}
+            if not current_columns.issuperset(previous):
+                raise ValueError(f"migration removed existing columns in {name}")
+            columns = ",".join(quoted(column) for column in previous)
 
             prior, current = (
                 f"SELECT {columns},count(*) FROM {schema}.{table} GROUP BY {columns}"
@@ -62,6 +64,13 @@ async def migrate(path):
 
 def prepare(snapshot, candidate, data):
     source = snapshot / "zarya.sqlite3"
+    working = data / "zarya.sqlite3"
+    if working.resolve() != source.resolve():
+        preserved(source, working)
+        with closing(connect(source)) as old, closing(connect(working)) as current:
+            sql = "SELECT version FROM schema_migrations ORDER BY version"
+            if old.execute(sql).fetchall() != current.execute(sql).fetchall():
+                raise ValueError("working schema changed after snapshot")
     copy_database(source, candidate, existing=False)
     asyncio.run(migrate(candidate))
     preserved(source, candidate)

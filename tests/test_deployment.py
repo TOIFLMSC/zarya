@@ -58,6 +58,12 @@ def test_workflow_eligibility(modules, monkeypatch):
 
     monkeypatch.setattr(gh, "json", reply)
     assert gh.artifact(sha) == art
+    run["path"] += "@main"
+    assert gh.artifact(sha) == art
+    run["path"] = ".github/workflows/ci.yml@other"
+    with pytest.raises(ValueError, match="provenance"):
+        gh.artifact(sha)
+    run["path"] = ".github/workflows/ci.yml"
     art["expired"] = True
     with pytest.raises(ValueError, match="expired"):
         gh.artifact(sha)
@@ -66,6 +72,30 @@ def test_workflow_eligibility(modules, monkeypatch):
         gh.artifact(sha)
     run["conclusion"] = "failure"
     assert gh.artifact(sha) is None
+
+
+def test_preservation_rejects_dropped_empty_column(modules, tmp_path):
+    _, _, adapter = modules
+    paths = (tmp_path / "before.db", tmp_path / "after.db")
+    for path, columns in zip(paths, ("id, content", "id"), strict=True):
+        with closing(sqlite3.connect(path)) as db:
+            db.execute(f"CREATE TABLE memory ({columns})")
+    with pytest.raises(ValueError, match="removed existing columns"):
+        adapter.preserved(*paths)
+
+
+def test_busy_model_call_defers_cutover(modules, tmp_path, monkeypatch):
+    cd, _, adapter = modules
+    path = tmp_path / "zarya.sqlite3"
+    asyncio.run(adapter.migrate(path))
+    monkeypatch.setattr(cd, "DATA", tmp_path)
+    assert not cd.in_flight()
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute(
+            "INSERT INTO model_calls(provider, model, state, created_at) "
+            "VALUES ('fixture', 'test', 'started', '')"
+        )
+    assert cd.in_flight()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="controller uses Linux flock/fsync/systemd")

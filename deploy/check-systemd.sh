@@ -9,10 +9,12 @@ test ! -e /var/lib/zarya
 test ! -e /var/lib/zarya-cd
 test ! -e /etc/systemd/system/zarya.service
 id zarya-svc 2>/dev/null && exit 1
+trap 'if [ "$?" -ne 0 ]; then journalctl --no-pager -u zarya-cd.service -u zarya.service -n 100; fi' EXIT
 apt-get install -y python3.12-venv polkitd >/dev/null
 useradd --system --no-create-home zarya-svc
 install -d -m 0755 /opt/zarya /etc/zarya-cd
 install -d -m 0700 -o zarya-svc -g zarya-svc /var/lib/zarya
+install -m 0600 -o zarya-svc -g zarya-svc src/zarya/prompts.example.json /var/lib/zarya/prompts.json
 install -m 0600 /dev/null /etc/zarya-cd/github-token
 cp -r dist/release /opt/zarya/artifact
 /usr/bin/python3.12 -m venv /opt/zarya/.venv
@@ -38,10 +40,7 @@ printf '%s\n' '[Service]' 'ExecStart=' 'ExecStart=/usr/bin/python3 /opt/zarya/fi
   > /etc/systemd/system/zarya-cd.service.d/fixture.conf
 systemctl daemon-reload
 systemctl start zarya-cd.timer
-systemctl start zarya-cd.service || {
-  journalctl --no-pager -u zarya-cd.service -u zarya.service -n 120
-  exit 1
-}
+systemctl start zarya-cd.service
 systemctl is-active --quiet zarya.service
 systemctl is-active --quiet zarya-cd.timer
 curl --fail http://127.0.0.1:8787/healthz

@@ -56,13 +56,17 @@ class GitHub:
         run = runs[0]
         if (run["status"], run["conclusion"]) != ("completed", "success"):
             return None
-        if (
+        expected_path = ".github/workflows/" + self.workflow
+        if run["path"] not in {
+            expected_path,
+            f"{expected_path}@{self.branch}",
+            f"{expected_path}@refs/heads/{self.branch}",
+        } or (
             run["head_sha"],
             run["head_branch"],
             run["event"],
             run["head_repository"]["full_name"],
-            run["path"],
-        ) != (sha, self.branch, "push", self.repository, ".github/workflows/" + self.workflow):
+        ) != (sha, self.branch, "push", self.repository):
             raise ValueError("workflow provenance mismatch")
         name = self.prefix + "-" + sha
         results = self.json(

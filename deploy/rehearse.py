@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import shutil
 import tempfile
 from contextlib import closing
 from pathlib import Path
@@ -40,8 +41,12 @@ def rehearse(snapshot, sandbox):
         candidate = work / "candidate.sqlite3"
         source = snapshot / "zarya.sqlite3"
         copy_database(source, live, existing=False)
+        for name in manifest["files"].keys() - {"zarya.sqlite3"}:
+            target = work / relative(name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(snapshot / name, target)
         before = logical_state(live)
-        prepare(snapshot, candidate, snapshot)
+        prepare(snapshot, candidate, work)
         copy_database(candidate, live, existing=True)
         after = logical_state(live)
         if after != logical_state(candidate):

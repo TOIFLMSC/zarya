@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -183,8 +184,10 @@ def finish(state):
         (ROOT / "runs" / state["run"] / "candidate.sqlite3").unlink(missing_ok=True)
         save(state, "idle", rejected=None)
         return
-    save(state, "blocked")
-    systemctl("stop")
+    try:
+        save(state, "blocked")
+    finally:
+        systemctl("stop")
     raise RuntimeError("health failed after admission; current database retained")
 
 
@@ -225,6 +228,18 @@ def deploy(state, target, run):
     finish(state)
 
 
+def in_flight():
+    uri = (DATA / "zarya.sqlite3").as_uri() + "?mode=ro"
+    with contextlib.closing(sqlite3.connect(uri, uri=True)) as db:
+        return bool(
+            db.execute(
+                "SELECT EXISTS(SELECT 1 FROM model_calls WHERE state='started') "
+                "OR EXISTS(SELECT 1 FROM outbox WHERE state='sending') "
+                "OR EXISTS(SELECT 1 FROM jobs WHERE state='running')"
+            ).fetchone()[0]
+        )
+
+
 def cycle():
     state = load()
     phase = state["phase"]
@@ -257,6 +272,8 @@ def cycle():
     artifact = github.artifact(sha)
     if artifact is None:
         return
+    if in_flight():
+        return
     if (DATA / "restore-quarantine.json").exists():
         raise RuntimeError("quarantined installation")
     size = sum(p.stat().st_size for p in DATA.rglob("*") if p.is_file() and not p.is_symlink())
@@ -272,7 +289,7 @@ def cycle():
         raise RuntimeError("insufficient disk space for release and backup")
     target = stage(github, sha, artifact)
     try:
-        ready = github.tip() == sha and active() and space_available()
+        ready = github.tip() == sha and active() and space_available() and not in_flight()
     except Exception:
         shutil.rmtree(ROOT / "releases" / target)
         raise
