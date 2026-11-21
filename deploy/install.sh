@@ -11,7 +11,8 @@ test "$(stat -c '%u:%a' /etc/zarya-cd/github-token)" = 0:600
 test "$(stat -c '%u:%a' /etc/zarya-cd/age-recipient)" = 0:600
 test "$(stat -c '%U:%a' /var/lib/zarya-backup)" = zarya-svc:700
 test "$(stat -c '%U:%a' /var/lib/zarya-backup/rclone.conf)" = zarya-svc:600
-age -R /etc/zarya-cd/age-recipient </dev/null >/dev/null
+recipient=$(python3 -c "import pathlib,re; k=pathlib.Path('/etc/zarya-cd/age-recipient').read_text().strip(); assert re.fullmatch(r'age1[023456789acdefghjklmnpqrstuvwxyz]{58}', k); print(k)")
+age -r "$recipient" </dev/null >/dev/null
 rclone help backend yandex | grep -q -- '--yandex-app-folder'
 python3 -c "import configparser; c=configparser.RawConfigParser(); c.read('/var/lib/zarya-backup/rclone.conf'); r=c['zarya-disk']; assert r['type']=='yandex' and r.getboolean('app_folder') and r['client_id'] and r['token']"
 for u in zarya-cd.timer zarya-backup.timer zarya-cd.service zarya-backup.service; do

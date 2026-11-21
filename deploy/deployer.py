@@ -50,11 +50,11 @@ def load():
 
 
 @contextlib.contextmanager
-def lock(path):
+def lock(path, *, wait=False):
     import fcntl
 
     with path.open("a") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(stream, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
 
 
@@ -212,7 +212,8 @@ def deploy(state, target, run):
         save(state, "preupload")
         disk_backup.publish(run / "backup", run, "predeploy", disk_backup.new_id())
         save(state, "stopping", disk_retry_at=0)
-        (run / "snapshot.age").unlink(missing_ok=True)
+        for blob in run.glob("snapshot-*.age"):
+            blob.unlink()
         with lock(DATA / "instance.lock"):
             python(
                 target,
@@ -291,7 +292,7 @@ def cycle():
         return
     if in_flight():
         return
-    disk_backup.listing("predeploy")
+    disk_backup.prune("predeploy", datetime.now(UTC))
     if (DATA / "restore-quarantine.json").exists():
         raise RuntimeError("quarantined installation")
     size = sum(p.stat().st_size for p in DATA.rglob("*") if p.is_file() and not p.is_symlink())
@@ -327,10 +328,11 @@ def recover_night(state):
         systemctl("start")
         if not healthy(state["live"]):
             raise RuntimeError("service needs attention after nightly snapshot")
-    save(state, "idle", last_night=directory.name[:8] if done else state.get("last_night"))
-    if not done:
+    if not done and directory.exists():
         # Only scratch from this interrupted capture. Committed snapshots stay queued.
         shutil.rmtree(directory, ignore_errors=False)
+        sync(directory.parent)
+    save(state, "idle", last_night=directory.name[:8] if done else state.get("last_night"))
 
 
 def nightly():
@@ -365,27 +367,39 @@ def nightly():
         else:
             print("Low disk space; keeping pending snapshots and deferring capture", flush=True)
     # A completed local capture survives process/host restart and failed uploads.
+    # Reclaim expired objects even if the next upload would hit the quota.
+    for kind in ("nightly", "predeploy"):
+        disk_backup.prune(kind, now)
+    damaged = []
     for folder in sorted(queue.iterdir()):
         if re.fullmatch(r"sent-\d{8}T\d{6}Z-[a-f0-9]{32}", folder.name):
             shutil.rmtree(folder)
             continue
         if not re.fullmatch(r"\d{8}T\d{6}Z-[a-f0-9]{32}", folder.name):
             continue
+        if not any(folder.iterdir()):
+            # mkdir succeeded but night-capture was never published.
+            folder.rmdir()
+            continue
         if (folder / "backup/manifest.json").is_file():
-            disk_backup.publish(folder / "backup", folder, "nightly", folder.name)
+            try:
+                disk_backup.publish(folder / "backup", folder, "nightly", folder.name)
+            except ValueError:
+                damaged.append(folder.name)
+                continue
             delivered = folder.with_name("sent-" + folder.name)
             folder.rename(delivered)
             sync(queue)
             shutil.rmtree(delivered)
-    for kind in ("nightly", "predeploy"):
-        disk_backup.prune(kind, now)
+    if damaged:
+        raise RuntimeError(f"backup integrity failure; retained snapshots: {', '.join(damaged)}")
 
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["launch"]:
         launch()
     elif sys.argv[1:] in (["poll"], ["nightly"]):
-        with lock(ROOT / "deploy.lock"):
+        with lock(ROOT / "deploy.lock", wait=True):
             if sys.argv[1] == "poll":
                 cycle()
             else:

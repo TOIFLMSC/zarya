@@ -124,21 +124,34 @@ def publish(snapshot, spool, kind, stamp):
     if not re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{32}", stamp):
         raise ValueError("invalid snapshot identifier")
     recipient = (Path(os.environ["CREDENTIALS_DIRECTORY"]) / "age-recipient").read_text().strip()
-    blob = spool / "snapshot.age"
-    proof = spool / "ciphertext.sha256"
-    if not blob.exists() or not proof.exists():
-        seal(snapshot, blob, recipient)
-        proof.write_text(sha256(blob), encoding="ascii")
-    digest = sha256(blob)
-    if proof.read_text(encoding="ascii") != digest:
-        raise ValueError("local ciphertext checksum mismatch")
+    # A single rename commits both the ciphertext and its digest. A crash before
+    # that rename leaves only scratch, so retry can seal the verified snapshot again.
+    blobs = list(spool.glob("snapshot-*.age"))
+    if len(blobs) == 1 and blobs[0].name == f"snapshot-{sha256(blobs[0])}.age":
+        blob = blobs[0]
+        digest = blob.stem.removeprefix("snapshot-")
+    else:
+        scratch = spool / "snapshot.age"
+        seal(snapshot, scratch, recipient)
+        digest = sha256(scratch)
+        blob = spool / f"snapshot-{digest}.age"
+        scratch.replace(blob)
+        for old in blobs:
+            if old != blob:
+                old.unlink()
+        if os.name == "posix":
+            fd = os.open(spool, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
     name = f"{stamp}-{digest}.tar.gz.age"
     folder, entries = listing(kind)
     final = f"{folder}/{name}"
     # Only finalized, verified objects count towards retention.
     incoming = f"{folder}/upload-{stamp}.partial"
     if name not in entries:
-        rclone("copyto", str(blob), incoming)
+        rclone("copyto", str(blob), incoming, "--ignore-times")
         verify_remote(incoming, digest)
         rclone("moveto", incoming, final, "--immutable")
     verify_remote(final, digest)
@@ -160,5 +173,10 @@ def prune(kind, now):
         expired = [n for n in owned[:-1] if n[:16] < cutoff]
     else:
         expired = owned[:-10]
+        # Called under deploy.lock before a transfer or from idle. A pre-deploy
+        # attempt never resumes an old upload after the live service restarts.
+        expired.extend(
+            n for n in entries if re.fullmatch(r"upload-\d{8}T\d{6}Z-[0-9a-f]{32}\.partial", n)
+        )
     for name in expired:
         rclone("deletefile", f"{folder}/{name}", "--yandex-hard-delete")
