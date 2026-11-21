@@ -175,23 +175,25 @@ def backup(source: Path, target: Path) -> dict[str, Any]:
 def restore(source: Path, target: Path) -> dict[str, Any]:
     source, target = destination(source, target)
     manifest = verify(source)
-    stage = Path(tempfile.mkdtemp(prefix=".zarya-restore-", dir=target.parent))
-    # Publish only a verified, quarantined installation. No runtime/keys are started.
-    for name in manifest["files"]:
-        (stage / name).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source / name, stage / name)
-    (stage / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    verify(stage)
-    (stage / MARKER).write_text(
-        json.dumps(
-            {
-                "restored_at": datetime.now(UTC).isoformat(),
-                "source_created_at": manifest["created_at"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    stage.rename(target)
+    with tempfile.TemporaryDirectory(prefix=".zarya-restore-", dir=target.parent) as temp:
+        stage = Path(temp) / "snapshot"
+        stage.mkdir(mode=0o700)
+        # Publish only a verified, quarantined installation. No runtime/keys are started.
+        for name in manifest["files"]:
+            (stage / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source / name, stage / name)
+        (stage / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        verify(stage)
+        (stage / MARKER).write_text(
+            json.dumps(
+                {
+                    "restored_at": datetime.now(UTC).isoformat(),
+                    "source_created_at": manifest["created_at"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage.rename(target)
     return manifest
 
 

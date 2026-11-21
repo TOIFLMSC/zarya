@@ -98,6 +98,66 @@ def test_busy_model_call_defers_cutover(modules, tmp_path, monkeypatch):
     assert cd.in_flight()
 
 
+def test_preupload_failures_do_not_accumulate_local_snapshots(modules, tmp_path, monkeypatch):
+    cd, _, _ = modules
+    monkeypatch.setattr(cd, "ROOT", tmp_path)
+    monkeypatch.setattr(cd, "sync", lambda _: None)
+    monkeypatch.setattr(cd.subprocess, "run", lambda *_, **__: None)
+    running = True
+
+    def control(action):
+        nonlocal running
+        running = action == "start"
+
+    def capture(_release, *args):
+        assert not running
+        snapshot = args[-1]
+        snapshot.mkdir()
+        (snapshot / "zarya.sqlite3").write_bytes(b"fixture")
+
+    def deny_write(_snapshot, spool, *_args):
+        (spool / "snapshot-fixture.age").write_bytes(b"ciphertext fixture")
+        raise RuntimeError("storage quota")
+
+    monkeypatch.setattr(cd, "systemctl", control)
+    monkeypatch.setattr(cd, "active", lambda: running)
+    monkeypatch.setattr(cd, "healthy", lambda _: running)
+    monkeypatch.setattr(cd, "python", capture)
+    monkeypatch.setattr(cd.disk_backup, "publish", deny_write)
+    state = {}
+    cd.save(state, "idle", live=None)
+    for attempt in range(3):
+        target = "a" * 40 + f"-{attempt}"
+        run = tmp_path / "runs" / target
+        run.mkdir(parents=True)
+        with pytest.raises(RuntimeError, match="storage quota"):
+            cd.deploy(state, target, run)
+        state = cd.load()
+        assert running and state["phase"] == "idle" and state["disk_retry_at"] > 0
+    assert not list((tmp_path / "runs").iterdir())
+
+
+def test_preupload_cleanup_resumes_after_interruption(modules, tmp_path, monkeypatch):
+    cd, _, _ = modules
+    monkeypatch.setattr(cd, "ROOT", tmp_path)
+    monkeypatch.setattr(cd, "sync", lambda _: None)
+    monkeypatch.setattr(cd, "systemctl", lambda action: None)
+    run = tmp_path / "runs" / ("a" * 40 + "-test")
+    run.mkdir(parents=True)
+    db = run / "fixture.sqlite3"
+    db.write_bytes(b"fixture")
+    cd.save({}, "preupload", live=None, old=None, target="a" * 40, run=run.name)
+    monkeypatch.setattr(cd, "healthy", lambda _: False)
+    with pytest.raises(RuntimeError, match="needs operator attention"):
+        cd.cycle()
+    assert cd.load()["phase"] == "returning"
+    assert db.is_file()
+    monkeypatch.setattr(cd, "healthy", lambda _: True)
+    cd.cycle()
+    assert cd.load()["phase"] == "idle"
+    assert not run.exists()
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="controller uses Linux flock/fsync/systemd")
 @pytest.mark.parametrize("fault", ["none", "cloud", "prepare", "interrupt", "post-admission"])
 def test_deploy_recovery_boundaries(modules, tmp_path, monkeypatch, fault):

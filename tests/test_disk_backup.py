@@ -1,7 +1,9 @@
 import importlib
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,6 +52,80 @@ def test_prune_only_verified_names_in_class(transport, monkeypatch):
     calls.clear()
     transport.prune("nightly", now)
     assert calls == [("deletefile", "nightly/" + n, "--yandex-hard-delete") for n in names[:-1]]
+
+
+@pytest.mark.parametrize("command", ["copyto", "hashsum", "moveto"])
+def test_transfer_can_exceed_three_minutes_with_progress(transport, monkeypatch, command):
+    def run(args, *, timeout=None, **_kwargs):
+        # 500 MiB at 20 Mbit/s, with data flowing continuously.
+        assert args[args.index("--timeout") + 1] == "25s"
+        if timeout is not None and timeout < 210:
+            raise transport.subprocess.TimeoutExpired(args, timeout)
+        return SimpleNamespace(returncode=0, stdout="completed", stderr="")
+
+    monkeypatch.setattr(transport.subprocess, "run", run)
+    assert transport.rclone(command, "fixture") == "completed"
+
+
+@pytest.mark.parametrize("damage", ["missing fields", "deep JSON", "UTF-8 BOM", "extra evidence"])
+def test_damaged_old_manifest_does_not_block_newer_snapshot(
+    transport, tmp_path, monkeypatch, damage
+):
+    cd = importlib.import_module("deployer")
+    monkeypatch.setattr(cd, "ROOT", tmp_path)
+    monkeypatch.setattr(cd, "DATA", tmp_path / "data")
+    monkeypatch.setattr(cd, "sync", lambda _: None)
+    monkeypatch.setattr(cd, "active", lambda: True)
+    monkeypatch.setattr(cd, "in_flight", lambda: True)
+    monkeypatch.setattr(transport, "prune", lambda *_: None)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    (tmp_path / "age-recipient").write_text("age1" + "q" * 58)
+    queue = tmp_path / "nightly"
+    old = queue / ("20261120T060000Z-" + "a" * 32)
+    new = queue / ("20261121T060000Z-" + "b" * 32)
+    for path in (old, new):
+        (path / "backup").mkdir(parents=True)
+    payload = b"fixture"
+    (old / "backup/zarya.sqlite3").write_bytes(payload)
+    evidence = {
+        "size": len(payload),
+        "sha256": transport.sha256(old / "backup/zarya.sqlite3"),
+    }
+    if damage == "extra evidence":
+        evidence["extra"] = "unexpected"
+    manifest = json.dumps(
+        {"format": 1, "created_at": "2026-11-20T06:00:00Z", "files": {"zarya.sqlite3": evidence}}
+    )
+    if damage == "missing fields":
+        manifest = "{}"
+    elif damage == "deep JSON":
+        manifest = "[[[0]]]"
+
+        def reject_depth(text):
+            assert text == manifest
+            # The actual depth at which json.loads fails depends on CPython.
+            raise RecursionError("maximum recursion depth")
+
+        monkeypatch.setattr(transport, "json", SimpleNamespace(loads=reject_depth))
+    elif damage == "UTF-8 BOM":
+        manifest = "\ufeff" + manifest
+    (old / "backup/manifest.json").write_text(manifest, encoding="utf-8")
+    (new / "backup/manifest.json").write_text('{"format":1}')
+    publish = transport.publish
+    delivered = []
+
+    def deliver(snapshot, spool, kind, stamp):
+        if spool == old:
+            publish(snapshot, spool, kind, stamp)
+        delivered.append(stamp)
+
+    monkeypatch.setattr(transport, "publish", deliver)
+    cd.save({}, "idle", live=None)
+    with pytest.raises(RuntimeError, match="backup integrity failure"):
+        cd.nightly()
+    assert delivered == [new.name]
+    assert old.is_dir()
+    assert not new.exists()
 
 
 @pytest.mark.parametrize("interrupted", [False, True])

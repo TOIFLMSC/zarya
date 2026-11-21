@@ -42,12 +42,44 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def snapshot_files(snapshot):
+    path = snapshot / "manifest.json"
+    if path.resolve() != path.absolute() or not path.is_file():
+        raise ValueError("invalid backup manifest path")
+    if path.stat().st_size > 8_000_000:
+        raise ValueError("backup manifest too large")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeError, RecursionError) as error:
+        raise ValueError("invalid backup manifest") from error
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(files, dict)
+        or manifest.get("format") != 1
+        or not isinstance(manifest.get("created_at"), str)
+        or "zarya.sqlite3" not in files
+        or len({name.casefold() for name in files}) != len(files)
+    ):
+        raise ValueError("invalid backup manifest")
+    for name, evidence in files.items():
+        if (
+            name == "manifest.json"
+            or not member(name)
+            or not isinstance(evidence, dict)
+            or evidence.keys() != {"size", "sha256"}
+            or type(evidence.get("size")) is not int
+            or evidence["size"] < 0
+            or not isinstance(evidence.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"])
+        ):
+            raise ValueError("invalid backup manifest member")
+    return files
+
+
 def seal(snapshot, output, recipient):
     if not re.fullmatch(r"age1[023456789acdefghjklmnpqrstuvwxyz]{58}", recipient):
         raise ValueError("expected one public X25519 age recipient")
-    manifest = json.loads((snapshot / "manifest.json").read_bytes())
-    if manifest["format"] != 1 or "zarya.sqlite3" not in manifest["files"]:
-        raise ValueError("invalid backup manifest")
+    files = snapshot_files(snapshot)
     partial = output.with_suffix(".partial")
     partial.unlink(missing_ok=True)
     try:
@@ -56,17 +88,13 @@ def seal(snapshot, output, recipient):
                 ["age", "-r", recipient], stdin=subprocess.PIPE, stdout=dest
             ) as proc:
                 with proc.stdin as pipe, tarfile.open(fileobj=pipe, mode="w|gz") as archive:
-                    for name in ["manifest.json", *manifest["files"]]:
+                    for name in ["manifest.json", *files]:
                         path = snapshot / name
-                        if (
-                            not member(name)
-                            or path.resolve() != path.absolute()
-                            or not path.is_file()
-                        ):
+                        if path.resolve() != path.absolute() or not path.is_file():
                             raise ValueError("unexpected backup member")
-                        if (
-                            name != "manifest.json"
-                            and sha256(path) != manifest["files"][name]["sha256"]
+                        if name != "manifest.json" and (
+                            path.stat().st_size != files[name]["size"]
+                            or sha256(path) != files[name]["sha256"]
                         ):
                             raise ValueError("snapshot checksum mismatch")
                         archive.add(path, arcname=name, recursive=False)
@@ -97,7 +125,8 @@ def rclone(*args):
         ],
         capture_output=True,
         text=True,
-        timeout=180,
+        # rclone bounds connection and I/O stalls. systemd bounds the whole job.
+        timeout=None if args[0] in {"copyto", "hashsum", "moveto"} else 180,
     )
     if result.returncode:
         error = result.stderr.lower()

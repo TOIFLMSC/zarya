@@ -186,6 +186,12 @@ def rollback(state):
     systemctl("start")
     if not healthy(state["live"]):
         raise RuntimeError("previous service needs operator attention")
+    if state.get("disk_retry_at", 0):
+        # Pre-upload failure precedes any change to the live database. Cleanup
+        # remains in returning so an interruption can retry it safely.
+        if run.exists():
+            shutil.rmtree(run)
+        sync(run.parent)
     save(state, "idle")
 
 
