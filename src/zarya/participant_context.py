@@ -39,6 +39,41 @@ ROWS = (
 )
 
 
+async def valid_participant_sources(
+    conn: aiosqlite.Connection,
+    bot: str,
+    chat: str,
+    grant: int,
+    sources: list[dict[str, Any]],
+    cutoff: float,
+    *,
+    sender: str | None = None,
+) -> bool:
+    expected = {
+        (source["message_id"], source.get("event_id")): source.get("received_at")
+        for source in sources
+    }
+    if len(expected) != len(sources):
+        return False
+    if not expected:
+        return True
+    condition = ROWS + (
+        "AND (p.message_id,p.event_id) IN ("
+        "SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?)) "
+    )
+    args: tuple[Any, ...] = (bot, chat, grant, cutoff, cutoff, json.dumps(list(expected)))
+    if sender is not None:
+        condition += "AND p.sender_id=?"
+        args += (sender,)
+    async with conn.execute(
+        "SELECT p.message_id,p.event_id,p.received_at " + condition, args
+    ) as cursor:
+        current = {(mid, event): received for mid, event, received in await cursor.fetchall()}
+    # Older SQLite JSON decoders can round a fractional timestamp differently
+    # from Python's json.loads. Compare the original REAL values exactly here.
+    return current == expected
+
+
 def human(message: dict[str, Any]) -> bool:
     sender = message.get("from") or {}
     return bool(
