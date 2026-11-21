@@ -1,0 +1,31 @@
+name: Pull CD template
+on:
+  pull_request:
+    paths:
+      - 'templates/pull-cd/**'
+      - '.github/workflows/pull-cd-template.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'templates/pull-cd/**'
+      - '.github/workflows/pull-cd-template.yml'
+permissions:
+  contents: read
+jobs:
+  drill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install systemd test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends age rclone polkitd
+      - name: Scaffold a clean project and exercise the installed kit
+        run: |
+          target="$RUNNER_TEMP/pull-cd-project"
+          mkdir "$target"
+          python3 templates/pull-cd/scaffold.py "$target" --example-workflow
+          sudo env PULL_CD_DRILL=1 /usr/bin/python3 "$target/deploy/pull-cd/tests/systemd_drill.py"
