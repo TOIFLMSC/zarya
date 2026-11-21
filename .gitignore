@@ -32,6 +32,7 @@ test-results/
 !/docs/privacy.md
 !/docs/operations.md
 !/docs/pull-deployment.md
+!/docs/disk-backup.md
 !/docs/codegraph.md
 !/docs/memory-retrieval.md
 
@@ -43,6 +44,9 @@ test-results/
 *.db-*
 *.log
 *.pem
+*.age
+rclone.conf
+age-identity.txt
 *.key
 *.zip
 *.tar

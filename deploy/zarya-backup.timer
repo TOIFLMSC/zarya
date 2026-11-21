@@ -1,0 +1,10 @@
+[Unit]
+Description=Check nightly Zarya backup and retry outstanding uploads
+
+[Timer]
+OnCalendar=*-*-* *:17:00 UTC
+Persistent=true
+Unit=zarya-backup.service
+
+[Install]
+WantedBy=timers.target

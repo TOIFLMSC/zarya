@@ -11,10 +11,11 @@ ExecStart=/usr/bin/python3 /usr/local/lib/zarya-cd/deployer.py poll
 Environment=CD_REPOSITORY=TOIFLMSC/zarya CD_BRANCH=main CD_WORKFLOW=ci.yml CD_ARTIFACT_PREFIX=zarya
 Environment=PYTHONDONTWRITEBYTECODE=1
 LoadCredential=github-token:/etc/zarya-cd/github-token
+LoadCredential=age-recipient:/etc/zarya-cd/age-recipient
 TimeoutStartSec=30min
 UMask=0077
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
-ReadWritePaths=/var/lib/zarya /var/lib/zarya-cd
+ReadWritePaths=/var/lib/zarya /var/lib/zarya-cd /var/lib/zarya-backup
