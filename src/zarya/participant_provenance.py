@@ -8,6 +8,7 @@ from typing import Any
 import aiosqlite
 
 from zarya.memory_read import MemoryRead
+from zarya.participant_context import RETENTION, valid_participant_sources
 from zarya.source_material import one
 
 
@@ -108,22 +109,10 @@ async def valid(
                 if r["id"] in summaries and summaries[r["id"]] != r["hash"]:
                     return False
                 summaries[r["id"]] = r["hash"]
-        cutoff = time.time() - 90 * 86400
-        count = await one(
-            conn,
-            "SELECT COUNT(*) FROM json_each(?) ref JOIN participant_messages p "
-            "ON p.message_id=json_extract(ref.value,'$.message_id') "
-            "AND p.event_id=json_extract(ref.value,'$.event_id') "
-            "AND p.received_at=json_extract(ref.value,'$.received_at') "
-            "JOIN research_messages m ON m.bot_id=p.bot_id AND m.chat_id=p.chat_id "
-            "AND m.message_id=p.message_id AND m.event_id=p.event_id "
-            "AND m.access_version=p.access_version JOIN events e ON e.id=p.event_id "
-            "WHERE p.bot_id=? AND p.chat_id=? AND p.access_version=? AND p.received_at>? "
-            "AND e.bot_id=p.bot_id AND e.chat_id=p.chat_id AND e.disposition='accepted' "
-            "AND e.payload!='{}' AND CAST(strftime('%s',e.received_at) AS REAL)>?",
-            (json.dumps(list(humans.values())), bot, chat, grant, cutoff, cutoff),
-        )
-        if count[0] != len(humans):
+        cutoff = time.time() - RETENTION
+        if not await valid_participant_sources(
+            conn, bot, chat, grant, list(humans.values()), cutoff
+        ):
             return False
         async with conn.execute(
             "SELECT id,result,manifest,media_refs FROM participant_summary_blocks "

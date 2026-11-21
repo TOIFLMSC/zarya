@@ -12,13 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from zarya.models import Settings
 from zarya.openai_adapter import ModelResult, estimate_cost, pricing_profile
+from zarya.participant_context import RETENTION, valid_participant_sources
 from zarya.source_material import one
 from zarya.telegram_store import stamp
 
 BLOCK_SIZE = 5
 FRESH = 2
 QUEUE_LIMIT = 32
-RETENTION = 90 * 86400
 
 
 class Summary(BaseModel):
@@ -36,36 +36,17 @@ async def valid_sources(c: aiosqlite.Connection, block: dict[str, Any]) -> bool:
     refs = block["manifest"]
     if len(refs) != BLOCK_SIZE or len({r["message_id"] for r in refs}) != BLOCK_SIZE:
         return False
-    cutoff = time.time() - RETENTION
-    row = await one(
-        c,
-        "SELECT COUNT(*) FROM json_each(?) ref JOIN participant_messages p "
-        "ON p.message_id=json_extract(ref.value,'$.message_id') "
-        "AND p.event_id=json_extract(ref.value,'$.event_id') "
-        "AND p.received_at=json_extract(ref.value,'$.received_at') "
-        "JOIN research_messages m ON m.bot_id=p.bot_id AND m.chat_id=p.chat_id "
-        "AND m.message_id=p.message_id AND m.event_id=p.event_id "
-        "AND m.access_version=p.access_version JOIN events e ON e.id=p.event_id "
-        "JOIN telegram_access a ON a.bot_id=p.bot_id AND a.subject_id=p.chat_id "
-        "AND a.version=p.access_version AND a.state='approved' "
-        "AND a.member_state NOT IN ('left','kicked','migrated') "
-        "WHERE p.bot_id=? AND p.chat_id=? AND p.access_version=? AND p.sender_id=? "
-        "AND p.received_at>? AND e.bot_id=p.bot_id AND e.chat_id=p.chat_id "
-        "AND e.disposition='accepted' AND e.payload!='{}' "
-        "AND CAST(strftime('%s',e.received_at) AS REAL)>?",
-        (
-            json.dumps(refs),
-            block["bot_id"],
-            block["chat_id"],
-            block["access_version"],
-            block["sender_id"],
-            cutoff,
-            cutoff,
-        ),
-    )
     from zarya.media_logic import refs_valid
 
-    return row[0] == BLOCK_SIZE and await refs_valid(c, block["media_refs"])
+    return await valid_participant_sources(
+        c,
+        block["bot_id"],
+        block["chat_id"],
+        block["access_version"],
+        refs,
+        time.time() - RETENTION,
+        sender=block["sender_id"],
+    ) and await refs_valid(c, block["media_refs"])
 
 
 async def blocks(

@@ -1,7 +1,10 @@
 import asyncio
 import hashlib
 import json
+import math
+import sqlite3
 import time
+from contextlib import closing
 
 import pytest
 from test_participant_context import group_ready, human_event
@@ -133,14 +136,38 @@ async def test_sliding_boundaries_fixed_memberships_and_settings_do_not_resummar
         assert len(engine.adapter.calls) == calls
 
 
+@pytest.fixture
+def json_extract_with_legacy_rounding():
+    with closing(sqlite3.connect(":memory:", check_same_thread=False)) as sqlite:
+
+        def extract(raw, path):
+            value = sqlite.execute("SELECT json_extract(?,?)", (raw, path)).fetchone()[0]
+            if path == "$.received_at" and json.loads(raw).get("message_id") == 3:
+                # SQLite 3.45.1 on Linux can round this JSON REAL one ULP higher.
+                return math.nextafter(value, math.inf)
+            return value
+
+        yield extract
+
+
 @pytest.mark.parametrize(
-    "mode,state", [("unknown", "unknown"), ("foreign", "error"), ("number", "error")]
+    "mode,state,round_timestamp",
+    [
+        pytest.param("unknown", "unknown", False, id="unknown-unknown"),
+        pytest.param("foreign", "error", False, id="foreign-error"),
+        pytest.param("number", "error", False, id="number-error"),
+        pytest.param("number", "error", True, id="number-legacy-sqlite"),
+    ],
 )
 async def test_failed_paid_blocks_fall_back_raw_and_never_automatically_retry(
-    tmp_path, mode, state
+    tmp_path, mode, state, round_timestamp, json_extract_with_legacy_rounding
 ):
     async with store_at(tmp_path) as store:
-        _, question = await prepare(store)
+        grant, question = await prepare(store)
+        if round_timestamp:
+            await store.db.writer.create_function(
+                "json_extract", 2, json_extract_with_legacy_rounding, deterministic=True
+            )
         await choose(store, question)
         engine = SummaryEngine(store, Summarizer(mode))
         await drain(engine)
@@ -154,6 +181,16 @@ async def test_failed_paid_blocks_fall_back_raw_and_never_automatically_retry(
         await drain(engine)
         assert len(engine.adapter.calls) == 3
         assert (await store.db.one("SELECT COUNT(*) FROM model_calls"))[0] == 3
+        if round_timestamp:
+            proof = dict(context_refs=refs, retrieval_chat_id="-100", source_access_version=grant)
+            assert await valid_snapshot(store.db.writer, "999", proof)
+            original = next(r["received_at"] for r in refs["humans"] if r["message_id"] == 3)
+            async with store.db.transaction() as c:
+                await c.execute(
+                    "UPDATE participant_messages SET received_at=? WHERE message_id=3",
+                    (math.nextafter(original, math.inf),),
+                )
+            assert not await valid_snapshot(store.db.writer, "999", proof)
 
 
 async def test_restart_started_unknown_and_disable_use_raw(tmp_path):
