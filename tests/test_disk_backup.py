@@ -99,8 +99,14 @@ def test_damaged_old_manifest_does_not_block_newer_snapshot(
     if damage == "missing fields":
         manifest = "{}"
     elif damage == "deep JSON":
-        depth = sys.getrecursionlimit() * 2
-        manifest = "[" * depth + "0" + "]" * depth
+        manifest = "[[[0]]]"
+
+        def reject_depth(text):
+            assert text == manifest
+            # The actual depth at which json.loads fails depends on CPython.
+            raise RecursionError("maximum recursion depth")
+
+        monkeypatch.setattr(transport, "json", SimpleNamespace(loads=reject_depth))
     elif damage == "UTF-8 BOM":
         manifest = "\ufeff" + manifest
     (old / "backup/manifest.json").write_text(manifest, encoding="utf-8")
