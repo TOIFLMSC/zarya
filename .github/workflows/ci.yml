@@ -2,7 +2,6 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
 
@@ -42,7 +41,8 @@ jobs:
       - name: Check publication, Python and frontend
         run: |
           uv run --no-sync python scripts/check-publication.py
-          uv run --no-sync ruff check src tests scripts
+          uv run --no-sync ruff check src tests scripts deploy
+          sh -n deploy/install.sh
           uv run --no-sync mypy
           uv run --no-sync mypy --platform win32
           pnpm --dir web run build
@@ -62,6 +62,10 @@ jobs:
           cd dist/release
           find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
           sha256sum --check SHA256SUMS
+      - name: Exercise installer, systemd timer and promotion on this disposable runner
+        env:
+          HOST_TYPE: ${{ runner.environment }}
+        run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$HOST_TYPE" sh deploy/check-systemd.sh
       - name: Store the main release bundle
         if: github.event_name == 'push'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

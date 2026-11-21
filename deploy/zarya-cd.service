@@ -1,0 +1,20 @@
+[Unit]
+Description=Poll GitHub CI and install a verified Zarya release
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=zarya-svc
+Group=zarya-svc
+ExecStart=/usr/bin/python3 /usr/local/lib/zarya-cd/deployer.py poll
+Environment=CD_REPOSITORY=TOIFLMSC/zarya CD_BRANCH=main CD_WORKFLOW=ci.yml CD_ARTIFACT_PREFIX=zarya
+Environment=PYTHONDONTWRITEBYTECODE=1
+LoadCredential=github-token:/etc/zarya-cd/github-token
+TimeoutStartSec=30min
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/zarya /var/lib/zarya-cd
