@@ -18,9 +18,11 @@ def test_publication_blocks_runtime_and_unexpected_files():
         "web/src/prompts.json",
         ".env",
         "tests/secret.txt",
+        ".github/workflows/unknown.yml",
     ):
         assert publication.findings(path, b"innocent", set())
     assert not publication.findings("src/zarya/prompts.example.json", b"{}", set())
+    assert not publication.findings(".github/workflows/ci.yml", b"name: CI", set())
     assert not publication.findings("docs/codegraph.md", b"Public CLI instructions", set())
     assert not publication.findings(
         "docs/memory-retrieval.md", b"Public retrieval instructions", set()

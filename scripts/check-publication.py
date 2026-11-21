@@ -16,6 +16,7 @@ ROOT_FILES = {
     "pyproject.toml",
     "uv.lock",
     "start.ps1",
+    ".github/workflows/ci.yml",
 }
 DOCS = {
     "setup.md",
@@ -52,7 +53,7 @@ def allowed(path: str) -> bool:
     if p.parent.as_posix() == "docs":
         return p.name in DOCS
     if p.parent.as_posix() == "scripts":
-        return p.name in {"setup-media.ps1", "check-publication.py"}
+        return p.name in {"setup-media.ps1", "check-publication.py", "check-upgrade.py"}
     if p.parts[:2] == ("src", "zarya"):
         return p.suffix in {".py", ".sql"} or path == "src/zarya/prompts.example.json"
     if p.parts[0] == "tests":
