@@ -55,11 +55,17 @@ jobs:
       - name: Build and verify the release bundle
         run: |
           mkdir -p dist/release
-          uv build --wheel --out-dir dist/release
+          uv build --wheel --out-dir "$RUNNER_TEMP/zarya-wheel"
+          cp "$RUNNER_TEMP/zarya-wheel/"*.whl dist/release/
           uv export --locked --no-dev --no-emit-project --format requirements.txt -o dist/release/requirements.txt
           cp -r web/dist dist/release/web
           echo "$GITHUB_SHA" > dist/release/REVISION
           cd dist/release
+          # upload-artifact skips hidden paths. Every file in the manifest must ship.
+          if [[ -n "$(find . -mindepth 1 -name '.*' -print -quit)" ]]; then
+            echo 'Release contains a hidden path that upload-artifact would omit' >&2
+            exit 1
+          fi
           find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
           sha256sum --check SHA256SUMS
       - name: Exercise installer, systemd timer and promotion on this disposable runner
