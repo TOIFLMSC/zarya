@@ -1,5 +1,9 @@
+import errno
+import importlib
 import json
+import shutil
 import sqlite3
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -70,6 +74,43 @@ async def test_backup_wal_assets_verify_restore_quarantine(tmp_path):
                 openai_api_key="fake",
             )
         )
+
+
+async def test_disk_restore_cleans_plaintext_when_final_copy_runs_out_of_space(
+    tmp_path, monkeypatch
+):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "deploy"))
+    recovery = importlib.import_module("restore_disk")
+    source = await source_at(tmp_path / "data")
+    snapshot = tmp_path / "snapshot"
+    backup(source, snapshot)
+    # Stand in for authenticated age output. Keep the actual tar extraction and
+    # real restore, including the SQLite checks and final copy.
+    archive = tmp_path / "encrypted-fixture.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for name in ["manifest.json", *verify(snapshot)["files"]]:
+            tar.add(snapshot / name, arcname=name, recursive=False)
+
+    def decrypt(args, *, check):
+        assert check
+        args[-2].write_bytes(args[-1].read_bytes())
+
+    monkeypatch.setattr(recovery.subprocess, "run", decrypt)
+    target = tmp_path / "restored"
+    original_copy = shutil.copyfile
+
+    def disk_full(src, dest):
+        dest.write_bytes(b"partially copied private data")
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(shutil, "copyfile", disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        recovery.recover(archive, tmp_path / "identity", target)
+    assert set(tmp_path.iterdir()) == {source, snapshot, archive}
+    monkeypatch.setattr(shutil, "copyfile", original_copy)
+    recovery.recover(archive, tmp_path / "identity", target)
+    assert (target / MARKER).is_file()
+    assert verify(target) == verify(snapshot)
 
 
 async def test_backup_refuses_running_existing_nested_missing_and_tampered(tmp_path):
