@@ -17,6 +17,16 @@ ROOT_FILES = {
     "uv.lock",
     "start.ps1",
     ".github/workflows/ci.yml",
+    "deploy/install.sh",
+    "deploy/check-systemd.sh",
+    "deploy/80-pull-cd.conf",
+    "deploy/50-zarya-cd.rules",
+    "deploy/zarya-cd.service",
+    "deploy/zarya-cd.timer",
+    "deploy/deployer.py",
+    "deploy/pull_release.py",
+    "deploy/sqlite_release.py",
+    "deploy/rehearse.py",
 }
 DOCS = {
     "setup.md",
@@ -24,6 +34,7 @@ DOCS = {
     "architecture.md",
     "privacy.md",
     "operations.md",
+    "pull-deployment.md",
     "codegraph.md",
     "memory-retrieval.md",
 }

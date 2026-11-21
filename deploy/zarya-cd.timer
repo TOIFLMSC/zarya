@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a new verified Zarya release
+
+[Timer]
+OnBootSec=90s
+OnUnitInactiveSec=2min
+AccuracySec=15s
+Unit=zarya-cd.service
+
+[Install]
+WantedBy=timers.target
