@@ -64,6 +64,14 @@ PULL_CD_FILES = {
     "tests/systemd_drill.py",
     "workflow.yml",
 }
+DEV_AGENT_TEAM_FILES = {
+    "README.md",
+    "VERSION",
+    "install-skill.py",
+    "install.py",
+    "skill/dev-team-onboarding/SKILL.md",
+    "team.toml",
+}
 WEB_FILES = {
     "index.html",
     "package.json",
@@ -89,6 +97,8 @@ def allowed(path: str) -> bool:
         return True
     if path.startswith("templates/pull-cd/"):
         return path.removeprefix("templates/pull-cd/") in PULL_CD_FILES
+    if path.startswith("templates/dev-agent-team/"):
+        return path.removeprefix("templates/dev-agent-team/") in DEV_AGENT_TEAM_FILES
     if any(part.startswith(".") or part in {"node_modules", "__pycache__"} for part in p.parts):
         return False
     if p.parent.as_posix() == "docs":

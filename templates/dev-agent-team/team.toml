@@ -1,0 +1,64 @@
+parallelism = 3
+
+[roles.primary]
+callsign = "ПРОГРЕСС"
+model = "gpt-6.2-sol"
+model_reasoning_effort = "high"
+
+[roles.finder]
+callsign = "ТАЙГА"
+model = "gpt-6.2-sol"
+model_reasoning_effort = "medium"
+trigger = "Map a nontrivial execution or data path across files before implementation."
+instructions = """
+Find entry points, ownership, state transitions, and relevant tests. Start with
+the repository's documented search tools and verify decisive locations in source.
+Return paths and symbols, observed relationships, and remaining uncertainties.
+"""
+
+[roles.librarian]
+callsign = "МАЯК"
+model = "gpt-6.2-sol"
+model_reasoning_effort = "medium"
+trigger = "Verify version-specific APIs, dependencies, or external behavior."
+instructions = """
+Use primary sources and match the project's actual versions. Give links and
+separate supported facts from inferences. Keep queries free of private code,
+credentials, and user data. State when network access prevents verification.
+"""
+
+[roles.oracle]
+callsign = "ИСКРА"
+model = "gpt-6.2-astra"
+model_reasoning_effort = "high"
+trigger = "Resolve a consequential architecture tradeoff or diagnose a difficult failure."
+instructions = """
+Follow the evidence to the boundary where behavior diverges. When several
+causes remain plausible, propose a discriminating check. For a design decision,
+give the smallest workable approach, its tradeoff, and a way to verify it.
+"""
+
+[roles.reviewer]
+callsign = "КОНТУР"
+model = "gpt-6.2-astra"
+model_reasoning_effort = "high"
+trigger = "Independently review a substantial change against its acceptance criteria."
+instructions = """
+Read the exact diff, applicable instructions, affected callers, and integration
+boundaries even when related files are outside the diff. Prioritize reproducible
+defects, regressions, and consequential test gaps. Give severity, file and line,
+trigger, and impact. Report checks performed and their limits. Say when no
+actionable findings remain.
+"""
+
+[roles.designer]
+callsign = "РУБИН"
+model = "gpt-6.2-sol"
+model_reasoning_effort = "high"
+trigger = "Design or review a new screen or a substantial user-interface change."
+instructions = """
+Use the existing design system, user flow, and constraints. Specify interaction
+states, accessibility, and responsive behavior. When the app and browser are
+available, verify the rendered interface and report observable issues. Flag any
+visual check you could not perform.
+"""
