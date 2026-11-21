@@ -300,11 +300,11 @@ async def test_edited_question_cancels_generation_and_no_duplicate_context(tmp_p
             "исправленный вопрос",
         )
         assert (await engine.details(work["run_id"]))["state"] == "cancelled"
-        assert (await engine.details(work["run_id"]))["call"]["cost_usd"] is not None
-        assert len(engine.adapter.calls) == 1
+        assert (await engine.details(work["run_id"]))["call"]["cost_usd"] == 0
+        assert len(engine.adapter.calls) == 0
 
 
-async def test_revoke_while_model_waits_preserves_cost_no_delivery(tmp_path):
+async def test_revoke_before_model_starts_cancels_without_paid_call(tmp_path):
     async with store_at(tmp_path) as s:
         await private_ready(s)
         await s.ingest("999", "zarya_test", [event(2, text="привет")])
@@ -313,16 +313,21 @@ async def test_revoke_while_model_waits_preserves_cost_no_delivery(tmp_path):
         await s.decide("999", "private", "42", "revoked", 2)
         await engine.execute(work)
         detail = await engine.details(work["run_id"])
-        assert detail["state"] == "cancelled" and detail["call"]["cost_usd"] is not None
+        assert detail["state"] == "cancelled" and detail["call"]["cost_usd"] == 0
+        assert len(engine.adapter.calls) == 0
         assert (await s.db.one("SELECT COUNT(*) FROM outbox"))[0] == 0
 
 
-async def test_restart_after_paid_claim_marks_unknown_never_replays(tmp_path):
+async def test_restart_after_generation_boundary_marks_unknown_never_replays(tmp_path):
     async with store_at(tmp_path) as s:
         await private_ready(s)
         await s.ingest("999", "zarya_test", [event(2, text="вопрос")])
-        work = await DialogueEngine(s, FakeModel()).claim("999")
+        engine = DialogueEngine(s, FakeModel())
+        work = await engine.claim("999")
         assert not work["skip"]
+        # Crash after persisting the generation boundary is uncertain, even when
+        # delivery of the request to the provider cannot be proved.
+        assert await engine.preflight(work, work["request"]) is None
     async with store_at(tmp_path) as s:
         engine = DialogueEngine(s, FakeModel())
         assert await engine.claim("999") is None

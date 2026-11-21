@@ -7,12 +7,45 @@ from urllib.parse import urlsplit, urlunsplit
 
 import aiosqlite
 
+from zarya.research_intent import search_kind
+
 RESEARCH_WAIT = (
     "EXISTS (SELECT 1 FROM research_runs rr WHERE rr.job_id=j.id "
     "AND rr.state IN ('queued','fetching','search_started')) "
 )
 
 API_FEEDS = frozenset({"oai-finance", "oai-weather", "oai-sports"})
+SEARCH_TOOL_LIMIT = 6
+
+
+def search_policy() -> str:
+    return (
+        "\nЦель исследования задаёт текущий question. provided_material и sources — "
+        "материалы для понимания темы, а не отдельное задание проверить все их утверждения. "
+        "Если вопрос уточняет ситуацию или добавляет ограничение, ищи сведения именно "
+        "для этого уточнения. Проверяй старый материал только в части, необходимой "
+        "для ответа; не трать поиск на прежнюю тему вместо нового вопроса. "
+        "Если вопрос прямо просит проверить материал, проверяй его. В claims включай "
+        "только относящиеся к текущему вопросу утверждения. Если question без контекста "
+        "неоднозначен, обозначь неопределённость, не подменяй его наиболее подробным "
+        "старым материалом и не угадывай страну или условия. Формулируй поисковые "
+        "запросы как общие публичные вопросы, без личных подробностей. "
+        f"\nНа всё исследование доступно не более {SEARCH_TOOL_LIMIT} действий web_search: "
+        "поиск, открытие страницы и поиск внутри страницы расходуют общий лимит. "
+        "Не повторяй одинаковое неудачное открытие URL без новых оснований. "
+        "Если исходная страница недоступна, ищи её заголовок и ключевые утверждения "
+        "по точному URL, затем ищи первоисточник по публичной теме, организации и дате. "
+        "Оставь действия для проверки найденного первоисточника. "
+        "Для просьбы найти ссылку подойдёт и тематическая страница с нужным разделом "
+        "или вопросом FAQ, если его содержание соответствует запросу; укажи раздел. "
+        "Общая главная страница организации сама по себе не подтверждает нужный документ. "
+        "Недоступность исходной новости не мешает использовать независимо найденный "
+        "первоисточник при подтверждённом совпадении темы и утверждения. "
+        "В claims.urls включай только адреса, реально полученные завершёнными действиями "
+        "или доступной загрузкой. Незавершённое действие не является доказательством. "
+        "Если проверку закончить не удалось, явно скажи об ограничении, "
+        "используй verdict=uncertain и не выдумывай ссылки. "
+    )
 
 
 def public_url(value: str) -> str:
@@ -66,17 +99,7 @@ def trim_url(value: str) -> str:
 
 
 def wants_search(question: str) -> bool:
-    return bool(
-        re.search(
-            r"факт.?чек|проверь\w*|провер[иь]\w*|правда\s+ли|так\s+ли|найди\w*|"
-            r"поищи\w*|загугл\w*|подтвержд\w*|опроверг\w*|источник\w*|"
-            r"свеж\w*|последни\w*\s+новост\w*|что\s+(?:сейчас|сегодня)|"
-            r"(?:узнай|посмотри|глянь|гляни).{0,100}\b(?:инет\w*|интернет\w*|сети)\b|"
-            r"(?=.*\b(?:btc|биткоин\w*|биток|битка|эфир\w*|eth|доллар\w*|евро)\b)"
-            r"(?=.*\b(?:цен\w*|курс\w*|котиров\w*|скок\w*|сколько|поч[её]м)\b)",
-            question.casefold(),
-        )
-    )
+    return search_kind(question) != "none"
 
 
 async def purge(conn: aiosqlite.Connection, where: str, args: tuple[object, ...]) -> None:
@@ -132,12 +155,24 @@ async def purge(conn: aiosqlite.Connection, where: str, args: tuple[object, ...]
         "='[]',state='cancelled',error_code='source_changed' WHERE " + where,
         args,
     )
+    from zarya.participant_provenance import cascade_invalid
+
+    await cascade_invalid(conn)
 
 
 async def revision(conn: aiosqlite.Connection, bot: str, chat: str, message: int) -> None:
     from zarya.media_logic import purge as purge_media
     from zarya.media_logic import purge_analysis
+    from zarya.participant_summaries import purge as purge_summaries
     from zarya.source_material import purge as purge_material
+
+    await purge_summaries(
+        conn,
+        "bot_id=? AND chat_id=? AND EXISTS (SELECT 1 FROM "
+        "participant_summary_sources s WHERE s.block_id=participant_summary_blocks.id "
+        "AND s.message_id=?)",
+        (bot, chat, message),
+    )
 
     await purge_media(
         conn,
@@ -155,8 +190,11 @@ async def revision(conn: aiosqlite.Connection, bot: str, chat: str, message: int
     await purge_material(
         conn,
         "bot_id=? AND chat_id=? AND EXISTS (SELECT 1 FROM "
-        "json_each(snapshot,'$.source_manifest') m WHERE json_extract(m.value,'$.message_id')=?)",
-        (bot, chat, message),
+        "json_each(snapshot,'$.source_manifest') m WHERE json_extract(m.value,'$.message_id')=?) "
+        "OR bot_id=? AND chat_id=? AND EXISTS (SELECT 1 FROM "
+        "json_each(snapshot,'$.context_refs.humans') m "
+        "WHERE json_extract(m.value,'$.message_id')=?)",
+        (bot, chat, message, bot, chat, message),
     )
     await purge(
         conn,
@@ -194,3 +232,36 @@ def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = T
         if value not in permitted and trim_url(value) not in permitted:
             raise ValueError("unknown_source")
     return text.strip()
+
+
+def source_failure_text(research: dict[str, Any], show_links: bool) -> str:
+    """A bounded service reply using only claim-bound, already observed URLs.
+
+    Never reuse the rejected synthesis or the free-form research summary here.
+    The caller must still check access and source revisions before delivery.
+    """
+    fallback = "Не получилось подготовить ответ с проверенными источниками."
+    if not show_links or research.get("state") != "completed":
+        return fallback
+    sources = {s["id"]: s for s in research.get("sources", [])}
+    links: list[str] = []
+    prefix = "Не получилось подготовить полный ответ, но вот найденные по запросу источники:"
+    for claim in (research.get("analysis") or {}).get("claims", []):
+        for identifier in claim.get("source_ids", []):
+            source = sources.get(identifier, {})
+            url = source.get("url")
+            if not url or source.get("error") or url in links:
+                continue
+            try:
+                public_url(url)
+            except ValueError:
+                continue
+            candidate = prefix + "\n" + "\n".join([*links, url])
+            if len(candidate.encode("utf-16-le")) // 2 > 3500:
+                continue
+            links.append(url)
+            if len(links) == 3:
+                break
+        if len(links) == 3:
+            break
+    return prefix + "\n" + "\n".join(links) if links else fallback

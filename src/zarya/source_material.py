@@ -6,6 +6,7 @@ from typing import Any
 
 import aiosqlite
 
+from zarya.memory_read import MemoryRead
 from zarya.research_logic import urls
 
 
@@ -79,10 +80,13 @@ async def accepted(
             (bot, chat, message_id, time.time() - 90 * 86400, grant),
         )
         if target and target[1] != "{}":
-            await conn.execute(
-                "INSERT OR IGNORE INTO research_messages VALUES (?,?,?,?,?)",
-                (bot, chat, message_id, target[0], grant),
-            )
+            # Read projections can validate retained legacy replies without repairing metadata.
+            query_only = await one(conn, "PRAGMA query_only", ())
+            if not query_only[0]:
+                await conn.execute(
+                    "INSERT OR IGNORE INTO research_messages VALUES (?,?,?,?,?)",
+                    (bot, chat, message_id, target[0], grant),
+                )
     if not target or target[1] == "{}":
         return None
     update = json.loads(target[1])
@@ -91,10 +95,19 @@ async def accepted(
 
 
 async def valid(
-    conn: aiosqlite.Connection, bot: str, chat: str, grant: int, manifest: list[dict[str, Any]]
+    conn: aiosqlite.Connection,
+    bot: str,
+    chat: str,
+    grant: int,
+    manifest: list[dict[str, Any]],
+    *,
+    read: MemoryRead | None = None,
 ) -> bool:
+    if read is None:
+        with MemoryRead(conn) as read:
+            return await valid(conn, bot, chat, grant, manifest, read=read)
     if manifest:
-        access = await one(
+        access = await read.one(
             conn,
             "SELECT state,version,member_state FROM telegram_access WHERE bot_id=? "
             "AND subject_id=? AND scope=?",
@@ -220,8 +233,14 @@ async def resolve(
 
 async def purge(conn: aiosqlite.Connection, where: str, args: tuple[object, ...]) -> None:
     """Erase source-dependent answers and replays, including already sent context."""
-    ids = "SELECT id FROM dialogue_runs WHERE " + where
-    jobs = "SELECT job_id FROM dialogue_runs WHERE " + where
+    affected = (
+        "id IN (WITH RECURSIVE affected(id) AS (SELECT id FROM dialogue_runs WHERE "
+        + where
+        + " UNION SELECT e.run_id FROM context_run_edges e JOIN affected a "
+        "ON e.parent_run_id=a.id) SELECT id FROM affected)"
+    )
+    ids = "SELECT id FROM dialogue_runs WHERE " + affected
+    jobs = "SELECT job_id FROM dialogue_runs WHERE " + affected
     await conn.execute("DELETE FROM behavior_decisions WHERE run_id IN (" + ids + ")", args)
     await conn.execute(
         "UPDATE conversation_moods SET tone='neutral',intensity=0,"
@@ -249,6 +268,6 @@ async def purge(conn: aiosqlite.Connection, where: str, args: tuple[object, ...]
     )
     await conn.execute(
         "UPDATE dialogue_runs SET snapshot='{\"invalidated\":true}',response=NULL,"
-        "state='cancelled',error_code='source_changed' WHERE " + where,
+        "state='cancelled',error_code='source_changed' WHERE " + affected,
         args,
     )

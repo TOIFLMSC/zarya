@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "./api";
+import { TimingOverview, type TimingSummary } from "./TimingDiagnostics";
 
 type Metrics = {
   calls: number;
@@ -21,6 +22,7 @@ type Data = {
   from_at: string;
   bot_id: string;
   summary: Metrics & { p95_latency_ms: number | null; latency_samples: number };
+  response_timings: TimingSummary;
   breakdown: Record<string, (Metrics & { label: string })[]>;
   calls: {
     id: number;
@@ -51,6 +53,9 @@ const names: Record<string, string> = {
   replay: "Платные тесты",
   photo: "Фото",
   memory: "Память",
+  participant_summary: "Персональные сводки",
+  context_preflight: "Проверка вместимости",
+  context_count: "Подсчёт токенов API",
   research: "Поиск",
   asr: "Распознавание речи",
   video: "Анализ кадров",
@@ -106,6 +111,7 @@ export function PilotPanel({
     [error, setError] = useState(""),
     [message, setMessage] = useState(""),
     [dimension, setDimension] = useState("task");
+  const [timingsOpen, setTimingsOpen] = useState(false);
   const [edit, setEdit] = useState<string | null>(null),
     [note, setNote] = useState(""),
     [status, setStatus] = useState("pending"),
@@ -264,7 +270,7 @@ export function PilotPanel({
                 <dd>{data.summary.unknown_cost_calls}</dd>
               </div>
               <div>
-                <dt>Среднее / 95-й процентиль</dt>
+                <dt>Обработка вызовов · среднее / P95</dt>
                 <dd>
                   {duration(data.summary.avg_latency_ms)} /{" "}
                   {duration(data.summary.p95_latency_ms)}
@@ -281,7 +287,8 @@ export function PilotPanel({
               Неоценённая часть не считается нулевой.
             </p>
             <p className="muted">
-              Время вызова модели, без очереди и доставки. Измерений:{" "}
+              Включает подготовку вызова. Очередь и доставка не входят. В
+              выборке учитываются и платные тесты. Измерений:{" "}
               {data.summary.latency_samples}.{" "}
               {data.summary.first_call_at
                 ? `Первый вызов в выборке: ${date(data.summary.first_call_at)}. История может покрывать не весь период.`
@@ -292,6 +299,11 @@ export function PilotPanel({
       </section>
       {data && (
         <>
+          <TimingOverview
+            timing={data.response_timings}
+            expanded={timingsOpen}
+            onExpand={setTimingsOpen}
+          />
           <section className="card">
             <h2>Расходы по направлениям</h2>
             <div className="peer-actions">

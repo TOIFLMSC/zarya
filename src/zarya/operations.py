@@ -6,27 +6,35 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from zarya.database import Database
+from zarya.timings import aggregate as timing_aggregate
 
 CALLS = """
 WITH calls AS (
  SELECT c.id,c.model,c.state,c.created_at,c.latency_ms,c.cost_usd,c.search_cost_usd,
  c.error_code,c.settings_version,
- CASE WHEN c.avatar_run_id IS NOT NULL THEN 'avatar'
+ CASE WHEN c.context_count_run_id IS NOT NULL THEN 'context_count'
+ WHEN c.operation='preflight' THEN 'context_preflight'
+ WHEN c.avatar_run_id IS NOT NULL THEN 'avatar'
  WHEN c.research_run_id IS NOT NULL THEN 'research'
  WHEN c.photo_batch_id IS NOT NULL THEN 'photo'
  WHEN c.memory_batch_id IS NOT NULL THEN 'memory'
+ WHEN c.participant_summary_id IS NOT NULL THEN 'participant_summary'
  WHEN c.media_run_id IS NOT NULL THEN CASE WHEN c.operation='asr' THEN 'asr' ELSE 'video' END
  WHEN d.mode='paid' THEN 'replay' WHEN d.id IS NOT NULL THEN 'dialogue' ELSE 'other' END task,
- COALESCE(d.bot_id,p.bot_id,m.bot_id,r.bot_id,v.bot_id,a.bot_id,e.bot_id,'') bot_id,
- COALESCE(d.chat_id,p.chat_id,m.chat_id,r.chat_id,v.chat_id,a.chat_id,e.chat_id,'') chat_id,
+ COALESCE(d.bot_id,p.bot_id,m.bot_id,r.bot_id,v.bot_id,a.bot_id,s.bot_id,e.bot_id,'') bot_id,
+ COALESCE(d.chat_id,p.chat_id,m.chat_id,r.chat_id,v.chat_id,a.chat_id,s.chat_id,e.chat_id,'')
+ chat_id,
  CASE WHEN d.id IS NOT NULL THEN CASE WHEN d.chat_id LIKE '-%' THEN 'group' ELSE 'private' END
- ELSE COALESCE(p.scope,m.scope,r.scope,v.scope,a.scope,'unknown') END scope,
+ ELSE COALESCE(p.scope,m.scope,r.scope,v.scope,a.scope,
+ CASE WHEN s.id IS NOT NULL THEN CASE WHEN s.chat_id LIKE '-%' THEN 'group' ELSE 'private' END END,
+ 'unknown') END scope,
  COALESCE(c.cost_usd,0)+COALESCE(c.search_cost_usd,0) known_cost_usd,
  CASE WHEN c.cost_usd IS NULL OR (c.research_run_id IS NOT NULL AND c.search_cost_usd IS NULL)
  THEN 1 ELSE 0 END unknown_cost
- FROM model_calls c LEFT JOIN dialogue_runs d ON d.id=c.run_id
+ FROM model_calls c LEFT JOIN dialogue_runs d ON d.id=COALESCE(c.run_id,c.context_count_run_id)
  LEFT JOIN photo_batches p ON p.id=c.photo_batch_id
  LEFT JOIN memory_batches m ON m.id=c.memory_batch_id
+ LEFT JOIN participant_summary_blocks s ON s.id=c.participant_summary_id
  LEFT JOIN research_runs r ON r.id=c.research_run_id
  LEFT JOIN media_runs v ON v.id=c.media_run_id
  LEFT JOIN avatar_runs a ON a.id=c.avatar_run_id
@@ -147,6 +155,24 @@ class Operations:
                 )
                 summary["p95_latency_ms"] = latency[0]["latency_ms"] if latency else None
                 summary["latency_samples"] = latency[0]["total"] if latency else 0
+                timing_rows = await rows(
+                    "SELECT r.timings_json run_timings,o.timings_json delivery_timings,"
+                    "r.state,COALESCE(o.attempts,0) attempts FROM dialogue_runs r "
+                    "LEFT JOIN outbox o ON o.job_id=r.job_id AND o.part_index=0 "
+                    "WHERE r.mode='live' AND r.created_at>=? AND r.created_at<=? "
+                    "AND (?='' OR r.bot_id=?) AND (?='all' OR "
+                    "CASE WHEN r.chat_id LIKE '-%' THEN 'group' ELSE 'private' END=?) "
+                    "AND (?='' OR r.chat_id=?) "
+                    "AND EXISTS (SELECT 1 FROM model_calls c WHERE c.run_id=r.id) "
+                    "AND CASE WHEN json_extract(r.timings_json,'$.live_text') IN (0,1) "
+                    "THEN json_extract(r.timings_json,'$.live_text')=1 ELSE "
+                    "COALESCE(json_extract(r.snapshot,'$.invalidated'),0)=0 "
+                    "AND COALESCE(json_extract(o.payload,'$.action'),'text')='text' "
+                    "AND NOT EXISTS (SELECT 1 FROM behavior_decisions b WHERE b.run_id=r.id "
+                    "AND (b.mode='shadow' OR b.action!='text')) END",
+                    params,
+                )
+                response_timings = timing_aggregate(timing_rows)
                 breakdown = {}
                 for dimension in ("model", "task", "chat_id"):
                     breakdown[dimension] = await rows(
@@ -182,6 +208,9 @@ class Operations:
                     FROM photo_batches
                     UNION ALL SELECT 'memory',state,bot_id,chat_id,scope,created_at
                     FROM memory_batches
+                    UNION ALL SELECT 'participant_summary',state,bot_id,chat_id,
+                    CASE WHEN chat_id LIKE '-%' THEN 'group' ELSE 'private' END,created_at
+                    FROM participant_summary_blocks
                     UNION ALL SELECT 'research',state,bot_id,chat_id,scope,created_at
                     FROM research_runs
                     UNION ALL SELECT 'media',state,bot_id,chat_id,scope,created_at
@@ -193,7 +222,7 @@ class Operations:
                     + queue_union
                     + ") WHERE state NOT IN ('completed','done','sent','cancelled','dismissed',"
                     "'skipped','cache','cached','rejected','invalid',"
-                    "'failed','partial','unavailable') "
+                    "'failed','error','partial','unavailable') "
                     "AND (?='' OR bot_id=?) AND (?='all' OR scope=?) "
                     "AND (?='' OR chat_id=?) GROUP BY queue,state",
                     (bot, bot, scope, scope, chat, chat),
@@ -221,6 +250,7 @@ class Operations:
                     "bot_id": bot,
                     "days": days,
                     "summary": summary,
+                    "response_timings": response_timings,
                     "breakdown": breakdown,
                     "calls": calls,
                     "total": total,

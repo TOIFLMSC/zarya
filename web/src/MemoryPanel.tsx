@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { ObsidianPanel } from "./ObsidianPanel";
+import { ParticipantWindow } from "./ParticipantWindow";
 import {
   api,
   ApiError,
@@ -194,6 +196,13 @@ export function MemoryPanel({
     profile?.facts.filter((f) => !person || f.sender_id === person) ?? [];
   return (
     <div className="memory-panel">
+      <ObsidianPanel
+        csrf={csrf}
+        onUnauthorized={onUnauthorized}
+        onChanged={() => {
+          if (!dirty) setRevision((v) => v + 1);
+        }}
+      />
       <section className="card">
         <div className="filter-bar">
           <label>
@@ -290,6 +299,21 @@ export function MemoryPanel({
           </p>
           <h2>{profile.title}</h2>
           <p className="muted">Chat ID: {profile.chat_id}</p>
+          <p>
+            <a
+              href={`/api/memory/chats/${encodeURIComponent(profile.chat_id)}/graph/vault`}
+            >
+              Скачать граф для Obsidian (.zip)
+            </a>
+          </p>
+          <p className="muted">
+            Приватный снимок выбранного чата: утверждения, эпизоды, персональные
+            сводки и их исходные реплики.
+            Распакуй архив и открой папку как хранилище Obsidian. Для
+            подтверждаемых правок используй папку из блока Obsidian. Скачанный
+            архив остаётся отдельной копией и не очищается автоматически. Лимиты
+            и полнота выгрузки указаны в заметке «Начало».
+          </p>
           <div className="notice">
             {profile.scope === "private"
               ? "Личный контекст отделён от групп. Перенос требует согласия самого собеседника через /memory в личке."
@@ -340,6 +364,18 @@ export function MemoryPanel({
                   ))}
                 </select>
               </label>
+              {person ? (
+                <ParticipantWindow
+                  key={`${chat}:${person}`}
+                  chat={chat}
+                  sender={person}
+                  onExpired={onUnauthorized}
+                />
+              ) : (
+                <p className="muted">
+                  Выбери собеседника, чтобы посмотреть его недавний контекст.
+                </p>
+              )}
               <p className="muted">
                 «Активно» означает использование в ответах, а не доказанную
                 истинность. Самоописания активируются автоматически.

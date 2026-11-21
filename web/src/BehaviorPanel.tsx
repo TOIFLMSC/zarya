@@ -362,7 +362,7 @@ export function BehaviorPanel({
                   <span>
                     {general
                       ? "Есть несохранённые изменения"
-                      : "Настройки сохранены"}
+                      : "Выпуск поведения активирован"}
                   </span>
                   <button
                     className="primary"
@@ -383,7 +383,7 @@ export function BehaviorPanel({
                       }, "Настройки поведения сохранены")
                     }
                   >
-                    Сохранить поведение
+                    Активировать поведение
                   </button>
                 </div>
               </fieldset>

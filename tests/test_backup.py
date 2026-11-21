@@ -9,6 +9,7 @@ from zarya.app import create_app
 from zarya.backup import MARKER, backup, restore, verify
 from zarya.config import Config
 from zarya.database import Database
+from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
 
 
 async def source_at(path):
@@ -123,3 +124,38 @@ async def test_backup_media_frames_and_invalid_schema(tmp_path):
     with pytest.raises(ValueError, match="схемы"):
         backup(source, tmp_path / "bad-schema")
     assert not (tmp_path / "bad-schema").exists()
+
+
+async def test_backup_preserves_sql_prompt_history_without_obsolete_bootstrap_file(tmp_path):
+    source = await source_at(tmp_path / "data")
+    db = Database(source / "zarya.sqlite3")
+    await db.open()
+    try:
+        await db.initialize_configuration(DEFAULT_PROMPTS)
+        settings = await db.settings()
+        fragments = dict(DEFAULT_PROMPTS.fragments)
+        fragments["dialogue.identity"] = "Synthetic active release stored only in SQL."
+        active = PromptBundle.parse(
+            json.dumps({"schema_version": 1, "fragments": fragments}).encode()
+        )
+        async with db.transaction() as c:
+            await db._update_settings(c, settings.version, settings.settings, active, "obsidian")
+    finally:
+        await db.close()
+    (source / "prompts.json").write_text("obsolete invalid bootstrap; must not be read")
+    manifest = backup(source, tmp_path / "backup")
+    assert "prompts.json" not in manifest["files"]
+    verify(tmp_path / "backup")
+    restore(tmp_path / "backup", tmp_path / "restored")
+    with sqlite3.connect(tmp_path / "restored/zarya.sqlite3") as c:
+        releases = c.execute(
+            "SELECT prompt_hash,prompts_json FROM configuration_releases ORDER BY version"
+        ).fetchall()
+        assert len(releases) == 2
+        assert releases[0][0] == DEFAULT_PROMPTS.sha256
+        assert releases[1][0] == active.sha256
+        assert (
+            PromptBundle.parse(releases[1][1].encode()).text("dialogue.identity")
+            == fragments["dialogue.identity"]
+        )
+    assert (tmp_path / "restored" / MARKER).is_file()

@@ -38,11 +38,93 @@ def empty_snapshot() -> str:
     )
 
 
-async def invalidate(conn: aiosqlite.Connection, bot: str, chat: str, shared: bool = False) -> None:
+async def edit_predecessors(
+    conn: aiosqlite.Connection, bot: str, chat: str, before_event: int
+) -> list[int]:
+    """Keep only complete sent snapshots causally preceding the edited source.
+
+    Missing watermarks and any invalid memory/source dependency fail closed.
+    This exception is never used for forget, consent revocation or shared data.
+    """
+    from zarya.memory_context import valid_snapshot
+    from zarya.source_material import valid as valid_material
+
+    async with conn.execute(
+        "SELECT r.id,r.snapshot FROM dialogue_runs r WHERE r.bot_id=? AND r.chat_id=? "
+        "AND r.mode='live' AND r.state='completed' "
+        "AND json_type(r.snapshot,'$.context_event_watermark')='integer' "
+        "AND json_extract(r.snapshot,'$.context_event_watermark')<? "
+        "AND EXISTS (SELECT 1 FROM outbox o WHERE o.job_id=r.job_id) "
+        "AND NOT EXISTS (SELECT 1 FROM outbox o LEFT JOIN recent_messages m "
+        "ON m.bot_id=o.bot_id AND m.chat_id=o.chat_id AND m.message_id=o.message_id "
+        "WHERE o.job_id=r.job_id AND (o.state!='sent' OR m.role IS NULL "
+        "OR m.role!='assistant' OR m.received_at<=?))",
+        (bot, chat, before_event, time.time() - RETENTION),
+    ) as cursor:
+        candidates = list(await cursor.fetchall())
+    preserved = []
+    for run_id, document in candidates:
+        snapshot = json.loads(document)
+        grant = snapshot.get("source_access_version")
+        if (
+            grant is not None
+            and await valid_snapshot(conn, bot, snapshot)
+            and await valid_material(conn, bot, chat, grant, snapshot.get("source_manifest", []))
+        ):
+            preserved.append(int(run_id))
+    return preserved
+
+
+async def invalidate(
+    conn: aiosqlite.Connection,
+    bot: str,
+    chat: str,
+    shared: bool = False,
+    *,
+    before_event: int | None = None,
+) -> None:
     """Conservative scope purge: no old answer, replay or summary can leak a withdrawn fact."""
+    from zarya.participant_summaries import purge as purge_summaries
+
+    summary_scope = "bot_id=? AND chat_id=? AND state!='cancelled'"
+    local_edit = before_event is not None and not shared
+    if local_edit:
+        # A later edit cannot withdraw unrelated earlier summary blocks. Purging
+        # them first would erase their sent replies before edit_predecessors runs.
+        await purge_summaries(
+            conn,
+            summary_scope + " AND id IN (SELECT block_id FROM participant_summary_sources "
+            "WHERE event_id=?)",
+            (bot, chat, before_event),
+        )
+    else:
+        await purge_summaries(conn, summary_scope, (bot, chat))
     await epoch(conn, bot)
     await conn.execute("UPDATE memory_epochs SET version=version+1 WHERE bot_id=?", (bot,))
+    # Shadow candidates are not response dependencies. Clear metadata independently,
+    # including sent edit-predecessors that intentionally survive the scope purge.
+    await conn.execute(
+        "UPDATE dialogue_runs SET snapshot=json_remove(snapshot,'$.retrieval') WHERE bot_id=?",
+        (bot,),
+    )
     shared = await prune_dependencies(conn, bot, chat) or shared
+    if local_edit and shared:
+        # Indirect evidence can reveal a withdrawn share only during pruning.
+        await purge_summaries(conn, summary_scope, (bot, chat))
+        await prune_dependencies(conn, bot, chat)
+    if before_event is not None or shared:
+        from zarya.memory_commands import scrub_scope
+
+        # A curated group fact can lose its original private dependency. Its old
+        # journal/copies still contain shared evidence; purge conservatively like replies.
+        await scrub_scope(conn, bot, chat, groups=shared)
+    preserved = (
+        await edit_predecessors(conn, bot, chat, before_event)
+        if before_event is not None and not shared
+        else []
+    )
+    # IDs originate only from SQLite integer primary keys, never user input.
+    preserved_sql = ",".join(str(value) for value in preserved) or "NULL"
     await conn.execute(
         "UPDATE jobs SET state='cancelled' WHERE state IN ('pending','running') "
         "AND id IN (SELECT job_id FROM dialogue_runs WHERE bot_id=? "
@@ -56,10 +138,11 @@ async def invalidate(conn: aiosqlite.Connection, bot: str, chat: str, shared: bo
         (bot,),
     )
     affected = "bot_id=? AND (chat_id=?" + (" OR chat_id LIKE '-%'" if shared else "") + ")"
+    affected_runs = affected + " AND id NOT IN (" + preserved_sql + ")" if preserved else affected
     args = (bot, chat)
     await conn.execute(
         "DELETE FROM behavior_decisions WHERE run_id IN "
-        "(SELECT id FROM dialogue_runs WHERE " + affected + ")",
+        "(SELECT id FROM dialogue_runs WHERE " + affected_runs + ")",
         args,
     )
     await conn.execute(
@@ -67,7 +150,18 @@ async def invalidate(conn: aiosqlite.Connection, bot: str, chat: str, shared: bo
         "version=version+1,epoch=epoch+1 WHERE " + affected,
         args,
     )
-    await purge_research(conn, affected, args)
+    await purge_research(
+        conn,
+        affected
+        + (
+            " AND id NOT IN (SELECT json_extract(snapshot,'$.research_id') FROM dialogue_runs "
+            "WHERE id IN (" + preserved_sql + ") AND json_extract(snapshot,'$.research_id') "
+            "IS NOT NULL)"
+            if preserved
+            else ""
+        ),
+        args,
+    )
     await conn.execute(
         "UPDATE jobs SET state='cancelled',payload=json_remove(payload,'$.service_text') "
         "WHERE event_id IN (SELECT id FROM events WHERE " + affected + ") "
@@ -81,21 +175,32 @@ async def invalidate(conn: aiosqlite.Connection, bot: str, chat: str, shared: bo
     )
     await conn.execute(
         "UPDATE model_calls SET request_json=NULL WHERE run_id IN "
-        "(SELECT id FROM dialogue_runs WHERE " + affected + ")",
+        "(SELECT id FROM dialogue_runs WHERE " + affected_runs + ")",
         args,
     )
     await conn.execute(
         "UPDATE outbox SET payload='{\"text\":\"\"}',state=CASE WHEN state='pending' "
         "THEN 'cancelled' ELSE state END WHERE job_id IN "
-        "(SELECT job_id FROM dialogue_runs WHERE " + affected + ")",
+        "(SELECT job_id FROM dialogue_runs WHERE " + affected_runs + ")",
         args,
     )
     await conn.execute(
         "UPDATE dialogue_runs SET snapshot=?,response=NULL,error_code='memory_changed',"
-        "state=CASE WHEN state='generating' THEN 'cancelled' ELSE state END WHERE " + affected,
+        "state=CASE WHEN state='generating' THEN 'cancelled' ELSE state END WHERE " + affected_runs,
         (empty_snapshot(),) + args,
     )
-    await conn.execute("DELETE FROM recent_messages WHERE role='assistant' AND " + affected, args)
+    await conn.execute(
+        "DELETE FROM recent_messages WHERE role='assistant' AND "
+        + affected
+        + (
+            " AND NOT EXISTS (SELECT 1 FROM outbox o JOIN dialogue_runs r ON r.job_id=o.job_id "
+            "WHERE r.id IN (" + preserved_sql + ") AND o.bot_id=recent_messages.bot_id "
+            "AND o.chat_id=recent_messages.chat_id AND o.message_id=recent_messages.message_id)"
+            if preserved
+            else ""
+        ),
+        args,
+    )
     # Assistant reply context may have depended on withdrawn memories too.
     newly_shared = await prune_dependencies(conn, bot, chat)
     if newly_shared and not shared:
@@ -162,7 +267,18 @@ async def prune_dependencies(
     return withdrawn_share
 
 
-async def suppress_sources(conn: aiosqlite.Connection, bot: str, chat: str, ids: list[int]) -> None:
+async def suppress_sources(
+    conn: aiosqlite.Connection,
+    bot: str,
+    chat: str,
+    ids: list[int],
+    *,
+    scrub: bool = True,
+) -> None:
+    if scrub:
+        from zarya.memory_commands import scrub_scope
+
+        await scrub_scope(conn, bot, chat)
     for source_id in ids:
         source = await one(
             conn,
@@ -259,7 +375,7 @@ async def admit(
             (previous[0],),
         )
         await suppress_sources(conn, bot, chat, [previous[0]])
-        await invalidate(conn, bot, chat, bool(sharing))
+        await invalidate(conn, bot, chat, bool(sharing), before_event=previous[1])
     if (
         not enabled
         or not text
@@ -388,7 +504,10 @@ async def erase_fact(conn: aiosqlite.Connection, bot: str, fact_id: int) -> None
         "category,fact_key) DO UPDATE SET through_event=MAX(through_event,excluded.through_event)",
         (bot, *fact, latest[0]),
     )
-    sharing = await source_sharing(conn, ids)
+    own_share = await one(
+        conn, "SELECT 1 FROM memory_shares WHERE fact_id=? AND state='active'", (fact_id,)
+    )
+    sharing = bool(own_share) or await source_sharing(conn, ids)
     await suppress_sources(conn, bot, fact[0], ids)
     for source_id in ids:
         await conn.execute(

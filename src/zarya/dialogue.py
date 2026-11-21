@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from zarya import behavior
+from zarya import behavior, context_budget, timings
 from zarya.avatar_logic import AVATAR_WAIT
 from zarya.avatar_logic import valid as avatar_valid
 from zarya.chat_style import chat_dashes
@@ -22,10 +22,11 @@ from zarya.dialogue_logic import (
 )
 from zarya.media_logic import MEDIA_WAIT
 from zarya.media_logic import refs_valid as media_refs_valid
+from zarya.memory_logic import empty_snapshot
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
 from zarya.photo_logic import PHOTO_WAIT
-from zarya.research_logic import RESEARCH_WAIT, evidence_text
+from zarya.research_logic import RESEARCH_WAIT, evidence_text, source_failure_text
 from zarya.response_links import display_text, message_requests_sources, requested
 from zarya.source_material import resolve
 from zarya.source_material import valid as source_valid
@@ -61,9 +62,12 @@ class DialogueEngine:
 
     async def claim(self, bot_id: str) -> dict[str, Any] | None:
         async with self.store.gate, self.db.transaction() as conn:
+            claimed_at = time.time()
+            claim_start = time.monotonic()
+            measured: dict[str, float] = {}
             job = await row(
                 conn,
-                "SELECT j.id,j.payload,j.access_version,e.payload,j.created_at "
+                "SELECT j.id,j.payload,j.access_version,e.payload,j.created_at,e.received_at "
                 "FROM jobs j JOIN events e "
                 "ON e.id=j.event_id WHERE e.bot_id=? AND j.kind='telegram' AND "
                 "j.state='pending' AND "
@@ -77,15 +81,22 @@ class DialogueEngine:
                 + AVATAR_WAIT
                 + "AND "
                 "NOT EXISTS (SELECT 1 FROM jobs busy JOIN events be ON be.id=busy.event_id "
-                "WHERE (busy.state='running' OR EXISTS (SELECT 1 FROM model_calls m "
-                "WHERE m.job_id=busy.id AND m.state='started')) "
+                "WHERE busy.state='running' "
                 "AND be.bot_id=e.bot_id AND be.chat_id=e.chat_id) "
+                "AND NOT EXISTS (SELECT 1 FROM model_calls m "
+                "JOIN jobs busy ON busy.id=m.job_id JOIN events be ON be.id=busy.event_id "
+                "WHERE m.state='started' AND be.bot_id=e.bot_id AND be.chat_id=e.chat_id) "
                 "ORDER BY j.id LIMIT 1",
                 (bot_id,),
             )
             if not job:
                 return None
-            job_id, payload_json, access_version, update_json, created_at = job
+            job_id, payload_json, access_version, update_json, created_at, received_at = job
+            received = datetime.fromisoformat(received_at).timestamp()
+            measured["received_at"] = received
+            queue_ms = self.store.clock.since(received, claimed_at)
+            if queue_ms is not None:
+                measured["queue_ms"] = queue_ms
             payload, update = json.loads(payload_json), json.loads(update_json)
             message = update.get("message") or update.get("edited_message") or {}
             chat_id = payload["chat_id"]
@@ -105,6 +116,7 @@ class DialogueEngine:
                 return {"skip": True}
             settings_row = await row(conn, "SELECT version,document FROM settings WHERE id=1", ())
             settings = Settings.model_validate_json(settings_row[1])
+            prompts = await self.store.prompts_for(settings_row[0], conn)
             trigger = payload.get("trigger", "legacy")
             sender_id = str(message.get("from", {}).get("id", ""))
             thread_id = topic_id(message)
@@ -315,38 +327,20 @@ class DialogueEngine:
                 )
                 if waiting:
                     return {"skip": True}
-            async with conn.execute(
-                "SELECT message_id,thread_id,sender_id,name,role,text "
-                "FROM recent_messages WHERE bot_id=? AND chat_id=? "
-                "AND message_id!=? ORDER BY received_at DESC LIMIT 500",
-                (bot_id, chat_id, payload["message_id"]),
-            ) as cursor:
-                recent = list(await cursor.fetchall())
-            # Last twenty turns plus last two turns per participant, within a fixed char budget.
-            selected: list[Any] = []
-            participant_counts: dict[str, int] = {}
-            used = 0
-            for index, item in enumerate(recent):
-                count = participant_counts.get(item[2], 0)
-                if index >= 20 and count >= 2:
-                    continue
-                if used + len(item[5]) > 22000 or len(selected) >= 40:
-                    continue
-                selected.append(item)
-                used += len(item[5])
-                participant_counts[item[2]] = count + 1
-            context = [
-                dict(
-                    zip(
-                        ("message_id", "thread_id", "sender_id", "name", "role", "text"),
-                        item,
-                        strict=True,
-                    )
-                )
-                for item in reversed(selected)
-            ]
-            if trigger == "initiative":
-                context = [m for m in context if (m["thread_id"] or 0) == (thread_id or 0)][-20:]
+            from zarya.participant_context import select as select_participant
+
+            context, participant_coverage, context_refs = await select_participant(
+                conn,
+                bot_id,
+                chat_id,
+                access_version,
+                message,
+                settings,
+                enqueue_summaries=should_answer
+                and trigger != "initiative"
+                and not payload.get("service_reply")
+                and not (behavior_state and behavior_state.get("mode") == "shadow"),
+            )
             incoming = {
                 "message_id": payload["message_id"],
                 "thread_id": thread_id,
@@ -382,12 +376,14 @@ class DialogueEngine:
                 )
             owner = bool(settings.owner_telegram_id and settings.owner_telegram_id == sender_id)
             mode = answer_mode(message_text(message))
-            if research_context and mode == "brief":
-                mode = "analysis"
+            # Search supplies evidence; requested detail still controls response length.
             style = writing_style(random.random())
+            media_refs = list({r["id"]: r for r in media_refs + context_refs["media"]}.values())
             memory_context: dict[str, Any] = {}
             memory_epoch = None
+            retrieval: dict[str, Any] = {}
             if self.memory:
+                context_start = time.monotonic()
                 memory_context, memory_epoch = await self.memory.context(
                     conn,
                     bot_id,
@@ -397,7 +393,14 @@ class DialogueEngine:
                     query=message_text(message)
                     + " "
                     + str((message.get("reply_to_message") or {}).get("text", ""))[:4000],
+                    current_query=message_text(message),
+                    recent=context,
+                    event_id=source[0],
+                    speaker=sender_id,
+                    thread=thread_id,
+                    diagnostics=retrieval,
                 )
+                measured["context_ms"] = timings.elapsed(context_start)
             request: dict[str, Any] = {
                 "model": settings.model,
                 "reasoning": {"effort": settings.reasoning},
@@ -411,7 +414,7 @@ class DialogueEngine:
                     bool(self.photos and settings.photo_enabled),
                     style,
                     sources_requested=show_sources,
-                    prompts=self.store.prompts,
+                    prompts=prompts,
                 ),
                 "input": model_input(context, incoming, memory_context),
             }
@@ -436,18 +439,32 @@ class DialogueEngine:
                     {**json.loads(request["input"]), "avatar_profile": avatar_context},
                     ensure_ascii=False,
                 )
-                request["instructions"] += self.store.prompts.text("dialogue.avatar")
+                request["instructions"] += prompts.text("dialogue.avatar")
             if behavior_state:
-                behavior.configure(request, behavior_state, self.store.prompts)
+                behavior.configure(request, behavior_state, prompts)
+            request = context_budget.pack(request)
+            budget = context_budget.inspect(request)
+            budget.update(
+                stage="assembled", decision="pending" if should_answer else "not_requested"
+            )
+            if photo_refs:
+                budget["state"] = "preparing"
             snapshot = {
+                # Snapshot is assembled inside the ingestion gate/write transaction.
+                # A later source revision cannot have influenced an earlier watermark.
+                "context_event_watermark": (
+                    await row(conn, "SELECT COALESCE(MAX(id),0) FROM events", ())
+                )[0],
                 "incoming": incoming,
                 "question_text": message_text(message),
                 "sources_requested": show_sources,
                 "context": context,
+                "participant_context": participant_coverage,
+                "context_refs": context_refs,
                 "settings": settings.model_dump(),
                 "settings_version": settings_row[0],
                 "owner": owner,
-                "prompt_bundle_sha256": self.store.prompts.sha256,
+                "prompt_bundle_sha256": prompts.sha256,
                 "answer_mode": mode,
                 "writing_style": style,
                 "delivery_layout": {
@@ -455,6 +472,7 @@ class DialogueEngine:
                     "preferred_chars": {"brief": 320, "analysis": 400, "detailed": 550}[mode],
                 },
                 "request": request,
+                "context_budget": budget,
                 "photo_refs": photo_refs,
                 "media_refs": media_refs,
                 "avatar_id": avatar["id"] if avatar else None,
@@ -462,7 +480,10 @@ class DialogueEngine:
                 "source_manifest": material["manifest"],
                 "source_access_version": access_version,
                 "memory": memory_context,
+                "retrieval_chat_id": chat_id,
             }
+            if retrieval:
+                snapshot["retrieval"] = retrieval
             if memory_epoch is not None:
                 snapshot["memory_epoch"] = memory_epoch
             if behavior_state:
@@ -488,6 +509,10 @@ class DialogueEngine:
                 ),
             )
             run_id = cursor.lastrowid
+            assert run_id is not None
+            from zarya.participant_context import register
+
+            await register(conn, run_id, snapshot)
             if not should_answer and "initiative_draw" in payload:
                 await conn.execute(
                     "INSERT INTO behavior_decisions VALUES (?,?,?,?,?,?,?)",
@@ -535,8 +560,8 @@ class DialogueEngine:
             if should_answer:
                 await conn.execute(
                     "INSERT INTO model_calls(job_id,provider,model,state,created_at,"
-                    "run_id,settings_version,request_json,pricing_profile) "
-                    "VALUES (?,'openai',?,'started',?,?,?,?,?)",
+                    "run_id,settings_version,request_json,pricing_profile,operation) "
+                    "VALUES (?,'openai',?,'started',?,?,?,?,?,'preflight')",
                     (
                         job_id,
                         settings.model,
@@ -551,6 +576,14 @@ class DialogueEngine:
                 "UPDATE jobs SET state=?,attempts=attempts+1 WHERE id=?",
                 ("running" if should_answer else "done", job_id),
             )
+            measured["live_text"] = float(
+                should_answer and payload.get("initiative_mode") != "shadow"
+            )
+            measured["claim_ms"] = timings.elapsed(claim_start)
+            await conn.execute(
+                "UPDATE dialogue_runs SET timings_json=? WHERE id=?",
+                (timings.encode(measured), run_id),
+            )
             return {
                 "run_id": run_id,
                 "job_id": job_id,
@@ -562,11 +595,28 @@ class DialogueEngine:
                 "access_version": access_version,
                 "reply_id": payload["message_id"],
                 "snapshot": snapshot,
+                "timings": measured,
                 "skip": not should_answer,
             }
 
     async def finish(self, work: dict[str, Any], result: ModelResult, latency: int) -> None:
-        async with self.store.gate, self.db.transaction() as conn:
+        work["_finish_start"] = time.monotonic()
+        async with (
+            self.store.gate,
+            self.db.transaction() as conn,
+            timings.finishing(conn, work),
+        ):
+            boundary = await row(
+                conn, "SELECT operation FROM model_calls WHERE run_id=?", (work["run_id"],)
+            )
+            preflight_only = bool(boundary and boundary[0] == "preflight")
+            if preflight_only and result.state == "unknown":
+                result.state = "rejected"
+                result.error = (
+                    "preflight_interrupted"
+                    if result.error == "interrupted"
+                    else "preflight_uncertain"
+                )
             changed = await conn.execute(
                 "UPDATE model_calls SET state=?,model=COALESCE(?,model),usage_json=?,response_id=?,"
                 "request_id=?,latency_ms=?,cost_usd=?,error_code=?,finished_at=?,pricing_profile=? "
@@ -577,8 +627,12 @@ class DialogueEngine:
                     json.dumps(result.usage) if result.usage is not None else None,
                     result.response_id,
                     result.request_id,
-                    latency,
-                    estimate_cost(result, work["request"]["model"]),
+                    None
+                    if preflight_only
+                    else int(work.get("timings", {}).get("model_ms", latency)),
+                    0
+                    if preflight_only
+                    else estimate_cost(result, work["request"]["model"]),
                     result.error,
                     stamp(),
                     pricing_profile(result.model or work["request"]["model"]),
@@ -587,7 +641,14 @@ class DialogueEngine:
             )
             if changed.rowcount != 1:
                 return
+            work["_finish_claimed"] = True
             live = work.get("mode", "live") == "live"
+            plan = work.get("behavior_plan")
+            work.setdefault("timings", {})["live_text"] = float(
+                live
+                and work["snapshot"].get("behavior", {}).get("mode") != "shadow"
+                and (plan is None or plan.action == "text")
+            )
             persisted = await row(
                 conn, "SELECT snapshot FROM dialogue_runs WHERE id=?", (work["run_id"],)
             )
@@ -619,6 +680,11 @@ class DialogueEngine:
                     work["access_version"],
                     work["snapshot"].get("source_manifest", []),
                 )
+            from zarya.memory_context import valid_snapshot
+
+            if allowed and not await valid_snapshot(conn, work["bot_id"], work["snapshot"]):
+                allowed = False
+                result.error = "context_changed"
             if allowed and self.memory:
                 allowed = await self.memory.valid(conn, work["bot_id"], work["snapshot"])
                 if not allowed:
@@ -669,6 +735,42 @@ class DialogueEngine:
                     "UPDATE jobs SET state=?,lease_until=NULL WHERE id=?",
                     ("done" if result.state == "completed" and allowed else state, work["job_id"]),
                 )
+                service_text = context_budget.SERVICES.get(work.get("service_error", ""))
+                if result.state == "invalid" and result.error == "unknown_source":
+                    service_text = source_failure_text(
+                        work["snapshot"].get("research") or {},
+                        bool(
+                            self.research
+                            and work["snapshot"].get("research_id")
+                            and requested(work["snapshot"])
+                        ),
+                    )
+                if (
+                    allowed
+                    and service_text
+                    and work["snapshot"].get("behavior", {}).get("mode") not in {"shadow", "live"}
+                    and work["snapshot"].get("incoming", {}).get("sender_id")
+                ):
+                    await conn.execute(
+                        "INSERT INTO outbox(job_id,bot_id,scope,chat_id,state,payload,created_at,"
+                        "access_version) VALUES (?,?,?,?,'pending',?,?,?)",
+                        (
+                            work["job_id"],
+                            work["bot_id"],
+                            work["scope"],
+                            work["chat_id"],
+                            json.dumps(
+                                {
+                                    "text": service_text,
+                                    "thread_id": work["thread_id"],
+                                    "reply_id": work["reply_id"],
+                                },
+                                ensure_ascii=False,
+                            ),
+                            stamp(),
+                            work["access_version"],
+                        ),
+                    )
                 if (
                     result.state == "completed"
                     and allowed
@@ -725,17 +827,196 @@ class DialogueEngine:
                             ),
                         )
 
+    async def request_current(self, conn: Any, work: dict[str, Any]) -> bool:
+        """Final guard before each network transmission, and after slow counting/preparation."""
+        from zarya.memory_context import valid_snapshot
+
+        persisted = await row(
+            conn, "SELECT state,snapshot FROM dialogue_runs WHERE id=?", (work["run_id"],)
+        )
+        if (
+            not persisted
+            or persisted[0] != "generating"
+            or json.loads(persisted[1]).get("invalidated")
+        ):
+            return False
+        if not await valid_snapshot(conn, work["bot_id"], work["snapshot"]):
+            return False
+        access = await row(
+            conn,
+            "SELECT state,version,member_state FROM telegram_access "
+            "WHERE bot_id=? AND subject_id=?",
+            (work["bot_id"], work["chat_id"]),
+        )
+        if (
+            not access
+            or access[0] != "approved"
+            or access[1] != work["snapshot"].get("source_access_version")
+            or access[2] in {"left", "kicked", "migrated"}
+        ):
+            return False
+        if self.memory and not await self.memory.valid(conn, work["bot_id"], work["snapshot"]):
+            return False
+        if not await source_valid(
+            conn,
+            work["bot_id"],
+            work["chat_id"],
+            work["snapshot"]["source_access_version"],
+            work["snapshot"].get("source_manifest", []),
+        ):
+            return False
+        if not await media_refs_valid(
+            conn, work["snapshot"].get("media_refs", [])
+        ) or not await avatar_valid(conn, work["snapshot"].get("avatar_id")):
+            return False
+        if (
+            self.research
+            and work["snapshot"].get("research_id")
+            and not await self.research.valid(conn, work["snapshot"]["research_id"])
+        ):
+            return False
+        if self.photos:
+            for ref in work["snapshot"].get("photo_refs", []):
+                if not await self.photos.valid(conn, ref["batch_id"]):
+                    return False
+        if work.get("mode", "live") == "live":
+            job = await row(conn, "SELECT state FROM jobs WHERE id=?", (work["job_id"],))
+            if not job or job[0] != "running":
+                return False
+            current = Settings.model_validate_json(
+                (await row(conn, "SELECT document FROM settings WHERE id=1", ()))[0]
+            )
+            if not current.dialogue_enabled:
+                return False
+            b = work["snapshot"].get("behavior")
+            if b and not await behavior.valid(conn, work["bot_id"], work["chat_id"], b):
+                return False
+        return True
+
+    async def save_budget(self, work: dict[str, Any], budget: dict[str, Any]) -> bool:
+        async with self.store.gate, self.db.transaction() as conn:
+            if not await self.request_current(conn, work):
+                return False
+            work["snapshot"]["context_budget"] = budget
+            await conn.execute(
+                "UPDATE dialogue_runs SET snapshot=json_set(snapshot,'$.context_budget',json(?)) "
+                "WHERE id=?",
+                (json.dumps(budget), work["run_id"]),
+            )
+            if budget["provider_attempted"]:
+                await conn.execute(
+                    "UPDATE model_calls SET operation='dialogue' "
+                    "WHERE run_id=? AND state='started'",
+                    (work["run_id"],),
+                )
+            elif budget["api_count"]["state"] == "started":
+                await conn.execute(
+                    "INSERT OR IGNORE INTO model_calls(provider,model,state,created_at,"
+                    "context_count_run_id,settings_version,operation) "
+                    "VALUES ('openai',?,'started',?,?,?,'context_count')",
+                    (
+                        work["request"]["model"],
+                        stamp(),
+                        work["run_id"],
+                        work["snapshot"]["settings_version"],
+                    ),
+                )
+            return True
+
+    async def finish_count(self, work: dict[str, Any], count: Any, latency: float) -> None:
+        # Accounting/status only, never private count-payloads or fabricated billed usage.
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE model_calls SET state=?,error_code=?,latency_ms=?,finished_at=? "
+                "WHERE context_count_run_id=? AND state='started'",
+                (count.state, count.error, int(latency), stamp(), work["run_id"]),
+            )
+
+    async def preflight(self, work: dict[str, Any], request: dict[str, Any]) -> str | None:
+        budget = context_budget.inspect(
+            request,
+            expected_images=len(work["snapshot"].get("photo_refs", [])) if self.photos else 0,
+        )
+        budget["stage"] = "final"
+        if not await self.save_budget(work, budget):
+            return "context_changed"
+        error = None
+        if budget["state"] == "unverified":
+            error = "budget_unverified"
+        elif budget["state"] == "overflow":
+            error = "context_overflow"
+        elif budget["state"] == "needs_count":
+            counter = getattr(self.adapter, "count_input", None)
+            if counter is None:
+                error = context_budget.resolve(
+                    budget, tokens=None, state="unavailable", error="counter_unavailable"
+                )
+            else:
+                budget["api_count"].update(state="started", attempted=True)
+                if not await self.save_budget(work, budget):
+                    return "context_changed"
+                started = time.monotonic()
+                from zarya.openai_adapter import TokenCountResult
+
+                try:
+                    async with asyncio.timeout(15):
+                        count = await counter(request)
+                except asyncio.CancelledError:
+                    budget["api_count"].update(state="unknown", error="interrupted")
+                    budget.update(state="unverified", decision="blocked")
+                    await self.save_budget(work, budget)
+                    await self.finish_count(
+                        work,
+                        TokenCountResult("unknown", error="interrupted"),
+                        timings.elapsed(started),
+                    )
+                    raise
+                except Exception:
+                    count = TokenCountResult("unknown", error="count_uncertain")
+                budget["api_count"]["latency_ms"] = timings.elapsed(started)
+                await self.finish_count(work, count, budget["api_count"]["latency_ms"])
+                error = context_budget.resolve(
+                    budget, tokens=count.tokens, state=count.state, error=count.error
+                )
+        budget["decision"] = "blocked" if error else "ready"
+        if context_budget.fingerprint(request) != budget["request_hash"]:
+            budget.update(state="unverified", decision="blocked")
+            error = "budget_unverified"
+        # Write the generation boundary before the API; restart must never retry it.
+        budget["provider_attempted"] = error is None
+        if not await self.save_budget(work, budget):
+            return "context_changed"
+        return error
+
     async def execute(self, work: dict[str, Any]) -> None:
         if self.adapter is None:
             return
         started = time.monotonic()
+        measured = work.setdefault("timings", {})
+        post_start = None
+
+        def capture() -> None:
+            if "prepare_ms" not in measured:
+                measured["prepare_ms"] = timings.elapsed(started)
+            if post_start is not None:
+                measured["postprocess_ms"] = timings.elapsed(post_start)
+
         try:
+            from zarya.memory_context import valid_snapshot
+
+            async with self.store.gate, self.db.transaction() as conn:
+                context_current = await valid_snapshot(conn, work["bot_id"], work["snapshot"])
+            if not context_current:
+                capture()
+                await self.finish(work, ModelResult(state="cancelled", error="context_changed"), 0)
+                return
             if work["snapshot"].get("behavior") and work.get("mode", "live") == "live":
                 async with self.db.transaction() as conn:
                     current_behavior = await behavior.valid(
                         conn, work["bot_id"], work["chat_id"], work["snapshot"]["behavior"]
                     )
                 if not current_behavior:
+                    capture()
                     await self.finish(
                         work, ModelResult(state="cancelled", error="behavior_changed"), 0
                     )
@@ -748,6 +1029,7 @@ class DialogueEngine:
                 else:
                     invalid_media = False
             if invalid_media:
+                capture()
                 await self.finish(work, ModelResult(state="cancelled", error="media_changed"), 0)
                 return
             if work["snapshot"].get("source_manifest"):
@@ -760,6 +1042,7 @@ class DialogueEngine:
                         work["snapshot"]["source_manifest"],
                     )
                 if not current_source:
+                    capture()
                     await self.finish(
                         work, ModelResult(state="cancelled", error="source_changed"), 0
                     )
@@ -768,7 +1051,28 @@ class DialogueEngine:
             refs = work.get("snapshot", {}).get("photo_refs", [])
             if self.photos and refs:
                 request = await self.photos.attach(request, refs)
-            result = await self.adapter.generate(request)
+            request = context_budget.pack(request)
+            error = await self.preflight(work, request)
+            if error:
+                capture()
+                if error in context_budget.SERVICES:
+                    work["service_error"] = error
+                    await self.finish(work, ModelResult(state="rejected", error=error), 0)
+                else:
+                    await self.finish(work, ModelResult(state="cancelled", error=error), 0)
+                return
+            measured["prepare_ms"] = timings.elapsed(started)
+            model_start = time.monotonic()
+            try:
+                result = await self.adapter.generate(request)
+            finally:
+                measured["model_ms"] = timings.elapsed(model_start)
+            if result.error == "context_overflow":
+                budget = work["snapshot"]["context_budget"]
+                budget.update(state="provider_overflow", decision="provider_rejected")
+                await self.save_budget(work, budget)
+                work["service_error"] = "context_overflow"
+            post_start = time.monotonic()
             if work["snapshot"].get("behavior") and result.state == "completed":
                 try:
                     plan = behavior.BehaviorPlan.model_validate_json(result.text)
@@ -792,6 +1096,7 @@ class DialogueEngine:
                 except ValueError:
                     result.text, result.state, result.error = "", "invalid", "unknown_source"
         except asyncio.CancelledError:
+            capture()
             await self.finish(
                 work,
                 ModelResult(state="unknown", error="interrupted"),
@@ -802,12 +1107,13 @@ class DialogueEngine:
             result = ModelResult(state="rejected", error="photo_unavailable")
         except Exception:
             result = ModelResult(state="unknown", error="provider_uncertain")
+        capture()
         await self.finish(work, result, int((time.monotonic() - started) * 1000))
 
     async def details(self, run_id: int) -> dict[str, Any] | None:
         value = await self.db.one(
             "SELECT id,bot_id,chat_id,thread_id,trigger,state,snapshot,response,"
-            "error_code,created_at,mode,replay_of,job_id FROM dialogue_runs "
+            "error_code,created_at,mode,replay_of,job_id,timings_json FROM dialogue_runs "
             "WHERE id=?",
             (run_id,),
         )
@@ -829,12 +1135,28 @@ class DialogueEngine:
                     "mode",
                     "replay_of",
                     "job_id",
+                    "timings_json",
                 ),
                 value,
                 strict=True,
             )
         )
         data["snapshot"] = json.loads(data["snapshot"])
+        if data["snapshot"].get("invalidated"):
+            # Source/research purges may retain only {"invalidated": true}.
+            # Keep the read API shape usable without restoring erased content.
+            data["snapshot"] = {**json.loads(empty_snapshot()), **data["snapshot"]}
+        diagnostic = data["snapshot"].get("retrieval")
+        if diagnostic:
+            epoch_row = await self.db.one(
+                "SELECT version FROM memory_epochs WHERE bot_id=?", (data["bot_id"],)
+            )
+            if (
+                not epoch_row
+                or epoch_row[0] != diagnostic.get("epoch")
+                or diagnostic.get("at", 0) <= time.time() - 90 * 86400
+            ):
+                data["snapshot"].pop("retrieval", None)
         typing = await self.db.one(
             "SELECT COALESCE(j.typing_state,r.typing_state),"
             "COALESCE(j.typing_attempts,r.typing_attempts),COALESCE(j.typing_at,r.typing_at),"
@@ -872,7 +1194,8 @@ class DialogueEngine:
         if data["call"] and data["call"]["usage"]:
             data["call"]["usage"] = json.loads(data["call"]["usage"])
         parts = await self.db.all(
-            "SELECT part_index,state,payload,message_id,error_code FROM outbox "
+            "SELECT part_index,state,payload,message_id,error_code,timings_json,attempts "
+            "FROM outbox "
             "WHERE job_id=? ORDER BY part_index",
             (data["job_id"],),
         )
@@ -888,6 +1211,16 @@ class DialogueEngine:
             }
             for p in parts
         ]
+        first = next((p for p in parts if p[0] == 0), None)
+        data["timing"] = timings.diagnostic(
+            data.pop("timings_json"),
+            first[5] if first else None,
+            state="generating"
+            if any(p[1] in {"pending", "sending"} for p in parts)
+            else data["state"],
+            mode=data["mode"],
+            attempts=first[6] if first else 0,
+        )
         if data["mode"] != "live":
             data["parts"] = [
                 {"index": i, "state": "test_only", "text": p, "message_id": None, "error": None}
@@ -904,7 +1237,8 @@ class DialogueEngine:
             )
         values = await self.db.all(
             "SELECT id,chat_id,thread_id,trigger,state,created_at,mode,"
-            "json_extract(snapshot,'$.incoming.text') FROM dialogue_runs"
+            "json_extract(snapshot,'$.incoming.text'),"
+            "COALESCE(json_extract(snapshot,'$.invalidated'),0) FROM dialogue_runs"
             + condition
             + " ORDER BY id DESC LIMIT 20 OFFSET ?",
             args + (page * 20,),
@@ -929,8 +1263,9 @@ class DialogueEngine:
                             "created_at",
                             "mode",
                             "input",
+                            "invalidated",
                         ),
-                        p,
+                        p[:-1] + (bool(p[-1]),),
                         strict=True,
                     )
                 )
@@ -979,6 +1314,7 @@ class DialogueEngine:
                     raise ValueError("Память изменилась; для проверки отправьте новое сообщение")
         if mode == "paid":
             settings = await self.db.settings()
+            prompts = await self.store.prompts_for(settings.version)
             if expected_settings_version != settings.version:
                 raise ValueError("Настройки изменились. Откройте параметры платного теста заново")
             reply_mode = answer_mode(saved.get("question_text", saved["incoming"]["text"]))
@@ -993,7 +1329,7 @@ class DialogueEngine:
                 },
                 "settings": settings.settings.model_dump(),
                 "settings_version": settings.version,
-                "prompt_bundle_sha256": self.store.prompts.sha256,
+                "prompt_bundle_sha256": prompts.sha256,
                 "request": {
                     **saved["request"],
                     "model": settings.settings.model,
@@ -1007,7 +1343,7 @@ class DialogueEngine:
                         bool(self.photos and settings.settings.photo_enabled),
                         style,
                         sources_requested=requested(saved),
-                        prompts=self.store.prompts,
+                        prompts=prompts,
                     ),
                 },
             }
@@ -1026,13 +1362,23 @@ class DialogueEngine:
                 saved["behavior"].pop("committed_version", None)
                 saved["request"]["text"].pop("format", None)
                 if settings.settings.behavior_enabled:
-                    behavior.configure(saved["request"], saved["behavior"], self.store.prompts)
+                    behavior.configure(saved["request"], saved["behavior"], prompts)
                 else:
                     saved.pop("behavior")
         if mode == "paid" and saved.get("avatar_id"):
-            saved["request"]["instructions"] += self.store.prompts.text("dialogue.avatar")
+            saved["request"]["instructions"] += prompts.text("dialogue.avatar")
+        if mode == "paid":
+            saved["request"] = context_budget.pack(saved["request"])
+            saved["context_budget"] = context_budget.inspect(saved["request"])
+            saved["context_budget"]["stage"] = "assembled"
         async with self.capacity:
             async with self.db.transaction() as conn:
+                if (
+                    mode == "paid"
+                    and (await row(conn, "SELECT version FROM settings WHERE id=1", ()))[0]
+                    != saved["settings_version"]
+                ):
+                    raise ValueError("Настройки изменились. Откройте платный тест заново")
                 if not await avatar_valid(conn, saved.get("avatar_id")):
                     raise ValueError("Контекст аватарки недоступен; отправь новый запрос")
                 if not await media_refs_valid(conn, saved.get("media_refs", [])):
@@ -1054,6 +1400,10 @@ class DialogueEngine:
                     raise ValueError("Источник изменился; повторение недоступно")
                 if self.memory and not await self.memory.valid(conn, original["bot_id"], saved):
                     raise ValueError("Память изменилась; повторение недоступно")
+                from zarya.memory_context import valid_snapshot
+
+                if not await valid_snapshot(conn, original["bot_id"], saved):
+                    raise ValueError("Контекст изменился; повторение недоступно")
                 cursor = await conn.execute(
                     "INSERT INTO dialogue_runs(bot_id,chat_id,thread_id,"
                     "sender_id,message_id,trigger,state,snapshot,created_at,"
@@ -1074,11 +1424,15 @@ class DialogueEngine:
                     ),
                 )
                 new_id = cursor.lastrowid
+                assert new_id is not None
+                from zarya.participant_context import register
+
+                await register(conn, new_id, saved)
                 if mode == "paid":
                     await conn.execute(
                         "INSERT INTO model_calls(provider,model,state,created_at,run_id,"
-                        "settings_version,request_json,pricing_profile) VALUES "
-                        "('openai',?,'started',?,?,?,?,?)",
+                        "settings_version,request_json,pricing_profile,operation) VALUES "
+                        "('openai',?,'started',?,?,?,?,?,'preflight')",
                         (
                             saved["request"]["model"],
                             stamp(),

@@ -114,6 +114,20 @@ def display_text(text: str, snapshot: dict[str, Any]) -> str:
 
 
 def source_policy(show: bool, prompts: PromptBundle = DEFAULT_PROMPTS) -> str:
+    research_status = (
+        "Если research.state означает ошибку или незавершённую проверку, "
+        "скажи, что проверку не удалось завершить, а не что нужной информации нет. "
+        "Технический сбой поиска не доказывает отсутствие источника. "
+    )
     if show:
-        return prompts.text("links.requested")
-    return prompts.text("links.not_requested")
+        return research_status + prompts.text("links.requested") + (
+            "Для research используй маркеры [S<id>] с точным полем id источника: "
+            "например, id=33 означает [S33], даже если источник первый в списке. "
+            "Выбирай id из analysis.claims.source_ids и research.sources с доступным url; "
+            "не цитируй unavailable и не перенумеровывай источники. "
+            "Приложение само подставит URL вместо маркера; не переписывай URL вручную. "
+            "Если найденный первоисточник содержит нужное разъяснение в разделе или FAQ, "
+            "дай ссылку на страницу и назови раздел; отдельный документ не обязателен. "
+            "Недоступность исходной новости не отменяет подтверждённый первоисточник. "
+        )
+    return research_status + prompts.text("links.not_requested")

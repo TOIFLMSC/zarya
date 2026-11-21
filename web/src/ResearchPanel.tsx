@@ -10,6 +10,20 @@ const states: Record<string, string> = {
   rejected: "Запрос отклонён",
   unknown: "Состояние неизвестно",
   cancelled: "Отменено",
+  searching: "Поисковое действие не завершено",
+  in_progress: "Действие не завершено",
+  incomplete: "Неполное действие",
+  failed: "Ошибка действия",
+};
+const evidenceErrors: Record<string, string> = {
+  invalid_evidence: "Не удалось проверить структуру или ссылки результата.",
+  invalid_evidence_json: "Модель вернула результат в неверном формате.",
+  invalid_evidence_schema: "Структура результата не соответствует формату проверки.",
+  invalid_evidence_unknown_source: "Результат ссылается на неподтверждённый источник.",
+  invalid_evidence_uncited_claim: "Для уверенного утверждения не указан источник.",
+  invalid_evidence_no_completed_search: "Нет ни одного завершённого поискового действия.",
+  invalid_evidence_output_limit: "Результат превышает допустимую длину.",
+  invalid_evidence_source_limit: "Результат превышает допустимое число источников.",
 };
 const coverage: Record<string, string> = {
   partial_text: "Фрагмент текста",
@@ -164,6 +178,15 @@ export function ResearchPanel({
         {list && !list.configured && (
           <p className="notice">Ключ OpenAI не настроен. Поиск недоступен.</p>
         )}
+        {list?.max_tool_calls != null && (
+          <p className="muted">
+            До {list.max_tool_calls} действий на одно исследование. Поиск,
+            открытие страницы и поиск внутри неё расходуют общий лимит.
+            Автоматического повторного запроса к модели нет.
+            Поиск ориентируется на текущий вопрос; прежний материал служит
+            контекстом и проверяется по мере необходимости для ответа.
+          </p>
+        )}
         {error && (
           <p className="notice error" role="alert">
             {error}
@@ -184,8 +207,10 @@ export function ResearchPanel({
             >
               <span>
                 <strong>
-                  {item.mode === "search" ? "Проверка" : "Разбор материала"} · #
-                  {item.id}
+                  {item.mode === "search"
+                    ? "Поиск и проверка"
+                    : "Разбор материала"}{" "}
+                  · #{item.id}
                 </strong>
                 <small>
                   {item.scope === "private" ? "Личная переписка" : "Группа"} ·{" "}
@@ -252,7 +277,16 @@ export function ResearchPanel({
                 </details>
               )}
               {detail.error && (
-                <p className="notice">Код ограничения: {detail.error}</p>
+                <p className="notice">
+                  {evidenceErrors[detail.error]} Код ограничения: {detail.error}
+                </p>
+              )}
+              {detail.actions.some((a) => a.status && a.status !== "completed") && (
+                <p className="notice">
+                  Есть незавершённые или неудачные действия. Их источники не
+                  используются для подтверждения. Это не означает, что нужной
+                  информации нет в интернете.
+                </p>
               )}
               {detail.result && (
                 <>

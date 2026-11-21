@@ -2,7 +2,9 @@
 
 import ast
 import json
+import os
 import re
+import sqlite3
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -14,8 +16,17 @@ ROOT_FILES = {
     "pyproject.toml",
     "uv.lock",
     "start.ps1",
+    ".github/workflows/ci.yml",
 }
-DOCS = {"setup.md", "configuration.md", "architecture.md", "privacy.md", "operations.md"}
+DOCS = {
+    "setup.md",
+    "configuration.md",
+    "architecture.md",
+    "privacy.md",
+    "operations.md",
+    "codegraph.md",
+    "memory-retrieval.md",
+}
 WEB_FILES = {
     "index.html",
     "package.json",
@@ -42,7 +53,7 @@ def allowed(path: str) -> bool:
     if p.parent.as_posix() == "docs":
         return p.name in DOCS
     if p.parent.as_posix() == "scripts":
-        return p.name in {"setup-media.ps1", "check-publication.py"}
+        return p.name in {"setup-media.ps1", "check-publication.py", "check-upgrade.py"}
     if p.parts[:2] == ("src", "zarya"):
         return p.suffix in {".py", ".sql"} or path == "src/zarya/prompts.example.json"
     if p.parts[0] == "tests":
@@ -120,6 +131,27 @@ def git(*args: str) -> bytes:
     return subprocess.check_output(["git", *args])
 
 
+def local_packages(data: Path, prompt_file: Path) -> list[str]:
+    """Read private snapshots without creating or modifying a working database."""
+    packages = []
+    if prompt_file.exists():
+        packages.append(prompt_file.read_text(encoding="utf-8-sig"))
+    db = data / "zarya.sqlite3"
+    if db.is_file():
+        with sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True) as c:
+            tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "configuration_releases" in tables:
+                packages.extend(
+                    r[0] for r in c.execute("SELECT prompts_json FROM configuration_releases")
+                )
+            if "configuration_drafts" in tables:
+                packages.extend(
+                    json.dumps(json.loads(r[0])["prompts"], ensure_ascii=False)
+                    for r in c.execute("SELECT document FROM configuration_drafts")
+                )
+    return packages
+
+
 def main() -> int:
     entries = git("ls-files", "--stage", "-z").split(b"\0")
     entries = [entry for entry in entries if entry]
@@ -127,10 +159,16 @@ def main() -> int:
         print("FAIL: Git index is empty; nothing has been audited")
         return 1
     chunks = set()
-    local = Path("data/prompts.json")
-    if local.exists():
+    data = Path(os.environ.get("ZARYA_DATA_DIR", "data"))
+    local = Path(os.environ.get("ZARYA_PROMPTS_FILE", str(data / "prompts.json")))
+    try:
+        packages = local_packages(data, local)
         neutral = git("show", ":src/zarya/prompts.example.json").decode("utf-8")
-        chunks = private_chunks(local.read_text(encoding="utf-8-sig"), neutral)
+        for package in packages:
+            chunks.update(private_chunks(package, neutral))
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+        print("FAIL: cannot inspect local prompt packages; audit is incomplete")
+        return 1
     failures = 0
     for entry in entries:
         meta, name = entry.split(b"\t", 1)
@@ -145,7 +183,7 @@ def main() -> int:
             print(f"FAIL: {path}: {problem}")
     print(
         f"Audited {len(entries)} index files; findings: {failures}; "
-        f"local prompt comparison: {'yes' if local.exists() else 'not available'}"
+        f"local prompt comparison: {'yes' if packages else 'not available'}"
     )
     return int(bool(failures))
 

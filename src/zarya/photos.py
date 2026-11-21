@@ -155,7 +155,9 @@ class PhotoEngine:
         async with self.store.gate, self.db.transaction() as conn:
             value = await row(
                 conn,
-                "SELECT id,model,bot_id,chat_id,access_version,processing_version "
+                "SELECT id,model,bot_id,chat_id,access_version,processing_version,"
+                "COALESCE(settings_version,(SELECT version FROM settings WHERE id="
+                "1)) "
                 "FROM photo_batches "
                 "WHERE bot_id=? AND state='queued' AND collect_until<=? ORDER BY id LIMIT 1",
                 (bot, time.time()),
@@ -182,7 +184,15 @@ class PhotoEngine:
                 items = list(await c.fetchall())
             return dict(
                 zip(
-                    ("id", "model", "bot", "chat", "version", "processing_version"),
+                    (
+                        "id",
+                        "model",
+                        "bot",
+                        "chat",
+                        "version",
+                        "processing_version",
+                        "settings_version",
+                    ),
                     value,
                     strict=True,
                 ),
@@ -294,7 +304,9 @@ class PhotoEngine:
                 "reasoning": {"effort": PHOTO_REASONING},
                 "store": False,
                 "max_output_tokens": 6000,
-                "instructions": (self.store.prompts.text("media.photo")),
+                "instructions": (
+                    (await self.store.prompts_for(work["settings_version"])).text("media.photo")
+                ),
                 "text": {
                     "verbosity": "low",
                     "format": {
@@ -319,9 +331,7 @@ class PhotoEngine:
                     "AND id!=? ORDER BY id DESC LIMIT 1",
                     (work["bot"], work["chat"], work["version"], fingerprint, batch),
                 )
-                settings_version = (await row(conn, "SELECT version FROM settings WHERE id=1", ()))[
-                    0
-                ]
+                settings_version = work["settings_version"]
                 await conn.execute(
                     "UPDATE photo_batches SET "
                     "manifest=?,fingerprint=?,settings_version=? WHERE id=?",

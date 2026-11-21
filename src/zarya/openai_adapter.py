@@ -43,6 +43,22 @@ class ModelResult:
     citations: list[dict[str, Any]] | None = None
 
 
+@dataclass
+class TokenCountResult:
+    state: str
+    tokens: int | None = None
+    error: str | None = None
+
+
+def context_error(exc: APIStatusError) -> bool:
+    body = exc.body
+    if isinstance(body, dict):
+        nested = body.get("error")
+        code = nested.get("code") if isinstance(nested, dict) else body.get("code")
+        return code in {"context_length_exceeded", "context_window_exceeded"}
+    return False
+
+
 class ModelAdapter(Protocol):
     async def generate(self, request: dict[str, Any]) -> ModelResult: ...
     async def close(self) -> None: ...
@@ -164,7 +180,7 @@ class OpenAIAdapter:
             rejected = exc.status_code in {400, 401, 403, 404, 422, 429}
             return ModelResult(
                 state="rejected" if rejected else "unknown",
-                error=f"http_{exc.status_code}",
+                error="context_overflow" if context_error(exc) else f"http_{exc.status_code}",
                 request_id=exc.request_id,
             )
         except (APIConnectionError, TimeoutError):
@@ -172,3 +188,20 @@ class OpenAIAdapter:
 
     async def close(self) -> None:
         await self.client.close()
+
+    async def count_input(self, request: dict[str, Any]) -> TokenCountResult:
+        from zarya.context_budget import count_payload
+
+        try:
+            async with asyncio.timeout(15):
+                result = await self.client.responses.input_tokens.count(**count_payload(request))
+            if type(result.input_tokens) is not int or result.input_tokens < 0:
+                return TokenCountResult("rejected", error="invalid_count")
+            return TokenCountResult("completed", result.input_tokens)
+        except APIStatusError as exc:
+            return TokenCountResult(
+                "overflow" if context_error(exc) else "rejected",
+                error="context_overflow" if context_error(exc) else f"http_{exc.status_code}",
+            )
+        except (APIConnectionError, TimeoutError):
+            return TokenCountResult("unknown", error="count_connection_uncertain")

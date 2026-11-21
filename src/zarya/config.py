@@ -16,6 +16,7 @@ class Config:
     ffmpeg_path: str = ""
     ffprobe_path: str = ""
     prompts_file: Path | None = None
+    obsidian_file: Path | None = None
 
     @property
     def origins(self) -> set[str]:
@@ -45,4 +46,5 @@ class Config:
             prompts_file=Path(
                 os.environ.get("ZARYA_PROMPTS_FILE", data_dir / "prompts.json")
             ).resolve(),
+            obsidian_file=data_dir / "obsidian.local.json",
         )

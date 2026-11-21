@@ -201,6 +201,11 @@ async def admit(
             ),
         )
         batch = cursor.lastrowid
+        await conn.execute(
+            "UPDATE photo_batches SET settings_version=(SELECT version FROM se"
+            "ttings WHERE id=1) WHERE id=?",
+            (batch,),
+        )
     else:
         await conn.execute(
             "UPDATE photo_batches SET collect_until=MIN(?,collect_deadline) WHERE id=?",

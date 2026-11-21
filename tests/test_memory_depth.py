@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -110,16 +111,28 @@ async def test_memory_cancellation_reason_does_not_overwrite_successful_call(tmp
         await store.ingest("999", "zarya_test", [event(5, -100, "Заря, привет")])
         work = await dialogue.claim("999")
         assert work and work["snapshot"]["memory"]["summaries"]
+        started, release = asyncio.Event(), asyncio.Event()
+        original_generate = dialogue.adapter.generate
+
+        async def waiting_generate(request):
+            started.set()
+            await release.wait()
+            return await original_generate(request)
+
+        dialogue.adapter.generate = waiting_generate
+        executing = asyncio.create_task(dialogue.execute(work))
+        await asyncio.wait_for(started.wait(), timeout=5)
         async with store.db.transaction() as conn:
             await conn.execute("UPDATE memory_batches SET summary=NULL WHERE id=?", (batch["id"],))
             if revoke:
                 await conn.execute(
                     "UPDATE telegram_access SET state='revoked' WHERE subject_id='-100'"
                 )
-        await dialogue.execute(work)
+        release.set()
+        await executing
         detail = await dialogue.details(work["run_id"])
         assert detail["state"] == "cancelled"
-        assert detail["error"] == (None if revoke else "memory_changed")
+        assert detail["error"] == (None if revoke else "context_changed")
         assert await store.db.one(
             "SELECT state,error_code FROM model_calls WHERE run_id=?", (work["run_id"],)
         ) == ("completed", None)

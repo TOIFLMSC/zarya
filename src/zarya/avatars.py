@@ -342,7 +342,9 @@ class AvatarEngine:
                 "reasoning": {"effort": work["reasoning"]},
                 "store": False,
                 "max_output_tokens": 3500,
-                "instructions": self.store.prompts.text("media.avatar"),
+                "instructions": (await self.store.prompts_for(work["version"])).text(
+                    "media.avatar"
+                ),
                 "input": [{"role": "user", "content": content}],
                 "text": {
                     "format": {

@@ -31,6 +31,8 @@ test-results/
 !/docs/architecture.md
 !/docs/privacy.md
 !/docs/operations.md
+!/docs/codegraph.md
+!/docs/memory-retrieval.md
 
 # Defense in depth: runtime exports must never be committed from other folders.
 *.sqlite

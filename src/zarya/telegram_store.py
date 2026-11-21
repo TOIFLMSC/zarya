@@ -8,9 +8,11 @@ from typing import Any
 
 import aiosqlite
 
+from zarya import timings
 from zarya.avatar_logic import AVATAR_WAIT
 from zarya.avatar_logic import purge as purge_avatars
 from zarya.avatar_logic import valid as avatar_valid
+from zarya.configuration import prompts_at
 from zarya.database import ConflictError, Database
 from zarya.dialogue_logic import direct_trigger, message_text, topic_id
 from zarya.media_logic import MEDIA_WAIT
@@ -25,6 +27,7 @@ from zarya.memory_logic import (
     invalidate as invalidate_memory,
 )
 from zarya.models import Settings
+from zarya.participant_context import admit as admit_participant
 from zarya.photo_logic import PHOTO_WAIT, admit, link_job
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
 from zarya.research_logic import RESEARCH_WAIT
@@ -41,12 +44,77 @@ async def row(conn: aiosqlite.Connection, sql: str, args: tuple[object, ...]) ->
         return await cursor.fetchone()
 
 
+async def pending_edit(
+    conn: aiosqlite.Connection,
+    bot: str,
+    chat: str,
+    grant: int,
+    message: dict[str, Any],
+) -> tuple[int, str] | None:
+    """Carry an unanswered text request to its new revision, never retry a dialogue call."""
+    if not message.get("text") or str(message["text"]).startswith("/"):
+        return None
+    previous = await row(
+        conn,
+        "SELECT j.id,j.state,j.attempts,j.payload,e.payload,j.created_at FROM jobs j "
+        "JOIN events e ON e.id=j.event_id JOIN research_messages m ON m.event_id=e.id "
+        "AND m.bot_id=e.bot_id AND m.chat_id=e.chat_id "
+        "WHERE e.bot_id=? AND e.chat_id=? AND m.message_id=? AND j.access_version=? "
+        "AND j.kind='telegram' ORDER BY j.id DESC LIMIT 1",
+        (bot, chat, message["message_id"], grant),
+    )
+    if not previous or previous[1] != "pending" or previous[2] != 0:
+        return None
+    job_id, _, _, raw, update, created = previous
+    payload = json.loads(raw)
+    original = json.loads(update)
+    original = original.get("message") or original.get("edited_message") or {}
+    trigger = payload.get("trigger")
+    sender = str(message.get("from", {}).get("id", ""))
+    thread = topic_id(message)
+    if (
+        trigger not in {"private", "name", "mention", "reply", "continuation"}
+        or payload.get("sender_id") != sender
+        or payload.get("thread_id") != thread
+        or payload.get("service_reply")
+        or not original.get("text")
+        or message.get("from", {}).get("is_bot")
+        or message.get("sender_chat")
+        or message.get("forward_origin")
+        or message.get("forward_date")
+        or time.time() - datetime.fromisoformat(created).timestamp() > 600
+    ):
+        return None
+    blocked = await row(
+        conn,
+        "SELECT 1 WHERE EXISTS (SELECT 1 FROM dialogue_runs WHERE job_id=?) "
+        "OR EXISTS (SELECT 1 FROM outbox WHERE job_id=?) "
+        "OR EXISTS (SELECT 1 FROM jobs j JOIN events e ON e.id=j.event_id "
+        "WHERE e.bot_id=? AND e.chat_id=? AND j.id>? "
+        "AND json_extract(j.payload,'$.sender_id')=? "
+        "AND COALESCE(json_extract(j.payload,'$.thread_id'),0)=? "
+        "AND json_extract(j.payload,'$.trigger') IN "
+        "('private','name','mention','reply','continuation'))",
+        (job_id, job_id, bot, chat, job_id, sender, thread or 0),
+    )
+    return None if blocked else (job_id, trigger)
+
+
 class TelegramStore:
     def __init__(self, db: Database, prompts: PromptBundle = DEFAULT_PROMPTS):
         self.db = db
         self.prompts = prompts
         # Also guards revocation against the sender's final check + bounded send.
         self.gate = asyncio.Lock()
+        self.clock = timings.Clock()
+
+    async def prompts_for(
+        self, version: int, conn: aiosqlite.Connection | None = None
+    ) -> PromptBundle:
+        if conn is not None:
+            return await prompts_at(conn, version, self.prompts)
+        async with self.db.read_lock:
+            return await prompts_at(self.db.reader, version, self.prompts)
 
     async def recover(self, bot_id: str) -> None:
         async with self.gate, self.db.transaction() as conn:
@@ -60,6 +128,37 @@ class TelegramStore:
             await conn.execute(
                 "UPDATE dialogue_runs SET typing_state='uncertain',"
                 "typing_error='interrupted' WHERE bot_id=? AND typing_state='sending'",
+                (bot_id,),
+            )
+            # A preflight crash is not an uncertain generation. No automatic repeat
+            # of either the count or the paid request; old runs retain legacy recovery.
+            await conn.execute(
+                "UPDATE model_calls SET state='rejected',error_code='preflight_interrupted',"
+                "finished_at=?,cost_usd=0 "
+                "WHERE state='started' AND operation='preflight' AND run_id IN "
+                "(SELECT id FROM dialogue_runs WHERE bot_id=?)",
+                (stamp(), bot_id),
+            )
+            await conn.execute(
+                "UPDATE model_calls SET state='unknown',error_code='count_interrupted',"
+                "finished_at=? WHERE state='started' AND context_count_run_id IN "
+                "(SELECT id FROM dialogue_runs WHERE bot_id=?)",
+                (stamp(), bot_id),
+            )
+            await conn.execute(
+                "UPDATE jobs SET state='done',lease_until=NULL WHERE state='running' AND id IN "
+                "(SELECT c.job_id FROM model_calls c JOIN dialogue_runs r ON r.id=c.run_id "
+                "WHERE c.error_code='preflight_interrupted' AND r.bot_id=?)",
+                (bot_id,),
+            )
+            await conn.execute(
+                "UPDATE dialogue_runs SET state='rejected',error_code='preflight_interrupted',"
+                "snapshot=json_set(snapshot,'$.context_budget.state','unverified',"
+                "'$.context_budget.decision','blocked','$.context_budget.api_count.state',"
+                "CASE WHEN json_extract(snapshot,'$.context_budget.api_count.attempted')=1 "
+                "THEN 'unknown' ELSE 'not_started' END) WHERE bot_id=? AND state='generating' "
+                "AND id IN (SELECT run_id FROM model_calls "
+                "WHERE error_code='preflight_interrupted')",
                 (bot_id,),
             )
             await conn.execute(
@@ -104,6 +203,9 @@ class TelegramStore:
         return int(value[0]) if value[0] is not None else None
 
     async def _cancel(self, conn: aiosqlite.Connection, bot_id: str, subject: str) -> None:
+        from zarya.memory_commands import scrub_scope
+
+        await scrub_scope(conn, bot_id, subject)
         from zarya.behavior import erase_chat
         from zarya.media_logic import purge as purge_media
 
@@ -319,6 +421,11 @@ class TelegramStore:
                     settings = Settings.model_validate_json(settings_row[0])
                     trigger = direct_trigger(message, bot_id, username, settings.display_name)
                     edited = "edited_message" in update
+                    replacement = (
+                        await pending_edit(conn, bot_id, subject, access[1], message)
+                        if edited
+                        else None
+                    )
                     if edited:
                         await research_revision(conn, bot_id, subject, message["message_id"])
                         await purge_avatars(
@@ -337,6 +444,15 @@ class TelegramStore:
                     )
                     sender_id = str(sender.get("id", ""))
                     thread_id = topic_id(message)
+                    await admit_participant(
+                        conn,
+                        bot_id,
+                        subject,
+                        access[1],
+                        event_id,
+                        message,
+                        edited,
+                    )
                     await admit_memory(
                         conn,
                         bot_id,
@@ -378,7 +494,12 @@ class TelegramStore:
                                 "WHERE bot_id=? AND chat_id=? AND thread_id=? AND sender_id=?",
                                 (bot_id, subject, thread_id or 0, sender_id),
                             )
-                    # Edits replace context and cancel obsolete delivery, but never generate again.
+                    # Retire the old revision even when it never reached dialogue_runs.
+                    if replacement:
+                        await conn.execute(
+                            "UPDATE jobs SET state='cancelled' WHERE id=?", (replacement[0],)
+                        )
+                    # Started dialogue calls are never repeated after an edit.
                     if edited or (
                         not album_job
                         and new_photo_job
@@ -419,20 +540,16 @@ class TelegramStore:
                             time.time(),
                         ),
                     )
-                    await conn.execute(
-                        "DELETE FROM recent_messages WHERE bot_id=? AND chat_id=? AND message_id "
-                        "NOT IN (SELECT message_id FROM recent_messages "
-                        "WHERE bot_id=? AND chat_id=? "
-                        "ORDER BY received_at DESC LIMIT 500)",
-                        (bot_id, subject, bot_id, subject),
-                    )
+                    # Retention handles history; neighbours must not evict personal windows.
                     payload = {
                         "scope": scope,
                         "chat_id": subject,
                         "service_reply": private_start or service_text is not None,
                         "thread_id": thread_id,
                         "message_id": message.get("message_id"),
-                        "trigger": "edited" if edited else trigger,
+                        "trigger": (
+                            replacement[1] if replacement else "edited" if edited else trigger
+                        ),
                         "sender_id": sender_id,
                     }
                     if service_text is not None:
@@ -527,9 +644,12 @@ class TelegramStore:
     async def claim_delivery(self, bot_id: str) -> dict[str, Any] | None:
         # Caller holds gate through the subsequent network call and result commit.
         async with self.db.transaction() as conn:
+            claim_at = time.time()
+            check_start = time.monotonic()
             value = await row(
                 conn,
-                "SELECT id,chat_id,scope,payload,access_version,attempts,part_index FROM outbox "
+                "SELECT id,chat_id,scope,payload,access_version,attempts,part_index,created_at "
+                "FROM outbox "
                 "WHERE bot_id=? AND state='pending' AND next_attempt<=? "
                 "AND NOT EXISTS (SELECT 1 FROM outbox earlier WHERE earlier.job_id=outbox.job_id "
                 "AND earlier.part_index<outbox.part_index AND earlier.state!='sent') "
@@ -540,7 +660,7 @@ class TelegramStore:
             )
             if not value:
                 return None
-            item_id, chat_id, scope, document, version, attempts, part_index = value
+            item_id, chat_id, scope, document, version, attempts, part_index, created_at = value
             memory_run = await row(
                 conn,
                 "SELECT snapshot FROM dialogue_runs WHERE job_id="
@@ -617,13 +737,7 @@ class TelegramStore:
                 (item_id,),
             )
             settings = await row(conn, "SELECT document FROM settings WHERE id=1", ())
-            expired = (
-                time.time()
-                - datetime.fromisoformat(
-                    (await row(conn, "SELECT created_at FROM outbox WHERE id=?", (item_id,)))[0]
-                ).timestamp()
-                > 600
-            )
+            expired = time.time() - datetime.fromisoformat(created_at).timestamp() > 600
             if expired or (
                 linked and not Settings.model_validate_json(settings[0]).dialogue_enabled
             ):
@@ -670,7 +784,17 @@ class TelegramStore:
             outgoing = json.loads(document)
             if part_index > 0:
                 outgoing["reply_id"] = None
-            return {"id": item_id, "chat_id": chat_id, **outgoing}
+            measured = {"delivery_check_ms": timings.elapsed(check_start)}
+            wait = self.clock.since(datetime.fromisoformat(created_at).timestamp(), claim_at)
+            if wait is not None:
+                measured["outbox_wait_ms"] = wait
+            return {
+                "id": item_id,
+                "chat_id": chat_id,
+                **outgoing,
+                "_timings": measured,
+                "_attempt": attempts + 1,
+            }
 
     async def delivery_result(
         self,
@@ -679,13 +803,19 @@ class TelegramStore:
         code: str | None = None,
         message_id: int | None = None,
         delay: float = 0,
+        measured: dict[str, float] | None = None,
+        attempt: int | None = None,
+        confirmed_at: float | None = None,
     ) -> None:
         async with self.db.transaction() as conn:
-            await conn.execute(
+            write_start = time.monotonic()
+            changed = await conn.execute(
                 "UPDATE outbox SET state=?,error_code=?,message_id=?,next_attempt=? WHERE "
-                "id=? AND state='sending'",
-                (state, code, message_id, time.time() + delay, item_id),
+                "id=? AND state='sending' AND (? IS NULL OR attempts=?)",
+                (state, code, message_id, time.time() + delay, item_id, attempt, attempt),
             )
+            if changed.rowcount != 1:
+                return
             item = await row(
                 conn, "SELECT bot_id,chat_id,payload,job_id FROM outbox WHERE id=?", (item_id,)
             )
@@ -738,6 +868,42 @@ class TelegramStore:
                             "INSERT OR REPLACE INTO active_dialogues VALUES (?,?,?,?,?,?)",
                             (item[0], item[1], run[1] or 0, run[0], time.time() + 90, 2),
                         )
+            if measured is not None:
+                previous = await row(
+                    conn, "SELECT timings_json,part_index FROM outbox WHERE id=?", (item_id,)
+                )
+                accumulated = timings.clean(previous[0])
+                attempt_values = timings.clean({"version": 1, **measured})
+                for key in ("delivery_check_ms", "telegram_ms"):
+                    if key in attempt_values:
+                        accumulated[key] = accumulated.get(key, 0) + attempt_values[key]
+                if "outbox_wait_ms" in attempt_values:
+                    accumulated["outbox_wait_ms"] = attempt_values["outbox_wait_ms"]
+                if (
+                    state == "sent"
+                    and message_id is not None
+                    and previous[1] == 0
+                    and (json.loads(item[2]).get("action", "text") == "text")
+                    and confirmed_at is not None
+                ):
+                    live_run = await row(
+                        conn,
+                        "SELECT timings_json FROM dialogue_runs WHERE job_id=? AND mode='live'",
+                        (item[3],),
+                    )
+                    received = timings.clean(live_run[0]).get("received_at") if live_run else None
+                    total = (
+                        self.clock.since(received, confirmed_at) if received is not None else None
+                    )
+                    if total is not None:
+                        accumulated["total_first_reply_ms"] = total
+                accumulated["result_write_ms"] = accumulated.get("result_write_ms", 0) + (
+                    timings.elapsed(write_start)
+                )
+                await conn.execute(
+                    "UPDATE outbox SET timings_json=? WHERE id=?",
+                    (timings.encode(accumulated), item_id),
+                )
 
     async def claim_typing(self, bot_id: str, media_enabled: bool = False) -> dict[str, Any] | None:
         # One durable job owns typing across media waiting, generation and delivery.
@@ -751,9 +917,13 @@ class TelegramStore:
             now = time.time()
             candidate = await row(
                 conn,
+                "WITH live_jobs(id) AS MATERIALIZED ("
+                "SELECT id FROM jobs WHERE kind='telegram' AND state IN ('pending','running') "
+                "UNION SELECT job_id FROM outbox WHERE bot_id=? AND state='pending') "
                 "SELECT j.id,e.chat_id,json_extract(j.payload,'$.thread_id'),"
                 "MIN(j.created_at,COALESCE(r.created_at,j.created_at)),r.id "
-                "FROM jobs j JOIN events e ON e.id=j.event_id "
+                "FROM live_jobs c CROSS JOIN jobs j ON j.id=c.id "
+                "JOIN events e ON e.id=j.event_id "
                 "LEFT JOIN dialogue_runs r ON r.job_id=j.id "
                 "JOIN telegram_access a ON a.bot_id=e.bot_id AND a.subject_id=e.chat_id "
                 "AND a.scope=json_extract(j.payload,'$.scope') "
@@ -808,6 +978,7 @@ class TelegramStore:
                 "((SELECT last_attempt FROM delivery_limits d WHERE d.bot_id=e.bot_id "
                 "AND d.chat_id=e.chat_id),0)) ORDER BY j.typing_due,j.id LIMIT 1",
                 (
+                    bot_id,
                     bot_id,
                     now,
                     media_enabled,

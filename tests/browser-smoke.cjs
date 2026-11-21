@@ -10,7 +10,7 @@ const crypto = require("node:crypto");
 const assert = require("node:assert/strict");
 
 const root = path.resolve(__dirname, "..");
-const output = path.join(root, "test-results");
+const output = path.join(root, "test-results", process.env.ZARYA_BROWSER_OUTPUT || ".");
 const origin = "http://127.0.0.1:8791";
 const password = crypto.randomBytes(24).toString("hex");
 let server;
@@ -59,6 +59,7 @@ async function stop() {
 }
 
 async function navigate(page, name) {
+  await page.locator("#main-navigation").waitFor({ state: "attached" });
   const toggle = page.locator(".mobile-nav-toggle");
   if (
     (await toggle.isVisible()) &&
@@ -159,6 +160,13 @@ async function openSettingsSection(page, title) {
   await page.route(avatarDetailRoute, async (route) => {
     const response = await route.fetch();
     const body = await response.json();
+    assert.equal(typeof body.timing.stages.model_ms, "number");
+    // Numeric visual fixture: backend timing boundaries have separate Python tests.
+    body.timing = {
+      status: "complete", attempts: 2,
+      stages: { queue_ms: 0, claim_ms: 340, model_ms: 2100, telegram_ms: 75,
+                outbox_wait_ms: 1800, total_first_reply_ms: 4321 },
+    };
     body.snapshot.avatar_profile = {
       user_id: "77",
       name: "Тестовый профиль",
@@ -174,6 +182,13 @@ async function openSettingsSection(page, title) {
         uncertainty: "",
       },
     };
+    assert.equal(body.snapshot.retrieval.mode, "shadow");
+    // Synthetic populated comparison verifies the rendered metadata states.
+    body.snapshot.retrieval.graph = {
+      facts: [{ id: 7, version: 2, reasons: ["accepted_reply", "query_match"] }],
+      episodes: [{ id: 9, reasons: ["related_episode"] }],
+      conflicts: [3], reply_messages: [1000], chars: 640,
+    };
     await route.fulfill({ response, json: body });
   });
   await page
@@ -185,6 +200,37 @@ async function openSettingsSection(page, title) {
   await page
     .getByText("04 · Части ответа и доставка", { exact: true })
     .waitFor();
+  await page.getByText("Состав персональных окон", { exact: true }).click();
+  await page.getByText(/Текущее сообщение входит в предел/).waitFor();
+  const budgetSummary = page.getByText(/^Вместимость контекста ·/);
+  await budgetSummary.click();
+  await page.getByText("Состав входа", { exact: true }).click();
+  await page.getByText("Не выполнялся", { exact: true }).waitFor();
+  await budgetSummary.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(output, "budget-fit-desktop.png") });
+  await page.setViewportSize({ width: 360, height: 800 });
+  await budgetSummary.evaluate(el => el.scrollIntoView({ block: "start" }));
+  await page.waitForTimeout(200);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({ path: path.join(output, "budget-fit-mobile.png") });
+  await page.getByText("Подсчёт API", { exact: true }).evaluate(el => el.scrollIntoView({ block: "start" }));
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: path.join(output, "budget-fit-mobile-composition.png") });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.screenshot({ path: path.join(output, "participant-dialogue-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 360, height: 800 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({ path: path.join(output, "participant-dialogue-mobile.png"), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByText("Показать этапы времени", { exact: true }).click();
+  await page.getByText("4,3 с", { exact: true }).waitFor();
+  await page.getByText(/Были повторные попытки/).waitFor();
+  assert.ok(await page.getByText("Нет измерения", { exact: true }).count());
+  await page.screenshot({ path: path.join(output, "timings-dialogue-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 360, height: 800 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.screenshot({ path: path.join(output, "timings-dialogue-mobile.png"), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page
     .getByText("Аватарки выбранного собеседника", { exact: true })
     .click();
@@ -196,6 +242,15 @@ async function openSettingsSection(page, title) {
     fullPage: true,
   });
   await page.unroute(avatarDetailRoute);
+  await page.getByText("Подбор памяти · теневое сравнение", { exact: true }).click();
+  await page.getByText(/Ответ использует прежний подбор/).waitFor();
+  await page.getByText("Причины выбора", { exact: true }).last().click();
+  await page.getByText(/Факт #7: связь с проверенным реплаем/).waitFor();
+  await page.screenshot({ path: path.join(output, "retrieval-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 360, height: 800 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.screenshot({ path: path.join(output, "retrieval-mobile.png"), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page
     .getByText("Показать использованные сообщения", { exact: true })
     .click();
@@ -477,7 +532,72 @@ async function openSettingsSection(page, title) {
   );
   await page.setViewportSize({ width: 1440, height: 1000 });
   await navigate(page, "Память");
+  for (let n = 0; n < 80; n++) {
+    const result = await page.request.get(`${origin}/fixture-summaries`);
+    if ((await result.json()).ready) break;
+    if (n === 79) throw new Error("Personal summary worker did not complete");
+    await page.waitForTimeout(100);
+  }
+  const vaultCopy = page.getByText(/^Локальное хранилище памяти\. Персональные сводки/);
+  await vaultCopy.waitFor();
+  await vaultCopy.evaluate(el => el.scrollIntoView({ block: "start" }));
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: path.join(output, "summary-vault-copy-desktop.png") });
+  await page.setViewportSize({ width: 360, height: 800 });
+  await vaultCopy.evaluate(el => el.scrollIntoView({ block: "start" }));
+  await page.waitForTimeout(200);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({ path: path.join(output, "summary-vault-copy-mobile.png") });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByLabel(/^Чат/).selectOption("-100");
+  await page.getByLabel(/^Собеседник/).selectOption("42");
+  const personalGraph = await page.request.get(`${origin}/api/memory/chats/-100/graph`);
+  assert.equal(personalGraph.status(), 200);
+  const personalGraphData = await personalGraph.json();
+  const summaryNodes = personalGraphData.nodes.filter(n => n.kind === "participant_summary");
+  assert.equal(summaryNodes.length, 3);
+  assert.equal(personalGraphData.nodes.filter(n => n.kind === "participant_source").length, 15);
+  for (const node of summaryNodes) {
+    assert.equal(personalGraphData.edges.filter(e => e.source === node.id && e.type === "derived_from").length, 5);
+  }
+  const summaryVault = await page.request.get(`${origin}/api/memory/chats/-100/graph/vault`);
+  assert.equal(summaryVault.status(), 200);
+  assert.ok(summaryVault.headers()["content-type"].includes("application/zip"));
+  assert.equal((await summaryVault.body()).subarray(0, 2).toString(), "PK");
+  const graphCopy = page.getByText(/Приватный снимок выбранного чата:/);
+  await graphCopy.waitFor();
+  await graphCopy.evaluate(el => el.scrollIntoView({ block: "start" }));
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: path.join(output, "summary-graph-copy-desktop.png") });
+  await page.setViewportSize({ width: 360, height: 800 });
+  await graphCopy.evaluate(el => el.scrollIntoView({ block: "start" }));
+  await page.waitForTimeout(200);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({ path: path.join(output, "summary-graph-copy-mobile.png") });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const personal = page.getByRole("region", { name: "Недавний контекст собеседника" });
+  await personal.getByText("Предел окна", { exact: true }).waitFor();
+  await personal.getByText("Все оригиналы окна", { exact: true }).click();
+  await personal.getByText(/^Сводки в этом окне/).click();
+  await personal.getByText("Обсуждали совместную поездку, прогулки и планы на выходные.", { exact: true }).first().waitFor();
+  await personal.getByText("Оригиналы блока", { exact: true }).first().click();
+  await personal.getByText("Обработка и расход", { exact: true }).first().click();
+  await personal.locator(".context-message").first().waitFor();
+  await page.screenshot({ path: path.join(output, "participant-memory-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 360, height: 800 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({ path: path.join(output, "participant-memory-mobile.png"), fullPage: true });
+  // Focused mobile captures remain readable even with long synthetic originals.
+  await personal.getByText("Все оригиналы окна", { exact: true }).click();
+  await personal.getByText("Оригиналы блока", { exact: true }).first().click();
+  await personal.getByText("Заменено сводками / блоков", { exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(output, "summary-coverage-mobile.png") });
+  await personal.getByText("Обработка и расход", { exact: true }).first().scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(output, "summary-ledger-mobile.png") });
+  await personal.getByText(/^Оригиналы без сводки/).click();
+  await personal.getByText(/^Оригиналы без сводки/).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(output, "summary-originals-mobile.png") });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page
     .getByText("Любит Python и проверять источники.", { exact: true })
     .waitFor();
@@ -517,7 +637,7 @@ async function openSettingsSection(page, title) {
     fullPage: true,
   });
   await page
-    .getByRole("button", { name: "Сводки и обработка", exact: true })
+    .getByRole("button", { name: "События и сводки", exact: true })
     .click();
   await page.waitForTimeout(250);
   await page.screenshot({
@@ -541,6 +661,65 @@ async function openSettingsSection(page, title) {
   );
   await page.setViewportSize({ width: 1440, height: 1000 });
   await navigate(page, "Настройки");
+  await openSettingsSection(page, "Близкий человек");
+  await openSettingsSection(page, "Память");
+  assert.equal(await page.getByLabel("Подбор долговременной памяти").inputValue(), "shadow");
+  const depth = page.getByLabel(/^Последних человеческих сообщений/);
+  assert.equal(await depth.inputValue(), "20");
+  for (const invalid of ["0", "101", "2.5"]) {
+    await depth.fill(invalid);
+    assert.equal(await depth.evaluate((input) => input.checkValidity()), false);
+  }
+  await depth.fill("7");
+  await page.getByLabel(/^Персональные сводки сообщений/).selectOption("off");
+  const depthSave = page.waitForResponse((response) => response.url().endsWith("/api/settings") && response.request().method() === "PUT");
+  await page.getByRole("button", { name: "Сохранить настройки" }).click();
+  assert.equal((await depthSave).ok(), true);
+  await page.reload();
+  await navigate(page, "Настройки");
+  await openSettingsSection(page, "Память");
+  assert.equal(await depth.inputValue(), "7");
+  assert.equal(await page.getByLabel(/^Персональные сводки сообщений/).inputValue(), "off");
+  await depth.fill("20");
+  await page.getByLabel(/^Персональные сводки сообщений/).selectOption("on");
+  const depthRestore = page.waitForResponse((response) => response.url().endsWith("/api/settings") && response.request().method() === "PUT");
+  await page.getByRole("button", { name: "Сохранить настройки" }).click();
+  assert.equal((await depthRestore).ok(), true);
+  await page.getByText("Повторные чтения ускорены внутри одной операции.", { exact: false }).waitFor();
+  await page.screenshot({ path: path.join(output, "retrieval-settings.png"), fullPage: true });
+  await page.setViewportSize({ width: 360, height: 800 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.screenshot({ path: path.join(output, "retrieval-settings-mobile.png"), fullPage: true });
+  await page.getByText("Инструкция персональной саммаризации", { exact: true }).click();
+  await page.getByLabel(/^Инструкция для сводок/).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(output, "summary-instruction-mobile.png") });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByLabel(/^Инструкция для сводок/).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(output, "summary-instruction-desktop.png") });
+  await openSettingsSection(page, "Интернет");
+  await page.getByText("Вопросы и содержательные просьбы по умолчанию проходят", { exact: false }).waitFor();
+  await page.screenshot({ path: path.join(output, "research-routing-settings.png"), fullPage: true });
+  await page.setViewportSize({ width: 360, height: 800 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.screenshot({ path: path.join(output, "research-routing-settings-mobile.png"), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByLabel("Подбор долговременной памяти").selectOption("graph");
+  const graphSave = page.waitForResponse((response) =>
+    response.url().endsWith("/api/settings") && response.request().method() === "PUT",
+  );
+  await page.getByRole("button", { name: "Сохранить настройки" }).click();
+  assert.equal((await graphSave).ok(), true);
+  await page.reload();
+  await navigate(page, "Настройки");
+  await openSettingsSection(page, "Память");
+  assert.equal(await page.getByLabel("Подбор долговременной памяти").inputValue(), "graph");
+  await page.getByLabel("Подбор долговременной памяти").selectOption("shadow");
+  const shadowSave = page.waitForResponse((response) =>
+    response.url().endsWith("/api/settings") && response.request().method() === "PUT",
+  );
+  await page.getByRole("button", { name: "Сохранить настройки" }).click();
+  assert.equal((await shadowSave).ok(), true);
   await openSettingsSection(page, "Близкий человек");
   await page.getByLabel("Как к тебе обращаться").fill("Тестовый владелец");
   await navigate(page, "Обзор");
@@ -673,7 +852,7 @@ async function openSettingsSection(page, title) {
   await navigate(page, "Поведение");
   await page.getByLabel("Настроение и план действий").selectOption("on");
   await page
-    .getByRole("button", { name: "Сохранить поведение", exact: true })
+    .getByRole("button", { name: "Активировать поведение", exact: true })
     .click();
   await page
     .getByText("Настройки поведения сохранены", { exact: true })
@@ -773,7 +952,7 @@ async function openSettingsSection(page, title) {
     .getByText("Новые ответы и реакции остановлены", { exact: true })
     .waitFor();
   await page
-    .getByRole("button", { name: "Сохранить поведение", exact: true })
+    .getByRole("button", { name: "Активировать поведение", exact: true })
     .click();
   await page.getByRole("alert").filter({ hasText: "другой вкладке" }).waitFor();
   assert.equal(
@@ -828,6 +1007,13 @@ async function openSettingsSection(page, title) {
     .getByRole("button", { name: "Сохранить порог", exact: true })
     .click();
   await page.getByText("Порог сохранён", { exact: true }).waitFor();
+  await page.getByRole("heading", { name: "Время текстовых ответов", exact: true }).waitFor();
+  await page.getByText("Этапы времени · среднее / P95", { exact: true }).click();
+  const timingSection = page.locator(".timing-diagnostics");
+  assert.equal(await timingSection.locator("details").getAttribute("open"), "");
+  await page.getByRole("button", { name: "Обновить", exact: true }).click();
+  await page.getByRole("heading", { name: "Время текстовых ответов", exact: true }).waitFor();
+  assert.equal(await timingSection.locator("details").getAttribute("open"), "");
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.screenshot({
     path: path.join(output, "pilot.png"),
@@ -848,6 +1034,31 @@ async function openSettingsSection(page, title) {
   await page
     .getByRole("heading", { name: "Журнал вызовов", exact: true })
     .waitFor();
+  let budgetReady = false;
+  for (let i = 0; i < 80; i++) {
+    const result = await context.request.get(`${origin}/fixture-budget`);
+    budgetReady = (await result.json()).ready;
+    if (budgetReady) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(budgetReady, true);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await navigate(page, "Диалоги");
+  await page.locator(".dialog-item").first().getByRole("button", { name: "Подробности", exact: true }).click();
+  const blocked = page.getByText(/Запрос генерации не отправлен/);
+  await blocked.waitFor();
+  await page.getByText(/^Вместимость контекста ·/).click();
+  await page.getByText("2 000 000 токенов", { exact: true }).waitFor();
+  await blocked.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(output, "budget-blocked-desktop.png") });
+  await page.setViewportSize({ width: 360, height: 800 });
+  await blocked.evaluate(el => el.scrollIntoView({ block: "start" }));
+  await page.waitForTimeout(200);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({ path: path.join(output, "budget-blocked-mobile.png") });
+  await page.getByText("Подсчёт API", { exact: true }).evaluate(el => el.scrollIntoView({ block: "start" }));
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: path.join(output, "budget-blocked-mobile-count.png") });
   await stop();
   await start(data);
   await page.reload();
