@@ -8,7 +8,9 @@ from typing import Any
 
 import aiosqlite
 
+from zarya.configuration import effects, prompts_at, record
 from zarya.models import Settings, SettingsSnapshot
+from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
 
 
 class ConflictError(Exception):
@@ -79,6 +81,7 @@ class Database:
         async with self.write_lock:
             try:
                 await self.writer.execute("BEGIN IMMEDIATE")
+                self.writer._zarya_transaction = object()  # type: ignore[attr-defined]
                 yield self.writer
                 await self.writer.commit()
             except BaseException:
@@ -90,6 +93,8 @@ class Database:
                     await rollback
                     raise
                 raise
+            finally:
+                self.writer._zarya_transaction = None  # type: ignore[attr-defined]
 
     async def one(self, sql: str, parameters: tuple[object, ...] = ()) -> Any:
         async with self.read_lock, self.reader.execute(sql, parameters) as cursor:
@@ -116,18 +121,65 @@ class Database:
             version=row[0], settings=Settings.model_validate_json(row[1]), updated_at=row[2]
         )
 
+    async def initialize_configuration(self, prompts: PromptBundle) -> None:
+        async with self.transaction() as c:
+            async with c.execute("SELECT 1 FROM configuration_releases LIMIT 1") as cur:
+                if await cur.fetchone():
+                    await c.execute(
+                        "UPDATE photo_batches SET settings_version=(SELECT MIN(version) FROM "
+                        "configuration_releases WHERE origin='bootstrap') WHERE "
+                        "settings_version IS NULL AND state IN ('queued','downloading')"
+                    )
+                    return
+            async with c.execute(
+                "SELECT version,document FROM settings_versions ORDER BY version"
+            ) as cur:
+                versions = list(await cur.fetchall())
+            for version, raw in versions:
+                await record(
+                    c,
+                    version,
+                    Settings.model_validate_json(raw),
+                    prompts,
+                    "bootstrap" if version == versions[-1][0] else "legacy_bootstrap",
+                    None,
+                )
+            await c.execute(
+                "UPDATE photo_batches SET settings_version=? WHERE settings_version IS NULL "
+                "AND state IN ('queued','downloading')",
+                (versions[-1][0],),
+            )
+
     async def update_settings(self, expected: int, settings: Settings) -> SettingsSnapshot:
+        async with self.transaction() as connection:
+            return await self._update_settings(connection, expected, settings)
+
+    async def _update_settings(
+        self,
+        connection: aiosqlite.Connection,
+        expected: int,
+        settings: Settings,
+        prompts: PromptBundle | None = None,
+        origin: str = "web",
+    ) -> SettingsSnapshot:
         stamp = datetime.now(UTC).isoformat()
         document = settings.model_dump_json()
-        async with self.transaction() as connection:
-            cursor = await connection.execute(
-                "UPDATE settings SET document=?, version=version+1, updated_at=? "
-                "WHERE id=1 AND version=?",
-                (document, stamp, expected),
-            )
-            if cursor.rowcount != 1:
-                raise ConflictError
-            await connection.execute(
-                "INSERT INTO settings_versions VALUES (?, ?, ?)", (expected + 1, document, stamp)
-            )
+        cursor = await connection.execute(
+            "UPDATE settings SET document=?, version=version+1, updated_at=? "
+            "WHERE id=1 AND version=?",
+            (document, stamp, expected),
+        )
+        if cursor.rowcount != 1:
+            raise ConflictError
+        await connection.execute(
+            "INSERT INTO settings_versions VALUES (?, ?, ?)", (expected + 1, document, stamp)
+        )
+        async with connection.execute(
+            "SELECT prompts_json FROM configuration_releases WHERE version=?", (expected,)
+        ) as cur:
+            release = await cur.fetchone()
+        if release:
+            active_prompts = prompts or await prompts_at(connection, expected, DEFAULT_PROMPTS)
+            await record(connection, expected + 1, settings, active_prompts, origin, expected)
+            await effects(connection, settings)
         return SettingsSnapshot(version=expected + 1, settings=settings, updated_at=stamp)

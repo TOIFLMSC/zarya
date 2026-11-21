@@ -13,6 +13,10 @@ export type Settings = {
   photo_model: "gpt-6-luna" | "gpt-6.1-sol";
   memory_enabled: boolean;
   memory_model: "gpt-6-luna" | "gpt-6.1-sol";
+  memory_retrieval: "legacy" | "shadow" | "graph";
+  participant_context_messages: number;
+  participant_summaries_enabled: boolean;
+  participant_summary_prompt: string;
   research_enabled: boolean;
   research_model: "gpt-6-luna" | "gpt-6.1-sol";
   research_reasoning: "low" | "medium" | "high";
@@ -27,6 +31,30 @@ export type Settings = {
   reactions_enabled: boolean;
   expressiveness: "restrained" | "balanced" | "expressive";
   emotional_max_parts: number;
+};
+export type SummaryCoverage = {
+  enabled: boolean;
+  block_size: number;
+  covered_ids: number[];
+  original_ids: number[];
+  fresh_ids: number[];
+  raw_reasons: Record<string, string>;
+  blocks: {
+    id: number;
+    state: string;
+    summary: string | null;
+    error_code: string | null;
+    created_at: string;
+    full_window: boolean;
+    used_ids: number[];
+    manifest: { message_id: number; event_id: number; received_at: number }[];
+    model: string | null;
+    settings_version: number | null;
+    call_state: string | null;
+    cost_usd: number | null;
+    latency_ms: number | null;
+    usage: Record<string, unknown> | null;
+  }[];
 };
 export type GroupPolicy = {
   mode: "off" | "shadow" | "live";
@@ -152,6 +180,7 @@ export type DialogItem = {
   created_at: string;
   mode: string;
   input: string;
+  invalidated?: boolean;
 };
 export type DialogList = {
   items: DialogItem[];
@@ -162,11 +191,45 @@ export type DialogList = {
   unknown_cost_calls: number;
 };
 export type DialogDetail = DialogItem & {
+  timing: import("./TimingDiagnostics").Timing;
   typing: { state: string; attempts: number; at: number; error: string | null };
   response: string | null;
   error: string | null;
   replay_of: number | null;
   snapshot: {
+    invalidated?: boolean;
+    context_budget?: ContextBudget;
+    participant_context?: {
+      algorithm: string;
+      limit: number;
+      current_included: boolean;
+      characters: number;
+      reply_chain_truncated: boolean;
+      participants: {
+        sender_id: string;
+        name: string;
+        reason: "speaker" | "reply_chain";
+        available: number;
+        human_messages: number;
+        assistant_messages: number;
+        summarized_messages?: number;
+        original_messages?: number;
+        summaries?: SummaryCoverage;
+      }[];
+    };
+    retrieval?: {
+      algorithm: string;
+      mode: Settings["memory_retrieval"];
+      epoch: number;
+      load_ms: number;
+      legacy_ms: number;
+      graph_ms?: number;
+      candidates: { facts: number; episodes: number };
+      fallback: string | null;
+      capped: boolean;
+      legacy: RetrievalSelection;
+      graph?: RetrievalSelection;
+    };
     avatar_profile?: {
       user_id: string;
       name: string;
@@ -185,6 +248,8 @@ export type DialogDetail = DialogItem & {
       name: string;
       sender_id: string;
       role: string;
+      block_id?: number;
+      source_ids?: number[];
       message_id: number;
       thread_id: number | null;
     }[];
@@ -209,10 +274,50 @@ export type DialogDetail = DialogItem & {
     error: string | null;
   }[];
 };
+
+export type ContextBudget = {
+  version: number;
+  model: string;
+  profile: string;
+  profile_source: string | null;
+  context_limit: number | null;
+  output_limit: number | null;
+  output_reserve: number;
+  safety_margin: number;
+  input_budget: number | null;
+  estimate: number;
+  unknown_input: boolean;
+  stage?: string;
+  state: string;
+  decision: string;
+  provider_attempted: boolean;
+  sections: {
+    kind: string;
+    count: number;
+    bytes: number | null;
+    estimate: number;
+  }[];
+  excluded: { kind: string; count: number; reason: string }[];
+  api_count: {
+    state: string;
+    tokens: number | null;
+    error: string | null;
+    latency_ms: number | null;
+    attempted?: boolean;
+    cost_usd: number | null;
+  };
+};
 export type Snapshot = {
   version: number;
   settings: Settings;
   updated_at: string;
+};
+export type RetrievalSelection = {
+  facts: { id: number; version: number; reasons: string[] }[];
+  episodes: { id: number; reasons: string[] }[];
+  conflicts: number[];
+  reply_messages: number[];
+  chars: number;
 };
 export type PhotoItem = {
   id: number;
@@ -280,6 +385,7 @@ export type ResearchItem = {
   error: string | null;
 };
 export type ResearchList = {
+  max_tool_calls: number;
   items: ResearchItem[];
   total: number;
   page: number;

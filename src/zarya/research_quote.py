@@ -7,6 +7,13 @@ from typing import Any
 import aiosqlite
 
 from zarya.dialogue_logic import topic_id
+from zarya.research_intent import (
+    market_followup,
+    ordinary_question,
+    search_kind,
+    speaker_text,
+    subject,
+)
 from zarya.source_material import accepted, one, valid
 
 ALIASES = {
@@ -111,7 +118,9 @@ async def resolve_quote(
     message: dict[str, Any],
     selected: dict[str, Any],
 ) -> Quote | None:
-    text = str(message.get("text") or "")
+    text = speaker_text(message)
+    if ordinary_question(text):
+        return None
     # Articles, attachments and forwarded material retain their normal research path.
     if (
         message.get("forward_origin")
@@ -143,7 +152,8 @@ async def resolve_quote(
             or original.get("forward_date")
         ):
             return None
-        previous = advance(str(original.get("text") or ""), previous)
+        clean = speaker_text(original)
+        previous = None if ordinary_question(clean) else advance(clean, previous)
     if previous and CONFIRM.fullmatch(text):
         # Legacy clarification: accept only an actual sent identity question, never arbitrary yes.
         sent = await one(
@@ -167,3 +177,44 @@ async def resolve_quote(
             return previous
         return None
     return advance(text, previous)
+
+
+async def resolve_market_question(
+    conn: aiosqlite.Connection,
+    bot: str,
+    chat: str,
+    grant: int,
+    message: dict[str, Any],
+    selected: dict[str, Any],
+) -> str | None:
+    """Inherit only a public subject through validated, same-topic reply provenance."""
+    text = speaker_text(message)
+    refs = selected.get("manifest", [])
+    if (
+        not market_followup(text)
+        or ordinary_question(text)
+        or not message.get("reply_to_message")
+        or selected.get("unavailable")
+        or not refs
+        or not await valid(conn, bot, chat, grant, refs)
+    ):
+        return None
+    previous = None
+    for ref in reversed(refs):
+        source = await accepted(conn, bot, chat, grant, ref["message_id"])
+        if not source or source[0] != ref["event_id"]:
+            return None
+        original = source[1]
+        if (
+            topic_id(original) != topic_id(message)
+            or original.get("forward_origin")
+            or original.get("forward_date")
+        ):
+            return None
+        clean = speaker_text(original)
+        if search_kind(clean) != "none":
+            previous = subject(clean)
+        elif not market_followup(clean) or ordinary_question(clean):
+            previous = None
+    question = f"{previous}: {text}" if previous else None
+    return question if question and search_kind(question) != "none" else None

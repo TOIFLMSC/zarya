@@ -132,7 +132,15 @@ def backup(source: Path, target: Path) -> dict[str, Any]:
             try:
                 src.backup(dst)
                 wanted = check_db(dst)
-                if (source / "prompts.json").exists():
+                releases = dst.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='configuration_releases'"
+                ).fetchone()
+                active = (
+                    dst.execute("SELECT 1 FROM configuration_releases LIMIT 1").fetchone()
+                    if releases
+                    else None
+                )
+                if not active and (source / "prompts.json").exists():
                     regular(source / "prompts.json")
                     PromptBundle.load(source / "prompts.json")
                     wanted.add("prompts.json")

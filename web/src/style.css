@@ -1038,9 +1038,28 @@ code {
   font-size: 13px;
   color: var(--muted);
 }
+.participant-window {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 16px 0;
+  margin: 16px 0;
+}
 .dialogue-metrics dd {
   margin: 6px 0 0;
   font-weight: 600;
+}
+.timing-diagnostics summary {
+  min-height: 44px;
+  padding: 12px 0;
+  cursor: pointer;
+  color: var(--accent);
+}
+.timing-diagnostics .dialogue-metrics dd {
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+.timing-diagnostics .muted {
+  font-size: 13px;
 }
 .replay-area {
   border-top: 1px solid var(--border);
@@ -1709,9 +1728,100 @@ summary:focus-visible {
     scroll-margin-top: 200px;
   }
 }
+.obsidian-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+.obsidian-heading h2 {
+  margin: 0;
+}
+.obsidian-heading .muted {
+  margin: 8px 0 0;
+}
+.obsidian-path {
+  overflow-wrap: anywhere;
+}
+.obsidian-section {
+  margin-top: 20px;
+  border-top: 1px solid var(--border);
+}
+.obsidian-section > summary {
+  min-height: 44px;
+  padding: 12px 0;
+  cursor: pointer;
+}
+.obsidian-section summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 4px;
+}
+.obsidian-row {
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+}
+.obsidian-compare {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin: 16px 0;
+}
+.obsidian-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--surface-soft);
+  border-radius: 10px;
+  padding: 12px;
+}
+.obsidian-history-compare {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (max-width: 1100px) {
+  .obsidian-compare {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 700px) {
+  .obsidian-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .obsidian-heading button {
+    width: 100%;
+  }
+}
 /* Avoid consuming most of a short viewport, including a mobile keyboard. */
 @media (max-height: 600px) {
   .settings-save-bar {
     position: static;
+  }
+}
+.configuration-panel {
+  margin-bottom: 24px;
+}
+.configuration-text {
+  max-height: 480px;
+  overflow: auto;
+}
+.configuration-comparison {
+  min-width: 0;
+  margin-top: 16px;
+}
+.configuration-confirm {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+}
+.configuration-confirm input {
+  width: 20px;
+  min-height: 20px;
+  flex: 0 0 20px;
+}
+@media (max-width: 700px) {
+  .configuration-panel .action-bar {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 }

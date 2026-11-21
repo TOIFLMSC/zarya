@@ -426,7 +426,9 @@ class MediaEngine:
                     "reasoning": {"effort": json.loads(work["limits"]).get("reasoning", "low")},
                     "store": False,
                     "max_output_tokens": 6000,
-                    "instructions": self.store.prompts.text("media.video"),
+                    "instructions": (await self.store.prompts_for(work["version"])).text(
+                        "media.video"
+                    ),
                     "input": json.dumps(
                         {
                             "duration": prepared["duration"],

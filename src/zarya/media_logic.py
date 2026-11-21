@@ -104,10 +104,17 @@ async def purge_analysis(conn: aiosqlite.Connection, where: str, args: tuple[obj
 
 
 async def purge(conn: aiosqlite.Connection, where: str, args: tuple[object, ...]) -> None:
+    from zarya.participant_summaries import purge as purge_summaries
     from zarya.research_logic import purge as purge_research
     from zarya.source_material import purge as purge_material
 
     ids = "SELECT id FROM media_runs WHERE " + where
+    await purge_summaries(
+        conn,
+        "EXISTS (SELECT 1 FROM json_each(media_refs) r "
+        "WHERE json_extract(r.value,'$.id') IN (" + ids + "))",
+        args,
+    )
     await purge_research(
         conn,
         "job_id IN (SELECT job_id FROM media_dependencies WHERE media_run_id IN (" + ids + "))",

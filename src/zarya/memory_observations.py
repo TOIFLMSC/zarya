@@ -7,6 +7,7 @@ from typing import Any
 import aiosqlite
 
 from zarya.memory_context import one, valid_dependencies
+from zarya.memory_read import MemoryRead
 
 KINDS = {"interest": "interest", "nickname": "name", "habit": "observation"}
 LABELS = {
@@ -54,9 +55,17 @@ async def prune_evidence(conn: aiosqlite.Connection, bot: str) -> bool:
 
 
 async def strength(
-    conn: aiosqlite.Connection, bot: str, fact_id: int, *, depth: int = 0
+    conn: aiosqlite.Connection,
+    bot: str,
+    fact_id: int,
+    *,
+    depth: int = 0,
+    read: MemoryRead | None = None,
 ) -> dict[str, Any]:
-    fact = await one(
+    if read is None:
+        with MemoryRead(conn) as read:
+            return await strength(conn, bot, fact_id, depth=depth, read=read)
+    fact = await read.one(
         conn,
         "SELECT chat_id,access_version,sender_id,observation_kind,state,provenance,"
         "curated,category FROM memory_facts WHERE bot_id=? AND id=?",
@@ -105,7 +114,7 @@ async def strength(
         normalized = " ".join(re.findall(r"\w+", text.casefold()))
         if not normalized or normalized in seen or mid in messages or deps is None:
             continue
-        if not await valid_dependencies(conn, bot, chat, grant, deps, depth=depth + 1):
+        if not await valid_dependencies(conn, bot, chat, grant, deps, depth=depth + 1, read=read):
             continue
         seen.add(normalized)
         messages.add(mid)

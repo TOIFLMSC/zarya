@@ -9,10 +9,14 @@ from PIL import Image, ImageDraw
 
 from zarya.app import create_app
 from zarya.config import Config
-from zarya.openai_adapter import ModelResult
+from zarya.openai_adapter import ModelResult, TokenCountResult
 
 
 class BrowserModel:
+    async def count_input(self, request):
+        # Only the oversized test window reaches the counter; no external API.
+        return TokenCountResult("completed", 2_000_000)
+
     async def transcribe(self, model, audio):
         return ModelResult(
             text="Привет, это короткий ролик из книжного клуба.",
@@ -22,6 +26,17 @@ class BrowserModel:
 
     async def generate(self, request):
         await asyncio.sleep(0.1)
+        if request.get("text", {}).get("format", {}).get("name") == "participant_summary":
+            messages = json.loads(request["input"])["original_messages"]
+            return ModelResult(
+                text=json.dumps(
+                    {
+                        "summary": "Обсуждали совместную поездку, прогулки и планы на выходные.",
+                        "source_ids": [m["message_id"] for m in messages],
+                    }
+                ),
+                usage={"input_tokens": 800, "output_tokens": 60},
+            )
         if request.get("text", {}).get("format", {}).get("name") == "behavior_plan":
             state = json.loads(request["input"])["behavior"]
             return ModelResult(
@@ -364,6 +379,94 @@ if __name__ == "__main__":
             ],
         )
         return {"synthetic": True}
+
+    @app.get("/fixture-summaries")
+    async def request_summaries():
+        # Only the synthetic UI harness. Real worker/model integration, no hosted calls.
+        from zarya.models import Settings
+        from zarya.participant_context import select
+
+        if not await app.state.db.one("SELECT 1 FROM participant_messages WHERE message_id=120"):
+            updates = [
+                {
+                    "update_id": n,
+                    "message": {
+                        "message_id": n,
+                        "date": 1,
+                        "chat": {"id": -100, "type": "supergroup"},
+                        "from": {"id": 42, "first_name": "Тестовый собеседник"},
+                        "text": ("Обсуждали совместную поездку, прогулки и планы на выходные. " * 6)
+                        if n < 120
+                        else "Заря, что мы обсудили?",
+                    },
+                }
+                for n in range(100, 121)
+            ]
+            await app.state.telegram_store.ingest("999", "zarya_fixture_bot", updates)
+            grant = (
+                await app.state.db.one(
+                    "SELECT version FROM telegram_access WHERE subject_id='-100'"
+                )
+            )[0]
+            async with app.state.telegram_store.gate, app.state.db.transaction() as conn:
+                await select(
+                    conn,
+                    "999",
+                    "-100",
+                    grant,
+                    updates[-1]["message"],
+                    Settings(),
+                    enqueue_summaries=True,
+                )
+        rows = await app.state.db.all("SELECT id,state FROM participant_summary_blocks")
+        return {"synthetic": True, "ready": bool(rows) and all(r[1] == "completed" for r in rows)}
+
+    @app.get("/fixture-budget")
+    async def request_budget():
+        # Test server only: actual assembly/guard/UI, synthetic provider count.
+        if not await app.state.db.one("SELECT 1 FROM participant_messages WHERE message_id=2100"):
+            cfg = await app.state.db.settings()
+            await app.state.db.update_settings(
+                cfg.version,
+                cfg.settings.model_copy(
+                    update={
+                        "participant_context_messages": 100,
+                        "dialogue_enabled": True,
+                        "behavior_enabled": False,
+                        "memory_enabled": False,
+                    }
+                ),
+            )
+            updates = [
+                {
+                    "update_id": n,
+                    "message": {
+                        "message_id": n,
+                        "chat": {"id": -100, "type": "supergroup"},
+                        "from": {"id": 84, "first_name": "Большой тестовый контекст"},
+                        "text": "контекст " * 400,
+                    },
+                }
+                for n in range(2000, 2101)
+            ]
+            updates[-1]["message"]["text"] = "Заря, проверка большого контекста"
+            await transport.store.ingest("999", "zarya_fixture_bot", updates[:-1])
+            async with transport.store.gate, app.state.db.transaction() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state='done' WHERE state='pending' AND "
+                    "CAST(json_extract(payload,'$.message_id') AS INTEGER) BETWEEN 2000 AND 2099"
+                )
+            await transport.store.ingest("999", "zarya_fixture_bot", updates[-1:])
+        value = await app.state.db.one(
+            "SELECT state,snapshot FROM dialogue_runs WHERE "
+            "json_extract(snapshot,'$.incoming.message_id')=2100 ORDER BY id DESC LIMIT 1"
+        )
+        return {
+            "synthetic": True,
+            "ready": bool(value)
+            and value[0] == "rejected"
+            and json.loads(value[1]).get("context_budget", {}).get("state") == "overflow",
+        }
 
     uvicorn.run(
         app,

@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { TimingDiagnostics } from "./TimingDiagnostics";
+import { PersonalSummaries } from "./PersonalSummaries";
+import { ContextBudgetDiagnostics } from "./ContextBudgetDiagnostics";
 import {
   api,
   ApiError,
@@ -28,6 +31,16 @@ const states: Record<string, string> = {
   rate_limited: "Ограничение частоты",
   uncertain: "Подтверждение не получено",
   expired: "Истёк срок",
+};
+const retrievalReasons: Record<string, string> = {
+  query_match: "совпадение с темой",
+  accepted_reply: "связь с проверенным реплаем",
+  same_topic: "тот же топик",
+  speaker: "текущий собеседник",
+  recent: "недавняя запись",
+  support_edge: "связь с подтверждением",
+  related_episode: "связанный эпизод",
+  dependency_edge: "контекстная зависимость",
 };
 const triggers: Record<string, string> = {
   private: "Личное сообщение",
@@ -197,6 +210,8 @@ export function DialoguePanel({
           <p className="muted">
             Журнал входящих сообщений, контекста, ответов и доставки. Здесь
             показаны события приложения.
+            Новые ответы должны учитывать уточнения собеседника и пересматривать
+            ранее предложенные варианты, если они недоступны.
           </p>
         </div>
         <div>
@@ -256,7 +271,11 @@ export function DialoguePanel({
                 </span>
                 <span className="pill">{states[item.state] ?? item.state}</span>
               </div>
-              <p className="dialogue-preview">{item.input || "Без текста"}</p>
+              <p className="dialogue-preview">
+                {item.invalidated
+                  ? "Содержимое очищено после изменения или удаления исходных данных"
+                  : item.input || "Без текста"}
+              </p>
               <div className="dialogue-row">
                 <small>
                   {triggers[item.trigger] ?? item.trigger} ·{" "}
@@ -276,6 +295,13 @@ export function DialoguePanel({
               {selected === item.id &&
                 (detail ? (
                   <div className="dialog-trace">
+                    {detail.snapshot.invalidated && (
+                      <p className="notice">
+                        Содержимое этой записи очищено: исходные данные изменились
+                        или стали недоступны. Это прежняя запись журнала, а не новый
+                        пустой запрос. Учёт вызовов и расходов сохранён.
+                      </p>
+                    )}
                     <section>
                       <h3>01 · Вход и триггер</h3>
                       <p>
@@ -294,15 +320,93 @@ export function DialoguePanel({
                         {detail.snapshot.owner
                           ? "Владелец подтверждён по ID"
                           : "Обычный собеседник"}{" "}
-                        · сообщений: {detail.snapshot.context.length}
+                        · элементов контекста: {detail.snapshot.context.length}
                       </p>
+                      <ContextBudgetDiagnostics
+                        budget={detail.snapshot.context_budget}
+                        recorded={detail.mode === "recorded"}
+                      />
+                      {detail.snapshot.participant_context ? (
+                        <details className="timing-diagnostics">
+                          <summary>Состав персональных окон</summary>
+                          <p className="muted">
+                            Предел: {detail.snapshot.participant_context.limit}{" "}
+                            человеческих сообщений на человека. Текущее
+                            сообщение{" "}
+                            {detail.snapshot.participant_context
+                              .current_included
+                              ? "входит в предел и передано отдельно один раз"
+                              : "не расходует человеческое окно"}
+                            . Ответы Зари учитываются отдельно.
+                          </p>
+                          {detail.snapshot.participant_context.participants.map(
+                            (p) => (
+                              <div
+                                className="context-message"
+                                key={p.sender_id}
+                              >
+                                <p>
+                                  {p.name} · {p.sender_id}
+                                </p>
+                                <small>
+                                  {p.reason === "speaker"
+                                    ? "Текущий собеседник"
+                                    : "Цепочка ответов"}
+                                </small>
+                                <dl className="dialogue-metrics">
+                                  <div>
+                                    <dt>Человеческих в окне / доступно</dt>
+                                    <dd>
+                                      {p.human_messages} / {p.available}
+                                    </dd>
+                                  </div>
+                                  <div>
+                                    <dt>Связанных ответов Зари</dt>
+                                    <dd>{p.assistant_messages}</dd>
+                                  </div>
+                                </dl>
+                                {p.summaries ? (
+                                  <PersonalSummaries
+                                    data={p.summaries}
+                                    current={
+                                      detail.snapshot.participant_context!
+                                        .current_included &&
+                                      p.reason === "speaker"
+                                        ? 1
+                                        : 0
+                                    }
+                                  />
+                                ) : (
+                                  <p className="muted">
+                                    Покрытие сводками не сохранено.
+                                  </p>
+                                )}
+                              </div>
+                            ),
+                          )}
+                          {detail.snapshot.participant_context
+                            .reply_chain_truncated && (
+                            <p className="muted">
+                              Участники выбраны по первым шести шагам цепочки
+                              ответов.
+                            </p>
+                          )}
+                        </details>
+                      ) : (
+                        <p className="muted">
+                          Диагностика персональных окон не сохранена.
+                        </p>
+                      )}
                       <details>
                         <summary>Показать использованные сообщения</summary>
                         {detail.snapshot.context.map((m, i) => (
                           <div className="context-message" key={i}>
                             <small>
                               {m.role === "assistant" ? "Заря" : m.name} ·{" "}
-                              {m.sender_id} · сообщение {m.message_id}
+                              {m.sender_id} ·{" "}
+                              {m.role === "summary"
+                                ? `сводка блока ${m.block_id}, источники ${m.source_ids?.join(", ")}`
+                                : `сообщение ${m.message_id}`}
                               {m.thread_id ? ` · топик ${m.thread_id}` : ""}
                             </small>
                             <p className="dialogue-text">{m.text}</p>
@@ -312,6 +416,111 @@ export function DialoguePanel({
                           <p>Контекст пока пуст.</p>
                         )}
                       </details>
+                      {detail.snapshot.retrieval && (
+                        <details>
+                          <summary>
+                            Подбор памяти ·{" "}
+                            {detail.snapshot.retrieval.mode === "graph"
+                              ? "графовый"
+                              : detail.snapshot.retrieval.mode === "shadow"
+                                ? "теневое сравнение"
+                                : "прежний"}
+                          </summary>
+                          <p className="muted">
+                            {detail.snapshot.retrieval.mode === "shadow"
+                              ? "Ответ использует прежний подбор. Графовый рассчитан для сравнения, без второго запроса к модели."
+                              : detail.snapshot.retrieval.mode === "graph"
+                                ? "В ответ передан графовый подбор; при ошибке используется прежний."
+                                : "В ответ передан прежний подбор."}
+                          </p>
+                          <p>
+                            Проверенные кандидаты:{" "}
+                            {detail.snapshot.retrieval.candidates.facts} фактов,{" "}
+                            {detail.snapshot.retrieval.candidates.episodes}{" "}
+                            эпизодов. Загрузка:{" "}
+                            {detail.snapshot.retrieval.load_ms} мс.
+                          </p>
+                          {[
+                            [
+                              "Прежний",
+                              detail.snapshot.retrieval.legacy,
+                              detail.snapshot.retrieval.legacy_ms,
+                            ],
+                            [
+                              "Графовый",
+                              detail.snapshot.retrieval.graph,
+                              detail.snapshot.retrieval.graph_ms,
+                            ],
+                          ].map(([label, raw, latency]) => {
+                            const selection = raw as
+                              | typeof detail.snapshot.retrieval.legacy
+                              | undefined;
+                            return (
+                              selection && (
+                                <div
+                                  className="context-message"
+                                  key={label as string}
+                                >
+                                  <strong>{label as string}</strong>
+                                  <p>
+                                    Фактов: {selection.facts.length} · эпизодов:{" "}
+                                    {selection.episodes.length} · спорных пар:{" "}
+                                    {selection.conflicts.length} · реплаев:{" "}
+                                    {selection.reply_messages.length} ·{" "}
+                                    {selection.chars} символов ·{" "}
+                                    {latency as number} мс
+                                  </p>
+                                  <p className="muted">
+                                    Факты:{" "}
+                                    {selection.facts
+                                      .map((f) => `#${f.id} v${f.version}`)
+                                      .join(", ") || "нет"}
+                                    . Эпизоды:{" "}
+                                    {selection.episodes
+                                      .map((e) => `#${e.id}`)
+                                      .join(", ") || "нет"}
+                                    .
+                                  </p>
+                                  <details>
+                                    <summary>Причины выбора</summary>
+                                    {selection.facts.map((f) => (
+                                      <p key={`f:${f.id}`} className="muted">
+                                        Факт #{f.id}:{" "}
+                                        {f.reasons
+                                          .map((r) => retrievalReasons[r] ?? r)
+                                          .join(", ")}
+                                      </p>
+                                    ))}
+                                    {selection.episodes.map((e) => (
+                                      <p key={`e:${e.id}`} className="muted">
+                                        Эпизод #{e.id}:{" "}
+                                        {e.reasons
+                                          .map((r) => retrievalReasons[r] ?? r)
+                                          .join(", ")}
+                                      </p>
+                                    ))}
+                                  </details>
+                                </div>
+                              )
+                            );
+                          })}
+                          {detail.snapshot.retrieval.fallback && (
+                            <p role="status">
+                              Использован прежний подбор:{" "}
+                              {detail.snapshot.retrieval.capped
+                                ? "достигнут лимит связей"
+                                : "графовый расчёт недоступен"}
+                              .
+                            </p>
+                          )}
+                          <p className="muted">
+                            {detail.snapshot.retrieval.algorithm} · эпоха{" "}
+                            {detail.snapshot.retrieval.epoch}. Метаданные
+                            выбора; скрытые рассуждения модели здесь не
+                            записываются.
+                          </p>
+                        </details>
+                      )}
                       {detail.snapshot.avatar_profile && (
                         <details>
                           <summary>Аватарки выбранного собеседника</summary>
@@ -375,8 +584,17 @@ export function DialoguePanel({
                       <h3>03 · Модель и расход</h3>
                       <Metrics detail={detail} />
                     </section>
+                    <TimingDiagnostics timing={detail.timing} />
                     <section>
                       <h3>04 · Части ответа и доставка</h3>
+                      {detail.error === "unknown_source" && (
+                        <p className="notice">
+                          Ответ модели отклонён: ссылка или номер источника не
+                          совпали с результатами поиска. Повторного запроса к
+                          модели нет. Если подготовлено уведомление с найденными
+                          источниками, его текст и статус доставки показаны ниже.
+                        </p>
+                      )}
                       <p className="muted">
                         Индикатор «печатает»: последний запрос —{" "}
                         {states[detail.typing.state] ?? detail.typing.state}.
@@ -388,7 +606,9 @@ export function DialoguePanel({
                       {detail.parts.map((part) => (
                         <div className="context-message" key={part.index}>
                           <small>
-                            Часть {part.index + 1} ·{" "}
+                            {detail.error === "unknown_source"
+                              ? "Служебное уведомление"
+                              : `Часть ${part.index + 1}`} ·{" "}
                             {states[part.state] ?? part.state}
                             {part.error ? ` · ${part.error}` : ""}
                           </small>
@@ -421,7 +641,7 @@ export function DialoguePanel({
                           Проверить сохранённый ответ
                         </button>
                         <button
-                          disabled={busy || !list.configured}
+                          disabled={busy || !list.configured || detail.snapshot.invalidated}
                           onClick={() => void preparePaid()}
                           aria-expanded={paid}
                         >
@@ -516,7 +736,9 @@ function Metrics({ detail }: { detail: DialogDetail }) {
     <>
       <p>
         {call?.model ?? "Без вызова модели"}
-        {call ? ` · reasoning ${detail.snapshot.settings.reasoning}` : ""}
+        {call && !detail.snapshot.invalidated
+          ? ` · reasoning ${detail.snapshot.settings.reasoning}`
+          : ""}
       </p>
       <dl className="dialogue-metrics">
         <div>
@@ -528,7 +750,7 @@ function Metrics({ detail }: { detail: DialogDetail }) {
           <dd>{call?.usage?.output_tokens ?? absent}</dd>
         </div>
         <div>
-          <dt>Время запроса</dt>
+          <dt>Обработка вызова · с подготовкой</dt>
           <dd>
             {call?.latency_ms == null
               ? absent

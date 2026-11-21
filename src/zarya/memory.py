@@ -15,7 +15,6 @@ from zarya.memory_context import (
     dependencies,
     merge_dependencies,
     reply_context,
-    select_episodes,
     valid_dependencies,
     valid_snapshot,
 )
@@ -66,10 +65,14 @@ def extraction_schema() -> dict[str, Any]:
 
 class MemoryEngine:
     def __init__(self, store: TelegramStore, adapter: ModelAdapter | None, data_dir: Path):
+        from zarya.participant_summaries import SummaryEngine
+
         self.store, self.db, self.adapter, self.data_dir = store, store.db, adapter, data_dir
+        self.summaries = SummaryEngine(store, adapter)
         self.last_cleanup = 0.0
 
     async def recover(self, bot: str) -> None:
+        await self.summaries.recover(bot)
         async with self.store.gate, self.db.transaction() as conn:
             await conn.execute(
                 "UPDATE model_calls SET state='unknown',error_code='interrupted',finished_at=? "
@@ -210,7 +213,9 @@ class MemoryEngine:
                 "reasoning": {"effort": "low"},
                 "store": False,
                 "max_output_tokens": 2500,
-                "instructions": self.store.prompts.text("memory.extract"),
+                "instructions": (await self.store.prompts_for(setting[0], conn)).text(
+                    "memory.extract"
+                ),
                 "input": json.dumps(
                     {"sources": sources, "existing_facts": existing, "participants": participants},
                     ensure_ascii=False,
@@ -430,6 +435,18 @@ class MemoryEngine:
     async def apply_proposal(
         self, conn: aiosqlite.Connection, work: dict[str, Any], p: Proposal
     ) -> None:
+        if p.existing_fact_id is not None:
+            claimed = next(
+                (f for f in work.get("existing", []) if f["id"] == p.existing_fact_id), None
+            )
+            current = await one(
+                conn,
+                "SELECT version FROM memory_facts WHERE id=? AND bot_id=? "
+                "AND chat_id=? AND access_version=? AND state!='deleted'",
+                (p.existing_fact_id, work["bot_id"], work["chat_id"], work["access_version"]),
+            )
+            if not claimed or not current or current[0] != claimed["version"]:
+                return
         key = p.key.strip().casefold()
         latest = max(s["event_id"] for s in work["sources"] if s["id"] in p.source_ids)
         tomb = await one(
@@ -537,6 +554,34 @@ class MemoryEngine:
                     int(p.relation in {"new", "supports"}),
                 ),
             )
+        if p.relation == "contradicts" and fact_id != p.existing_fact_id:
+            # Preserve only an explicit new relation. Equal keys/wording are not proof.
+            proof = dependencies()
+            for source_id in p.source_ids:
+                source = next(s for s in work["sources"] if s["id"] == source_id)
+                proof["sources"].append({"id": source_id, "event_id": source["event_id"]})
+                merge_dependencies(proof, work.get("contexts", {}).get(source_id, dependencies()))
+            origin = await one(conn, "SELECT version FROM memory_facts WHERE id=?", (fact_id,))
+            target = await one(
+                conn, "SELECT version FROM memory_facts WHERE id=?", (p.existing_fact_id,)
+            )
+            await conn.execute(
+                "INSERT INTO memory_relations(bot_id,chat_id,access_version,kind,from_id,"
+                "from_version,to_id,to_version,batch_id,proof,created_at) "
+                "VALUES (?,?,?,'contradicts',?,?,?,?,?,?,?)",
+                (
+                    work["bot_id"],
+                    work["chat_id"],
+                    work["access_version"],
+                    fact_id,
+                    origin[0],
+                    p.existing_fact_id,
+                    target[0],
+                    work["id"],
+                    json.dumps(proof),
+                    time.time(),
+                ),
+            )
 
     async def context(
         self,
@@ -546,80 +591,39 @@ class MemoryEngine:
         access: int,
         participants: list[str],
         query: str = "",
+        *,
+        diagnostics: dict[str, Any] | None = None,
+        current_query: str | None = None,
+        recent: list[dict[str, Any]] | None = None,
+        event_id: int | None = None,
+        speaker: str = "",
+        thread: int | None = None,
     ) -> tuple[dict[str, Any], int]:
+        from zarya.memory_retrieval import select_context
+
         version = await epoch(conn, bot)
         settings = Settings.model_validate_json(
             (await one(conn, "SELECT document FROM settings WHERE id=1"))[0]
         )
         if not settings.memory_enabled:
             return {"facts": [], "summaries": []}, version
-        ids = set(participants)
-        async with conn.execute(
-            "SELECT f.id,f.version,f.sender_id,f.category,f.text,f.provenance,f.chat_id,"
-            "f.access_version,f.context_dependencies,f.state,f.observation_kind "
-            "FROM memory_facts f JOIN telegram_access a ON a.bot_id=f.bot_id AND "
-            "a.subject_id=f.chat_id AND a.scope=f.scope "
-            "AND a.version=f.access_version WHERE f.bot_id=? AND "
-            "(f.state='active' OR (f.state='proposed' AND f.chat_id=? "
-            "AND f.observation_kind!='none')) AND "
-            "a.state='approved' "
-            "AND a.member_state NOT IN ('left','kicked','migrated') AND (f.chat_id=? OR "
-            "(? LIKE '-%' AND EXISTS (SELECT 1 FROM memory_shares s WHERE s.fact_id=f.id AND "
-            "s.fact_version=f.version "
-            "AND s.state='active'))) ORDER BY (f.chat_id=?) DESC,f.id DESC LIMIT 150",
-            (bot, chat, chat, chat, chat),
-        ) as cursor:
-            facts = list(await cursor.fetchall())
-        selected: list[dict[str, Any]] = []
-        used = 0
-        tentative_count = 0
-        for f in facts:
-            if f[2] not in ids or len(selected) >= 25 or used + len(f[4]) > 5000:
-                continue
-            # Match the candidate's nesting inside valid_snapshot(depth=0).
-            if f[8] is not None and not await valid_dependencies(
-                conn, bot, f[6], f[7], f[8], depth=1
-            ):
-                continue
-            assessment = None
-            if f[9] == "proposed":
-                assessment = await strength(conn, bot, f[0], depth=1)
-                if not assessment["eligible"] or tentative_count >= 3:
-                    continue
-                tentative_count += 1
-            # Across chats only the authorised fact is exposed; never its private evidence.
-            selected.append(
-                {
-                    "id": f[0],
-                    "version": f[1],
-                    "sender_id": f[2],
-                    "category": f[3],
-                    "text": f[4],
-                    "provenance": f[5],
-                    "shared": f[6] != chat,
-                    "tentative": f[9] == "proposed",
-                    "repetition": assessment["level"] if assessment else None,
-                    "addressing_allowed": f[10] != "nickname",
-                }
-            )
-            used += len(f[4])
-        async with conn.execute(
-            "SELECT id,summary,dependencies FROM memory_batches WHERE bot_id=? AND chat_id=? AND "
-            "access_version=? "
-            "AND state='completed' AND summary IS NOT NULL AND created_at>? ORDER BY id DESC "
-            "LIMIT 200",
-            (bot, chat, access, datetime.fromtimestamp(time.time() - RETENTION, UTC).isoformat()),
-        ) as cursor:
-            candidates = list(await cursor.fetchall())
-        summaries = []
-        for item in candidates:
-            # A selected episode is checked one level inside the dialogue snapshot.
-            if item[2] is None or await valid_dependencies(
-                conn, bot, chat, access, item[2], depth=1
-            ):
-                summaries.append({"id": item[0], "text": item[1]})
-        summaries = select_episodes(summaries, query)
-        return {"facts": selected, "summaries": summaries}, version
+        result = await select_context(
+            conn,
+            bot,
+            chat,
+            access,
+            participants,
+            query,
+            settings.memory_retrieval,
+            version,
+            diagnostics,
+            current_query=current_query if current_query is not None else query,
+            recent=recent or [],
+            event_id=event_id,
+            speaker=speaker,
+            thread=thread,
+        )
+        return result, version
 
     async def valid(self, conn: aiosqlite.Connection, bot: str, snapshot: dict[str, Any]) -> bool:
         return (
@@ -630,110 +634,127 @@ class MemoryEngine:
             and await valid_snapshot(conn, bot, snapshot)
         )
 
-    async def mutate(self, bot: str, fact_id: int, body: MemoryMutation) -> None:
+    async def mutate(
+        self,
+        bot: str,
+        fact_id: int,
+        body: MemoryMutation,
+        *,
+        operation_id: str | None = None,
+        change_id: str | None = None,
+        undo_id: str | None = None,
+    ) -> None:
+        from zarya.memory_command_apply import apply_command
+
         async with self.store.gate, self.db.transaction() as conn:
-            fact = await one(
-                conn,
-                "SELECT chat_id,scope,sender_id,category,version,state,text FROM memory_facts "
-                "WHERE bot_id=? AND id=?",
-                (bot, fact_id),
+            await apply_command(self, conn, bot, fact_id, body, operation_id, change_id, undo_id)
+
+    async def _mutate(
+        self,
+        conn: aiosqlite.Connection,
+        bot: str,
+        fact_id: int,
+        body: MemoryMutation,
+    ) -> None:
+        fact = await one(
+            conn,
+            "SELECT chat_id,scope,sender_id,category,version,state,text FROM memory_facts "
+            "WHERE bot_id=? AND id=?",
+            (bot, fact_id),
+        )
+        if not fact or fact[4] != body.expected_version or fact[5] == "deleted":
+            raise ConflictError
+        chat, scope, sender, category, version, state, text = fact
+        access = await one(
+            conn,
+            "SELECT 1 FROM telegram_access a JOIN memory_facts f ON f.bot_id=a.bot_id "
+            "AND f.chat_id=a.subject_id AND f.scope=a.scope AND f.access_version=a.version "
+            "WHERE f.id=? AND a.state='approved' AND a.member_state NOT IN "
+            "('left','kicked','migrated')",
+            (fact_id,),
+        )
+        if not access:
+            raise ValueError("Доступ к исходному чату отозван")
+        sharing = await one(conn, "SELECT state FROM memory_shares WHERE fact_id=?", (fact_id,))
+        if body.action == "delete":
+            await erase_fact(conn, bot, fact_id)
+            return
+        if body.action == "share":
+            if category not in SHAREABLE or state != "active":
+                raise ValueError(
+                    "Перенос доступны только активным именам, интересам и предпочтениям"
+                )
+            if scope == "private":
+                raise ValueError(
+                    "Разрешить перенос личного сведения может только собеседник: /memory в личке"
+                )
+            await conn.execute(
+                "INSERT INTO memory_shares VALUES (?,?,'active','admin','admin',NULL,?) "
+                "ON CONFLICT(fact_id) DO UPDATE SET "
+                "fact_version=excluded.fact_version,state='active',"
+                "authority='admin',actor_id='admin',consent_event_id=NULL,updated_at=excluded.updated_at",
+                (fact_id, version, stamp()),
             )
-            if not fact or fact[4] != body.expected_version or fact[5] == "deleted":
-                raise ConflictError
-            chat, scope, sender, category, version, state, text = fact
-            access = await one(
-                conn,
-                "SELECT 1 FROM telegram_access a JOIN memory_facts f ON f.bot_id=a.bot_id "
-                "AND f.chat_id=a.subject_id AND f.scope=a.scope AND f.access_version=a.version "
-                "WHERE f.id=? AND a.state='approved' AND a.member_state NOT IN "
-                "('left','kicked','migrated')",
-                (fact_id,),
+        elif body.action == "unshare":
+            await conn.execute(
+                "UPDATE memory_shares SET state='revoked',updated_at=? WHERE fact_id=?",
+                (stamp(), fact_id),
             )
-            if not access:
-                raise ValueError("Доступ к исходному чату отозван")
-            sharing = await one(conn, "SELECT state FROM memory_shares WHERE fact_id=?", (fact_id,))
-            if body.action == "delete":
-                await erase_fact(conn, bot, fact_id)
-                return
-            if body.action == "share":
-                if category not in SHAREABLE or state != "active":
-                    raise ValueError(
-                        "Перенос доступны только активным именам, интересам и предпочтениям"
-                    )
-                if scope == "private":
-                    raise ValueError(
-                        "Разрешить перенос личного сведения может только собеседник: /memory в "
-                        "личке"
-                    )
-                await conn.execute(
-                    "INSERT INTO memory_shares VALUES (?,?,'active','admin','admin',NULL,?) "
-                    "ON CONFLICT(fact_id) DO UPDATE SET "
-                    "fact_version=excluded.fact_version,state='active',"
-                    "authority='admin',actor_id='admin',consent_event_id=NULL,updated_at=excluded.updated_at",
-                    (fact_id, version, stamp()),
-                )
-            elif body.action == "unshare":
-                await conn.execute(
-                    "UPDATE memory_shares SET state='revoked',updated_at=? WHERE fact_id=?",
-                    (stamp(), fact_id),
-                )
-            elif body.action in {"accept", "edit"}:
-                if body.action == "edit" and body.text is None:
-                    raise ValueError("Введите текст записи")
-                async with conn.execute(
-                    "SELECT source_id FROM memory_evidence WHERE fact_id=?", (fact_id,)
-                ) as cursor:
-                    ids = [r[0] for r in await cursor.fetchall()]
-                if body.action == "edit":
-                    if await source_sharing(conn, ids):
-                        sharing = ("active",)
-                    await suppress_sources(conn, bot, chat, ids)
-                    await conn.execute(
-                        "UPDATE memory_facts SET context_dependencies=NULL WHERE id=?", (fact_id,)
-                    )
-                # A selected resolution supersedes competing proposals with the same semantic key.
-                competitor_share = await one(
-                    conn,
-                    "SELECT 1 FROM memory_shares s JOIN memory_facts f ON f.id=s.fact_id "
-                    "WHERE s.state='active' AND f.bot_id=? AND f.chat_id=? AND f.sender_id=? "
-                    "AND f.category=? AND f.fact_key=(SELECT fact_key FROM memory_facts "
-                    "WHERE id=?)",
-                    (bot, chat, sender, category, fact_id),
-                )
-                if competitor_share:
+        elif body.action in {"accept", "edit"}:
+            if body.action == "edit" and body.text is None:
+                raise ValueError("Введите текст записи")
+            async with conn.execute(
+                "SELECT source_id FROM memory_evidence WHERE fact_id=?", (fact_id,)
+            ) as cursor:
+                ids = [r[0] for r in await cursor.fetchall()]
+            if body.action == "edit":
+                if await source_sharing(conn, ids):
                     sharing = ("active",)
+                await suppress_sources(conn, bot, chat, ids, scrub=False)
                 await conn.execute(
-                    "UPDATE memory_shares SET state='revoked' WHERE fact_id IN "
-                    "(SELECT id FROM memory_facts WHERE bot_id=? AND chat_id=? AND sender_id=? "
-                    "AND category=? AND fact_key=(SELECT fact_key FROM memory_facts WHERE id=?))",
-                    (bot, chat, sender, category, fact_id),
+                    "UPDATE memory_facts SET context_dependencies=NULL WHERE id=?", (fact_id,)
                 )
-                await conn.execute(
-                    "UPDATE memory_facts SET state='outdated',version=version+1 WHERE bot_id=? "
-                    "AND chat_id=? "
-                    "AND sender_id=? AND category=? AND fact_key=(SELECT fact_key FROM "
-                    "memory_facts WHERE id=?) "
-                    "AND id!=? AND state!='deleted'",
-                    (bot, chat, sender, category, fact_id, fact_id),
-                )
-                await conn.execute(
-                    "UPDATE memory_facts SET "
-                    "text=?,state='active',curated=1,version=version+1,updated_at=?,reviewed_at=? "
-                    "WHERE id=?",
-                    (body.text if body.action == "edit" else text, stamp(), time.time(), fact_id),
-                )
-                await conn.execute(
-                    "UPDATE memory_shares SET state='revoked' WHERE fact_id=?", (fact_id,)
-                )
-                await conn.execute(
-                    "DELETE FROM memory_consent_requests WHERE fact_id=?", (fact_id,)
-                )
-            await invalidate(
+            # A selected resolution supersedes competing proposals with the same semantic key.
+            competitor_share = await one(
                 conn,
-                bot,
-                chat,
-                bool(sharing and sharing[0] == "active") or body.action in {"share", "unshare"},
+                "SELECT 1 FROM memory_shares s JOIN memory_facts f ON f.id=s.fact_id "
+                "WHERE s.state='active' AND f.bot_id=? AND f.chat_id=? AND f.sender_id=? "
+                "AND f.category=? AND f.fact_key=(SELECT fact_key FROM memory_facts "
+                "WHERE id=?)",
+                (bot, chat, sender, category, fact_id),
             )
+            if competitor_share:
+                sharing = ("active",)
+            await conn.execute(
+                "UPDATE memory_shares SET state='revoked' WHERE fact_id IN "
+                "(SELECT id FROM memory_facts WHERE bot_id=? AND chat_id=? AND sender_id=? "
+                "AND category=? AND fact_key=(SELECT fact_key FROM memory_facts WHERE id=?))",
+                (bot, chat, sender, category, fact_id),
+            )
+            await conn.execute(
+                "UPDATE memory_facts SET state='outdated',version=version+1 WHERE bot_id=? "
+                "AND chat_id=? "
+                "AND sender_id=? AND category=? AND fact_key=(SELECT fact_key FROM "
+                "memory_facts WHERE id=?) "
+                "AND id!=? AND state!='deleted'",
+                (bot, chat, sender, category, fact_id, fact_id),
+            )
+            await conn.execute(
+                "UPDATE memory_facts SET "
+                "text=?,state='active',curated=1,version=version+1,updated_at=?,reviewed_at=? "
+                "WHERE id=?",
+                (body.text if body.action == "edit" else text, stamp(), time.time(), fact_id),
+            )
+            await conn.execute(
+                "UPDATE memory_shares SET state='revoked' WHERE fact_id=?", (fact_id,)
+            )
+            await conn.execute("DELETE FROM memory_consent_requests WHERE fact_id=?", (fact_id,))
+        await invalidate(
+            conn,
+            bot,
+            chat,
+            bool(sharing and sharing[0] == "active") or body.action in {"share", "unshare"},
+        )
 
     async def listing(self, bot: str | None, scope: str) -> dict[str, Any]:
         chats = await self.db.all(
@@ -858,10 +879,28 @@ class MemoryEngine:
             (bot, chat, peer[2]),
         )
         participants = await self.db.all(
-            "SELECT sender_id,MAX(name),MAX(received_at) FROM memory_sources WHERE bot_id=? "
-            "AND chat_id=? "
-            "AND access_version=? GROUP BY sender_id ORDER BY MAX(received_at) DESC LIMIT 100",
-            (bot, chat, peer[2]),
+            "SELECT sender_id,MAX(name),MAX(received_at) FROM ("
+            "SELECT sender_id,name,received_at FROM memory_sources WHERE bot_id=? AND chat_id=? "
+            "AND access_version=? AND valid=1 AND received_at>? UNION ALL "
+            "SELECT p.sender_id,COALESCE("
+            "json_extract(e.payload,'$.edited_message.from.first_name'),"
+            "json_extract(e.payload,'$.message.from.first_name'),'Участник'),p.received_at "
+            "FROM participant_messages p JOIN research_messages m ON m.bot_id=p.bot_id "
+            "AND m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.event_id=p.event_id "
+            "AND m.access_version=p.access_version JOIN events e ON e.id=p.event_id "
+            "WHERE p.bot_id=? AND p.chat_id=? AND p.access_version=? AND p.received_at>? "
+            "AND e.payload!='{}' AND e.disposition='accepted') "
+            "GROUP BY sender_id ORDER BY MAX(received_at) DESC LIMIT 100",
+            (
+                bot,
+                chat,
+                peer[2],
+                time.time() - RETENTION,
+                bot,
+                chat,
+                peer[2],
+                time.time() - RETENTION,
+            ),
         )
         return {
             "bot_id": bot,
@@ -895,6 +934,53 @@ class MemoryEngine:
             ],
         }
 
+    async def participant_window(self, bot: str, chat: str, sender: str) -> dict[str, Any] | None:
+        from zarya.participant_context import assistants, window
+
+        async with self.db.read_lock:
+            conn = self.db.reader
+            await conn.execute("BEGIN")
+            try:
+                peer = await one(
+                    conn,
+                    "SELECT version FROM telegram_access WHERE bot_id=? AND subject_id=? "
+                    "AND state='approved' AND member_state NOT IN ('left','kicked','migrated')",
+                    (bot, chat),
+                )
+                if not peer:
+                    return None
+                settings = Settings.model_validate_json(
+                    (await one(conn, "SELECT document FROM settings WHERE id=1"))[0]
+                )
+                messages, sources, count, _ = await window(
+                    conn,
+                    bot,
+                    chat,
+                    peer[0],
+                    sender,
+                    settings.participant_context_messages,
+                )
+                parts, _ = await assistants(conn, bot, chat, peer[0], messages)
+                from zarya.participant_summaries import compact
+
+                _, summary_coverage = await compact(
+                    conn, bot, chat, peer[0], sender, messages, sources, settings
+                )
+                return {
+                    "sender_id": sender,
+                    "limit": settings.participant_context_messages,
+                    "available": count,
+                    "human_messages": len(messages),
+                    "assistant_messages": len(parts),
+                    "summaries": summary_coverage,
+                    "messages": sorted(
+                        messages + parts,
+                        key=lambda m: (m["received_at"], m["message_id"]),
+                    ),
+                }
+            finally:
+                await conn.rollback()
+
     async def cleanup(self, bot: str, *, force: bool = False) -> None:
         from zarya.behavior import cleanup as cleanup_behavior
 
@@ -905,6 +991,28 @@ class MemoryEngine:
         cutoff_stamp = datetime.fromtimestamp(cutoff, UTC).isoformat()
         paths = []
         async with self.store.gate, self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE dialogue_runs SET snapshot=json_remove(snapshot,'$.retrieval') "
+                "WHERE bot_id=? AND (json_extract(snapshot,'$.retrieval.at')<? OR "
+                "json_extract(snapshot,'$.retrieval.epoch')!=(SELECT version FROM memory_epochs "
+                "WHERE bot_id=?))",
+                (bot, cutoff, bot),
+            )
+            await conn.execute(
+                "DELETE FROM memory_relations WHERE bot_id=? AND created_at<?",
+                (bot, cutoff),
+            )
+            await conn.execute(
+                "UPDATE memory_commands SET before_text=NULL,after_text=NULL "
+                "WHERE bot_id=? AND created_at<?",
+                (bot, cutoff_stamp),
+            )
+            await conn.execute(
+                "UPDATE obsidian_changes SET before_text=NULL,proposed_text=NULL,"
+                "state='invalidated' "
+                "WHERE bot_id=? AND created_at<?",
+                (bot, cutoff_stamp),
+            )
             old = await one(
                 conn,
                 "SELECT 1 FROM memory_sources WHERE bot_id=? AND received_at<? AND text!='' "
@@ -919,6 +1027,9 @@ class MemoryEngine:
                 ) as cursor:
                     expired_chats = [r[0] for r in await cursor.fetchall()]
                 for chat in expired_chats:
+                    from zarya.memory_commands import scrub_scope
+
+                    await scrub_scope(conn, bot, chat)
                     await invalidate(conn, bot, chat)
             await conn.execute(
                 "UPDATE memory_sources SET text='',valid=0,processed=1 WHERE bot_id=? AND "
@@ -941,11 +1052,15 @@ class MemoryEngine:
 
             await purge_material(
                 conn,
-                "bot_id=? AND EXISTS (SELECT 1 FROM "
+                "bot_id=? AND (EXISTS (SELECT 1 FROM "
                 "json_each(snapshot,'$.source_manifest') m LEFT JOIN events e "
                 "ON e.id=json_extract(m.value,'$.event_id') "
-                "WHERE e.id IS NULL OR e.payload='{}' OR e.received_at<?)",
-                (bot, cutoff_stamp),
+                "WHERE e.id IS NULL OR e.payload='{}' OR e.received_at<?) "
+                "OR EXISTS (SELECT 1 FROM json_each(snapshot,'$.context_refs.humans') m "
+                "LEFT JOIN events e ON e.id=json_extract(m.value,'$.event_id') "
+                "WHERE e.id IS NULL OR e.payload='{}' OR e.received_at<? "
+                "OR json_extract(m.value,'$.received_at')<?))",
+                (bot, cutoff_stamp, cutoff_stamp, cutoff),
             )
 
             await purge_research(
@@ -955,6 +1070,27 @@ class MemoryEngine:
                 "ON e.id=json_extract(m.value,'$.event_id') WHERE e.payload='{}'))",
                 (bot, cutoff_stamp),
             )
+            await conn.execute(
+                "DELETE FROM participant_messages WHERE bot_id=? AND (received_at<? OR "
+                "NOT EXISTS (SELECT 1 FROM events e WHERE e.id=participant_messages.event_id "
+                "AND e.payload!='{}'))",
+                (bot, cutoff),
+            )
+            from zarya.participant_summaries import purge as purge_summaries
+
+            await purge_summaries(
+                conn,
+                "bot_id=? AND state!='cancelled' AND EXISTS (SELECT 1 FROM json_each(manifest) r "
+                "LEFT JOIN participant_messages p ON p.bot_id=participant_summary_blocks.bot_id "
+                "AND p.chat_id=participant_summary_blocks.chat_id "
+                "AND p.message_id=json_extract(r.value,'$.message_id') "
+                "AND p.event_id=json_extract(r.value,'$.event_id') "
+                "WHERE p.event_id IS NULL OR p.received_at<?)",
+                (bot, cutoff),
+            )
+            from zarya.participant_provenance import cascade_invalid
+
+            await cascade_invalid(conn)
             await conn.execute(
                 "DELETE FROM research_messages WHERE bot_id=? AND event_id IN "
                 "(SELECT id FROM events WHERE received_at<?)",

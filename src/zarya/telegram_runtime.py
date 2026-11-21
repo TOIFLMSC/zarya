@@ -236,13 +236,23 @@ class TelegramRuntime:
 
     async def memory_worker(self, bot_id: str) -> None:
         assert self.memory
+        summaries_first = False
         try:
             while self.connection not in {"failed", "blocked"}:
                 await self.memory.cleanup(bot_id)
-                work = await self.memory.claim(bot_id)
-                if work:
-                    await self.memory.execute(work)
-                else:
+                engines = (
+                    (self.memory.summaries, self.memory)
+                    if summaries_first
+                    else (self.memory, self.memory.summaries)
+                )
+                summaries_first = not summaries_first
+                work = None
+                for engine in engines:
+                    work = await engine.claim(bot_id)
+                    if work:
+                        await engine.execute(work)
+                        break
+                if not work:
                     await asyncio.sleep(1)
         except asyncio.CancelledError:
             raise
@@ -455,6 +465,28 @@ class TelegramRuntime:
             item = await self.store.claim_delivery(bot_id)
             if not item:
                 return
+            network_start = time.monotonic()
+
+            async def record(
+                state: str,
+                code: str | None = None,
+                message_id: int | None = None,
+                delay: float = 0,
+            ) -> None:
+                await self.store.delivery_result(
+                    item["id"],
+                    state,
+                    code,
+                    message_id,
+                    delay,
+                    measured={
+                        **item["_timings"],
+                        "telegram_ms": (time.monotonic() - network_start) * 1000,
+                    },
+                    attempt=item["_attempt"],
+                    confirmed_at=time.time() if state == "sent" else None,
+                )
+
             try:
                 self.api_calls += 1
                 async with asyncio.timeout(12):
@@ -463,9 +495,7 @@ class TelegramRuntime:
                             item["chat_id"], item["target_message_id"], item["emoji"]
                         )
                         if not accepted:
-                            await self.store.delivery_result(
-                                item["id"], "failed", "reaction_unavailable"
-                            )
+                            await record("failed", "reaction_unavailable")
                             return
                         message_id = None
                     elif item.get("reply_id"):
@@ -477,18 +507,16 @@ class TelegramRuntime:
                             item["chat_id"], item["text"], item.get("thread_id")
                         )
             except TelegramRetryAfter as exc:
-                await self.store.delivery_result(
-                    item["id"], "pending", "rate_limit", delay=max(1, exc.retry_after)
-                )
+                await record("pending", "rate_limit", delay=max(1, exc.retry_after))
             except TelegramMigrateToChat:
-                await self.store.delivery_result(item["id"], "failed", "chat_migrated")
+                await record("failed", "chat_migrated")
             except (TelegramBadRequest, TelegramForbiddenError, TelegramUnauthorizedError):
-                await self.store.delivery_result(item["id"], "failed", "rejected")
+                await record("failed", "rejected")
             except asyncio.CancelledError:
-                await self.store.delivery_result(item["id"], "unknown", "interrupted")
+                await record("unknown", "interrupted")
                 raise
             except Exception:
                 # Includes timeout, network and 5xx: Telegram may have accepted the send.
-                await self.store.delivery_result(item["id"], "unknown", "delivery_uncertain")
+                await record("unknown", "delivery_uncertain")
             else:
-                await self.store.delivery_result(item["id"], "sent", message_id=message_id)
+                await record("sent", message_id=message_id)

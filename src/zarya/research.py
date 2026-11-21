@@ -12,8 +12,16 @@ from zarya.memory_logic import epoch
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
 from zarya.research_fetch import Fetcher, SafeFetcher
-from zarya.research_logic import API_FEEDS, public_url, urls, wants_search
-from zarya.research_quote import resolve_quote
+from zarya.research_intent import blocks_external, speaker_text
+from zarya.research_logic import (
+    API_FEEDS,
+    SEARCH_TOOL_LIMIT,
+    public_url,
+    search_policy,
+    urls,
+    wants_search,
+)
+from zarya.research_quote import resolve_market_question, resolve_quote
 from zarya.source_material import resolve
 from zarya.telegram_store import TelegramStore, row, stamp
 from zarya.youtube import video_id
@@ -50,6 +58,8 @@ class ResearchEngine:
             return False, await self.context(conn, existing[0])
         if not settings.research_enabled:
             return False, None
+        if blocks_external(message):
+            return False, None
         question = str(message.get("text") or message.get("caption") or "")[:4000]
         selected_urls = urls(message)
         material = ""
@@ -58,6 +68,11 @@ class ResearchEngine:
             selected if selected is not None else await resolve(conn, bot, chat, grant, message)
         )
         quote = await resolve_quote(conn, bot, chat, grant, message, selected)
+        market_question = (
+            await resolve_market_question(conn, bot, chat, grant, message, selected)
+            if not quote
+            else None
+        )
         has_post = not selected.get("via_assistant") or any(
             source["forwarded"] or source["attachments"] or source["urls"]
             for source in selected["messages"]
@@ -101,7 +116,9 @@ class ResearchEngine:
             question = "Кратко поясни переданный пост"
         if quote:
             question, material, selected_urls = quote.question(), "", []
-        search = wants_search(question)
+        elif market_question:
+            question, material, selected_urls = market_question, "", []
+        search = wants_search(question if quote or market_question else speaker_text(message))
         if not selected_urls and not material and not search:
             return False, None
         cursor = await conn.execute(
@@ -345,13 +362,18 @@ class ResearchEngine:
                     "reasoning": {"effort": work["reasoning"]},
                     "tools": [{"type": "web_search", "search_context_size": "medium"}],
                     "tool_choice": "required",
-                    "max_tool_calls": 3,
+                    "max_tool_calls": SEARCH_TOOL_LIMIT,
                     "include": ["web_search_call.action.sources"],
                     "max_output_tokens": 3000,
                     "text": {"verbosity": "low"},
                     "store": False,
                     "service_tier": "default",
-                    "instructions": self.store.prompts.text("research.analyse"),
+                    "instructions": (
+                        (await self.store.prompts_for(work["settings_version"])).text(
+                            "research.analyse"
+                        )
+                        + search_policy()
+                    ),
                     "input": json.dumps(search_input, ensure_ascii=False),
                 }
                 await conn.execute(
@@ -485,9 +507,9 @@ class ResearchEngine:
                         not isinstance(name, str) or name not in feeds for name in feed_refs
                     ):
                         raise ValueError("unknown_feed")
-                    if any(u not in available for u in references) or (
-                        claim["verdict"] != "uncertain" and not references and not feed_refs
-                    ):
+                    if any(u not in available for u in references):
+                        raise ValueError("unknown_source")
+                    if claim["verdict"] != "uncertain" and not references and not feed_refs:
                         raise ValueError("uncited_claim")
                     claim["source_ids"] = list(
                         dict.fromkeys(
@@ -495,10 +517,13 @@ class ResearchEngine:
                             + [feeds[name] for name in feed_refs]
                         )
                     )
-                if len(analysis["summary"]) > 2500 or not any(
-                    a.get("type") == "search" for a in result.search_actions or []
+                if len(analysis["summary"]) > 2500:
+                    raise ValueError("output_limit")
+                if not any(
+                    a.get("type") == "search" and a.get("status") == "completed"
+                    for a in result.search_actions or []
                 ):
-                    raise ValueError("no_search")
+                    raise ValueError("no_completed_search")
                 # Preserve cited evidence when the provider returns more than our UI limit.
                 used_ids = {
                     identifier for claim in analysis["claims"] for identifier in claim["source_ids"]
@@ -512,8 +537,20 @@ class ResearchEngine:
                         : 60 - len(cited)
                     ]
                 )
-            except (ValueError, TypeError, KeyError):
-                analysis, state, error = None, "invalid", "invalid_evidence"
+            except (ValueError, TypeError, KeyError, IndexError) as exc:
+                # Fixed categories only: exception text may contain source/model content.
+                reasons = {
+                    "unknown_source": "unknown_source",
+                    "unknown_feed": "unknown_source",
+                    "uncited_claim": "uncited_claim",
+                    "no_completed_search": "no_completed_search",
+                    "output_limit": "output_limit",
+                    "source_limit": "source_limit",
+                }
+                reason = "json" if isinstance(exc, json.JSONDecodeError) else "schema"
+                if exc.args and isinstance(exc.args[0], str):
+                    reason = reasons.get(exc.args[0], reason)
+                analysis, state, error = None, "invalid", "invalid_evidence_" + reason
         async with self.store.gate, self.db.transaction() as conn:
             run = await row(conn, "SELECT state FROM research_runs WHERE id=?", (work["id"],))
             job = await row(conn, "SELECT state FROM jobs WHERE id=?", (work["job_id"],))
@@ -647,6 +684,7 @@ class ResearchEngine:
             "chats": [{"id": c[0], "scope": c[1]} for c in chats],
             "enabled": settings.settings.research_enabled,
             "configured": self.adapter is not None,
+            "max_tool_calls": SEARCH_TOOL_LIMIT,
             "model": settings.settings.research_model,
             "bot_id": bot,
         }

@@ -1,3 +1,4 @@
+import { ConfigurationPanel } from "./ConfigurationPanel";
 import { StrictMode, useEffect, useRef, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -285,7 +286,9 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
       );
       setSnapshot(saved);
       setDraft(saved.settings);
-      setSaveMessage("Настройки сохранены. Они останутся после перезапуска.");
+      setSaveMessage(
+        "Выпуск настроек активирован. Новые операции используют его конфигурацию.",
+      );
       try {
         setStatus(await api<Status>("status"));
       } catch (statusError) {
@@ -637,14 +640,14 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
               <section className="next-step">
                 <div className="step-number">10</div>
                 <div>
-                  <p className="eyebrow">ДАЛЬШЕ ПО ПЛАНУ</p>
+                  <p className="eyebrow">ПО РЕШЕНИЮ ВЛАДЕЛЬЦА</p>
                   <h3>Перенос на VPS</h3>
                   <p>
-                    После локального пилота: постоянный запуск, защищённый
-                    доступ и резервные копии.
+                    Опционально, когда будет нужно: постоянный запуск,
+                    защищённый доступ и резервные копии.
                   </p>
                 </div>
-                <span className="pill">Следующий этап</span>
+                <span className="pill">Опционально</span>
               </section>
               <footer>
                 Данные хранятся на этом компьютере.{" "}
@@ -652,559 +655,696 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
               </footer>
             </>
           ) : (
-            <form onSubmit={save} noValidate className="settings-form">
-              <fieldset disabled={busy}>
-                <div className="save-bar settings-save-bar">
-                  <div aria-live="polite" aria-atomic="true">
-                    <strong>
-                      {busy
-                        ? "Сохраняем…"
-                        : dirty
-                          ? "Есть несохранённые изменения"
-                          : `Сохранено · версия ${snapshot.version}`}
-                    </strong>
-                    <small>
-                      {saveError && dirty
-                        ? "Сохранение не завершено. Изменения остались в черновике."
-                        : dirty
-                          ? "Сохраняются изменения во всех разделах."
-                          : "Можно раскрыть нужный раздел и изменить параметры."}
-                    </small>
-                  </div>
-                  <button className="primary" disabled={busy || !dirty}>
-                    {busy ? "Сохраняем…" : "Сохранить настройки"}
-                  </button>
-                  {saveError && (
-                    <div
-                      className="notice error settings-save-feedback"
-                      role="alert"
-                    >
-                      {saveError} Черновик остался в этой форме.{" "}
-                      <button
-                        type="button"
-                        className="text-button"
-                        onClick={() => {
-                          if (
-                            !dirty ||
-                            window.confirm(
-                              "Загрузить сохранённые настройки и отменить свои изменения?",
+            <>
+              <ConfigurationPanel
+                csrf={session.csrf}
+                dirty={dirty}
+                currentVersion={snapshot.version}
+                onUnauthorized={onExit}
+                onChanged={() => void load()}
+              />
+              <form onSubmit={save} noValidate className="settings-form">
+                <fieldset disabled={busy}>
+                  <div className="save-bar settings-save-bar">
+                    <div aria-live="polite" aria-atomic="true">
+                      <strong>
+                        {busy
+                          ? "Сохраняем…"
+                          : dirty
+                            ? "Есть несохранённые изменения"
+                            : `Сохранено · версия ${snapshot.version}`}
+                      </strong>
+                      <small>
+                        {saveError && dirty
+                          ? "Сохранение не завершено. Изменения остались в черновике."
+                          : dirty
+                            ? "Сохраняются изменения во всех разделах."
+                            : "Можно раскрыть нужный раздел и изменить параметры."}
+                      </small>
+                    </div>
+                    <button className="primary" disabled={busy || !dirty}>
+                      {busy ? "Сохраняем…" : "Сохранить настройки"}
+                    </button>
+                    {saveError && (
+                      <div
+                        className="notice error settings-save-feedback"
+                        role="alert"
+                      >
+                        {saveError} Черновик остался в этой форме.{" "}
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() => {
+                            if (
+                              !dirty ||
+                              window.confirm(
+                                "Загрузить сохранённые настройки и отменить свои изменения?",
+                              )
                             )
-                          )
-                            void load();
-                        }}
+                              void load();
+                          }}
+                        >
+                          Загрузить сохранённые настройки
+                        </button>
+                      </div>
+                    )}
+                    {saveMessage && (
+                      <div
+                        className="notice success settings-save-feedback"
+                        role="status"
                       >
-                        Загрузить сохранённые настройки
-                      </button>
+                        {saveMessage}
+                      </div>
+                    )}
+                  </div>
+                  <SettingsSection
+                    title="Личность"
+                    summary={`${draft.display_name} · ${{ balanced: "сбалансированный", warm: "тёплый", reserved: "сдержанный" }[draft.tone]} тон`}
+                    changed={sectionChanged("display_name", "tone", "persona")}
+                    initiallyOpen
+                  >
+                    <div>
+                      <p>
+                        Базовая манера общения. <br />
+                        Применяется к новым операциям.
+                      </p>
                     </div>
-                  )}
-                  {saveMessage && (
-                    <div
-                      className="notice success settings-save-feedback"
-                      role="status"
-                    >
-                      {saveMessage}
-                    </div>
-                  )}
-                </div>
-                <SettingsSection
-                  title="Личность"
-                  summary={`${draft.display_name} · ${{ balanced: "сбалансированный", warm: "тёплый", reserved: "сдержанный" }[draft.tone]} тон`}
-                  changed={sectionChanged("display_name", "tone", "persona")}
-                  initiallyOpen
-                >
-                  <div>
-                    <p>
-                      Базовая манера общения. <br />
-                      Применяется к новым операциям.
-                    </p>
-                  </div>
-                  <div className="fields">
-                    <label>
-                      Имя собеседницы
-                      <input
-                        value={draft.display_name}
-                        onChange={(e) => change("display_name", e.target.value)}
-                        required
-                        maxLength={40}
-                      />
-                    </label>
-                    <label>
-                      Тон общения
-                      <select
-                        value={draft.tone}
-                        onChange={(e) =>
-                          change("tone", e.target.value as Settings["tone"])
-                        }
-                      >
-                        <option value="balanced">Сбалансированный</option>
-                        <option value="warm">Тёплый</option>
-                        <option value="reserved">Сдержанный</option>
-                      </select>
-                    </label>
-                    <label>
-                      Основа характера
-                      <textarea
-                        rows={5}
-                        value={draft.persona}
-                        onChange={(e) => change("persona", e.target.value)}
-                        required
-                        maxLength={4000}
-                      />
-                      <small>
-                        Любопытство, привычки речи и отношение к собеседникам.
-                        До 4000 символов. Сохраняется локально в базе.
-                        Полные инструкции задаются в приватном файле промптов;
-                        после изменения файла нужен перезапуск.
-                      </small>
-                    </label>
-                  </div>
-                </SettingsSection>
-                <SettingsSection
-                  title="Близкий человек"
-                  summary={
-                    draft.owner_telegram_id
-                      ? `${draft.owner_name || "Владелец"} · ID ${draft.owner_telegram_id}`
-                      : "Владелец не указан"
-                  }
-                  changed={sectionChanged(
-                    "owner_telegram_id",
-                    "owner_username",
-                    "owner_name",
-                  )}
-                >
-                  <div>
-                    <p>
-                      Кого Заря узнает как владельца. <br />
-                      Это не пароль администратора.
-                    </p>
-                  </div>
-                  <div className="fields">
-                    <label>
-                      Telegram ID
-                      <input
-                        value={draft.owner_telegram_id}
-                        onChange={(e) =>
-                          change("owner_telegram_id", e.target.value)
-                        }
-                        inputMode="numeric"
-                        pattern="[1-9][0-9]{0,15}"
-                        placeholder="Пока можно оставить пустым"
-                      />
-                      <small>
-                        Постоянный числовой ID для узнавания владельца.
-                        Разрешения на общение задаются отдельно.
-                      </small>
-                    </label>
-                    <div className="field-row">
+                    <div className="fields">
                       <label>
-                        Ник в Telegram
+                        Имя собеседницы
                         <input
-                          value={draft.owner_username}
+                          value={draft.display_name}
                           onChange={(e) =>
-                            change("owner_username", e.target.value)
+                            change("display_name", e.target.value)
                           }
-                          placeholder="@username"
-                          maxLength={33}
-                          pattern="@?[A-Za-z0-9_]{1,32}"
-                        />
-                      </label>
-                      <label>
-                        Как к тебе обращаться
-                        <input
-                          value={draft.owner_name}
-                          onChange={(e) => change("owner_name", e.target.value)}
-                          placeholder="Твоё имя"
-                          maxLength={80}
-                        />
-                      </label>
-                    </div>
-                  </div>
-                </SettingsSection>
-                <SettingsSection
-                  title="Модель и диалог"
-                  summary={`${draft.dialogue_enabled ? "Включены" : "Выключены"} · ${modelName(draft.model)} · ${effortName(draft.reasoning)} глубина`}
-                  changed={sectionChanged(
-                    "dialogue_enabled",
-                    "model",
-                    "reasoning",
-                    "max_output_tokens",
-                  )}
-                >
-                  <div>
-                    <p>
-                      Применяется к новым операциям. Ключ хранится локально,
-                      отдельно от настроек.
-                    </p>
-                    <small>
-                      {status.integrations.openai === "configured"
-                        ? "Ключ настроен"
-                        : "Ключ не настроен"}
-                    </small>
-                  </div>
-                  <div className="fields">
-                    <label>
-                      Диалоги
-                      <select
-                        value={draft.dialogue_enabled ? "on" : "off"}
-                        onChange={(e) =>
-                          change("dialogue_enabled", e.target.value === "on")
-                        }
-                      >
-                        <option value="on">Включены в разрешённых чатах</option>
-                        <option value="off">Выключены</option>
-                      </select>
-                    </label>
-                    <label>
-                      Модель
-                      <select
-                        value={draft.model}
-                        onChange={(e) =>
-                          change("model", e.target.value as Settings["model"])
-                        }
-                      >
-                        <option value="gpt-6-luna">GPT-6 Luna</option>
-                        <option value="gpt-6.1-sol">GPT-6.1 Sol</option>
-                      </select>
-                    </label>
-                    <label>
-                      Глубина обработки
-                      <select
-                        value={draft.reasoning}
-                        onChange={(e) =>
-                          change(
-                            "reasoning",
-                            e.target.value as Settings["reasoning"],
-                          )
-                        }
-                      >
-                        <option value="low">Низкая · обычный диалог</option>
-                        <option value="medium">Средняя</option>
-                        <option value="high">Высокая</option>
-                      </select>
-                    </label>
-                    <details className="settings-advanced">
-                      <summary>Лимиты обработки</summary>
-                      <label>
-                        Предел выходных токенов
-                        <input
-                          type="number"
-                          min={1000}
-                          max={6000}
-                          step={100}
                           required
-                          value={draft.max_output_tokens}
+                          maxLength={40}
+                        />
+                      </label>
+                      <label>
+                        Тон общения
+                        <select
+                          value={draft.tone}
                           onChange={(e) =>
-                            change("max_output_tokens", Number(e.target.value))
+                            change("tone", e.target.value as Settings["tone"])
                           }
+                        >
+                          <option value="balanced">Сбалансированный</option>
+                          <option value="warm">Тёплый</option>
+                          <option value="reserved">Сдержанный</option>
+                        </select>
+                      </label>
+                      <label>
+                        Основа характера
+                        <textarea
+                          rows={5}
+                          value={draft.persona}
+                          onChange={(e) => change("persona", e.target.value)}
+                          required
+                          maxLength={4000}
                         />
                         <small>
-                          Включает скрытые reasoning tokens и текст ответа. От
-                          1000 до 6000.
+                          Любопытство, привычки речи и отношение к собеседникам.
+                          До 4000 символов. Сохраняется локально в базе. Полные
+                          инструкции редактируются через Obsidian и карточку
+                          конфигурации выше. Сохранение формы активирует новый
+                          выпуск.
                         </small>
                       </label>
-                    </details>
-                  </div>
-                </SettingsSection>
-                <SettingsSection
-                  title="Фото"
-                  summary={`${draft.photo_enabled ? "Фоновый анализ включён" : "Фоновый анализ выключен"} · ${modelName(draft.photo_model)}`}
-                  changed={sectionChanged("photo_enabled", "photo_model")}
-                >
-                  <div>
-                    <p>
-                      Фото из разрешённых чатов пополняют контекст. Ответ в
-                      группе появляется при обращении.
-                    </p>
-                    <small>
-                      Настройки применяются к новым фото. Сохранённые результаты
-                      остаются в журнале.
-                    </small>
-                  </div>
-                  <div className="fields">
-                    <label>
-                      Фоновый анализ фото
-                      <select
-                        value={draft.photo_enabled ? "on" : "off"}
-                        onChange={(e) =>
-                          change("photo_enabled", e.target.value === "on")
-                        }
-                      >
-                        <option value="on">Включён</option>
-                        <option value="off">Выключен</option>
-                      </select>
-                      <small>
-                        Выключение диалогов также останавливает новые запросы
-                        анализа.
-                      </small>
-                    </label>
-                    <label>
-                      Модель анализа фото
-                      <select
-                        value={draft.photo_model}
-                        onChange={(e) =>
-                          change(
-                            "photo_model",
-                            e.target.value as Settings["photo_model"],
-                          )
-                        }
-                      >
-                        <option value="gpt-6-luna">GPT-6 Luna</option>
-                        <option value="gpt-6.1-sol">GPT-6.1 Sol</option>
-                      </select>
-                      <small>
-                        Высокая глубина обработки фото и стикеров. Модель
-                        диалога настраивается отдельно.
-                      </small>
-                    </label>
-                  </div>
-                </SettingsSection>
-                <SettingsSection
-                  title="Память"
-                  summary={`${draft.memory_enabled ? "Включена" : "Выключена"} · ${modelName(draft.memory_model)}`}
-                  changed={sectionChanged("memory_enabled", "memory_model")}
-                >
-                  <div>
-                    <p>
-                      Общая для топиков группы, отдельная для лички. Контекст —
-                      90 дней, факты — до удаления с переоценкой.
-                    </p>
-                  </div>
-                  <div className="fields">
-                    <label>
-                      Фоновая память
-                      <select
-                        value={draft.memory_enabled ? "on" : "off"}
-                        onChange={(e) =>
-                          change("memory_enabled", e.target.value === "on")
-                        }
-                      >
-                        <option value="on">Включена</option>
-                        <option value="off">Выключена</option>
-                      </select>
-                      <small>
-                        Выключение останавливает новые разборы и использование
-                        долговременных записей.
-                      </small>
-                    </label>
-                    <label>
-                      Модель памяти
-                      <select
-                        value={draft.memory_model}
-                        onChange={(e) =>
-                          change(
-                            "memory_model",
-                            e.target.value as Settings["memory_model"],
-                          )
-                        }
-                      >
-                        <option value="gpt-6-luna">GPT-6 Luna</option>
-                        <option value="gpt-6.1-sol">GPT-6.1 Sol</option>
-                      </select>
-                      <small>
-                        Низкая глубина обработки. Пакет до 20 сообщений.
-                      </small>
-                    </label>
-                  </div>
-                </SettingsSection>
-                <SettingsSection
-                  title="Интернет"
-                  summary={`${draft.research_enabled ? "Включён" : "Выключен"} · ${modelName(draft.research_model)} · ${effortName(draft.research_reasoning)} глубина`}
-                  changed={sectionChanged(
-                    "research_enabled",
-                    "research_model",
-                    "research_reasoning",
-                  )}
-                >
-                  <div>
-                    <p>
-                      Разбор ссылок и пересланных постов. Явная просьба
-                      проверить или найти запускает поиск.
-                    </p>
-                  </div>
-                  <div className="fields">
-                    <label>
-                      Поиск и проверка в интернете
-                      <select
-                        value={draft.research_enabled ? "on" : "off"}
-                        onChange={(e) =>
-                          change("research_enabled", e.target.value === "on")
-                        }
-                      >
-                        <option value="on">Включены</option>
-                        <option value="off">Выключены</option>
-                      </select>
-                    </label>
-                    <label>
-                      Модель исследования
-                      <select
-                        value={draft.research_model}
-                        onChange={(e) =>
-                          change(
-                            "research_model",
-                            e.target.value as Settings["research_model"],
-                          )
-                        }
-                      >
-                        <option value="gpt-6-luna">GPT-6 Luna</option>
-                        <option value="gpt-6.1-sol">GPT-6.1 Sol</option>
-                      </select>
-                    </label>
-                    <label>
-                      Глубина обработки исследования
-                      <select
-                        value={draft.research_reasoning}
-                        onChange={(e) =>
-                          change(
-                            "research_reasoning",
-                            e.target.value as Settings["research_reasoning"],
-                          )
-                        }
-                      >
-                        <option value="low">Низкая</option>
-                        <option value="medium">Средняя</option>
-                        <option value="high">Высокая</option>
-                      </select>
-                      <small>
-                        До трёх действий поиска. Модель финального ответа
-                        задаётся отдельно.
-                      </small>
-                    </label>
-                  </div>
-                </SettingsSection>
-                <SettingsSection
-                  title="Голос и видео"
-                  summary={`${draft.media_enabled ? "Включены" : "Выключены"} · до ${draft.video_max_frames} кадров`}
-                  changed={sectionChanged(
-                    "media_enabled",
-                    "asr_model",
-                    "media_model",
-                    "media_reasoning",
-                    "voice_max_seconds",
-                    "video_max_seconds",
-                    "video_max_frames",
-                  )}
-                >
-                  <div>
-                    <p className="muted">
-                      Разбор по обращению. Длинные и внешние видео пока не
-                      загружаются.
-                    </p>
-                  </div>
-                  <div className="fields">
-                    <label>
-                      Разбор медиа
-                      <select
-                        value={draft.media_enabled ? "on" : "off"}
-                        onChange={(e) =>
-                          change("media_enabled", e.target.value === "on")
-                        }
-                      >
-                        <option value="on">Включён</option>
-                        <option value="off">Выключен</option>
-                      </select>
-                    </label>
-                    <label>
-                      Распознавание речи
-                      <select
-                        value={draft.asr_model}
-                        onChange={(e) =>
-                          change(
-                            "asr_model",
-                            e.target.value as Settings["asr_model"],
-                          )
-                        }
-                      >
-                        <option value="gpt-4o-mini-transcribe">
-                          GPT-4o Mini Transcribe
-                        </option>
-                        <option value="gpt-4o-transcribe">
-                          GPT-4o Transcribe
-                        </option>
-                      </select>
-                    </label>
-                    <label>
-                      Модель анализа кадров
-                      <select
-                        value={draft.media_model}
-                        onChange={(e) =>
-                          change(
-                            "media_model",
-                            e.target.value as Settings["media_model"],
-                          )
-                        }
-                      >
-                        <option value="gpt-6-luna">GPT-6 Luna</option>
-                        <option value="gpt-6.1-sol">GPT-6.1 Sol</option>
-                      </select>
-                    </label>
-                    <label>
-                      Глубина обработки кадров
-                      <select
-                        value={draft.media_reasoning}
-                        onChange={(e) =>
-                          change(
-                            "media_reasoning",
-                            e.target.value as Settings["media_reasoning"],
-                          )
-                        }
-                      >
-                        <option value="low">Низкая</option>
-                        <option value="medium">Средняя</option>
-                        <option value="high">Высокая</option>
-                      </select>
-                      <small>
-                        Применяется к новым разборам видео, GIF и кружочков.
-                      </small>
-                    </label>
-                    <details className="settings-advanced">
-                      <summary>Лимиты обработки</summary>
+                    </div>
+                  </SettingsSection>
+                  <SettingsSection
+                    title="Близкий человек"
+                    summary={
+                      draft.owner_telegram_id
+                        ? `${draft.owner_name || "Владелец"} · ID ${draft.owner_telegram_id}`
+                        : "Владелец не указан"
+                    }
+                    changed={sectionChanged(
+                      "owner_telegram_id",
+                      "owner_username",
+                      "owner_name",
+                    )}
+                  >
+                    <div>
+                      <p>
+                        Кого Заря узнает как владельца. <br />
+                        Это не пароль администратора.
+                      </p>
+                    </div>
+                    <div className="fields">
                       <label>
-                        Голосовые: предел, секунд
+                        Telegram ID
                         <input
-                          type="number"
-                          min={10}
-                          max={300}
-                          value={draft.voice_max_seconds}
+                          value={draft.owner_telegram_id}
                           onChange={(e) =>
-                            change("voice_max_seconds", Number(e.target.value))
+                            change("owner_telegram_id", e.target.value)
                           }
+                          inputMode="numeric"
+                          pattern="[1-9][0-9]{0,15}"
+                          placeholder="Пока можно оставить пустым"
                         />
+                        <small>
+                          Постоянный числовой ID для узнавания владельца.
+                          Разрешения на общение задаются отдельно.
+                        </small>
+                      </label>
+                      <div className="field-row">
+                        <label>
+                          Ник в Telegram
+                          <input
+                            value={draft.owner_username}
+                            onChange={(e) =>
+                              change("owner_username", e.target.value)
+                            }
+                            placeholder="@username"
+                            maxLength={33}
+                            pattern="@?[A-Za-z0-9_]{1,32}"
+                          />
+                        </label>
+                        <label>
+                          Как к тебе обращаться
+                          <input
+                            value={draft.owner_name}
+                            onChange={(e) =>
+                              change("owner_name", e.target.value)
+                            }
+                            placeholder="Твоё имя"
+                            maxLength={80}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  </SettingsSection>
+                  <SettingsSection
+                    title="Модель и диалог"
+                    summary={`${draft.dialogue_enabled ? "Включены" : "Выключены"} · ${modelName(draft.model)} · ${effortName(draft.reasoning)} глубина`}
+                    changed={sectionChanged(
+                      "dialogue_enabled",
+                      "model",
+                      "reasoning",
+                      "max_output_tokens",
+                    )}
+                  >
+                    <div>
+                      <p>
+                        Применяется к новым операциям. Ключ хранится локально,
+                        отдельно от настроек.
+                      </p>
+                      <small>
+                        {status.integrations.openai === "configured"
+                          ? "Ключ настроен"
+                          : "Ключ не настроен"}
+                      </small>
+                    </div>
+                    <div className="fields">
+                      <label>
+                        Диалоги
+                        <select
+                          value={draft.dialogue_enabled ? "on" : "off"}
+                          onChange={(e) =>
+                            change("dialogue_enabled", e.target.value === "on")
+                          }
+                        >
+                          <option value="on">
+                            Включены в разрешённых чатах
+                          </option>
+                          <option value="off">Выключены</option>
+                        </select>
                       </label>
                       <label>
-                        Видео: предел, секунд
-                        <input
-                          type="number"
-                          min={5}
-                          max={120}
-                          value={draft.video_max_seconds}
+                        Модель
+                        <select
+                          value={draft.model}
                           onChange={(e) =>
-                            change("video_max_seconds", Number(e.target.value))
+                            change("model", e.target.value as Settings["model"])
                           }
-                        />
+                        >
+                          <option value="gpt-6-luna">GPT-6 Luna</option>
+                          <option value="gpt-6.1-sol">GPT-6.1 Sol</option>
+                        </select>
                       </label>
                       <label>
-                        Максимум кадров
+                        Глубина обработки
+                        <select
+                          value={draft.reasoning}
+                          onChange={(e) =>
+                            change(
+                              "reasoning",
+                              e.target.value as Settings["reasoning"],
+                            )
+                          }
+                        >
+                          <option value="low">Низкая · обычный диалог</option>
+                          <option value="medium">Средняя</option>
+                          <option value="high">Высокая</option>
+                        </select>
+                      </label>
+                      <details className="settings-advanced">
+                        <summary>Лимиты обработки</summary>
+                        <label>
+                          Предел выходных токенов
+                          <input
+                            type="number"
+                            min={1000}
+                            max={6000}
+                            step={100}
+                            required
+                            value={draft.max_output_tokens}
+                            onChange={(e) =>
+                              change(
+                                "max_output_tokens",
+                                Number(e.target.value),
+                              )
+                            }
+                          />
+                          <small>
+                            Включает скрытые reasoning tokens и текст ответа. От
+                            1000 до 6000. Этот предел резервируется при проверке
+                            вместимости входа. Диагностика собранного контекста
+                            показана в «Диалогах».
+                          </small>
+                        </label>
+                      </details>
+                    </div>
+                  </SettingsSection>
+                  <SettingsSection
+                    title="Фото"
+                    summary={`${draft.photo_enabled ? "Фоновый анализ включён" : "Фоновый анализ выключен"} · ${modelName(draft.photo_model)}`}
+                    changed={sectionChanged("photo_enabled", "photo_model")}
+                  >
+                    <div>
+                      <p>
+                        Фото из разрешённых чатов пополняют контекст. Ответ в
+                        группе появляется при обращении.
+                      </p>
+                      <small>
+                        Настройки применяются к новым фото. Сохранённые
+                        результаты остаются в журнале.
+                      </small>
+                    </div>
+                    <div className="fields">
+                      <label>
+                        Фоновый анализ фото
+                        <select
+                          value={draft.photo_enabled ? "on" : "off"}
+                          onChange={(e) =>
+                            change("photo_enabled", e.target.value === "on")
+                          }
+                        >
+                          <option value="on">Включён</option>
+                          <option value="off">Выключен</option>
+                        </select>
+                        <small>
+                          Выключение диалогов также останавливает новые запросы
+                          анализа.
+                        </small>
+                      </label>
+                      <label>
+                        Модель анализа фото
+                        <select
+                          value={draft.photo_model}
+                          onChange={(e) =>
+                            change(
+                              "photo_model",
+                              e.target.value as Settings["photo_model"],
+                            )
+                          }
+                        >
+                          <option value="gpt-6-luna">GPT-6 Luna</option>
+                          <option value="gpt-6.1-sol">GPT-6.1 Sol</option>
+                        </select>
+                        <small>
+                          Высокая глубина обработки фото и стикеров. Модель
+                          диалога настраивается отдельно.
+                        </small>
+                      </label>
+                    </div>
+                  </SettingsSection>
+                  <SettingsSection
+                    title="Память"
+                    summary={`${draft.memory_enabled ? "Фоновая включена" : "Фоновая выключена"} · окно ${draft.participant_context_messages} · сводки ${draft.memory_enabled && draft.participant_summaries_enabled ? "включены" : "выключены"}`}
+                    changed={sectionChanged(
+                      "memory_enabled",
+                      "memory_model",
+                      "memory_retrieval",
+                      "participant_context_messages",
+                      "participant_summaries_enabled",
+                      "participant_summary_prompt",
+                    )}
+                  >
+                    <div>
+                      <p>
+                        Общая для топиков группы, отдельная для лички. Контекст
+                        — 90 дней, факты — до удаления с переоценкой. Недавние
+                        сообщения подбираются отдельно по текущему собеседнику и
+                        участникам цепочки ответов.
+                      </p>
+                    </div>
+                    <div className="fields">
+                      <label>
+                        Последних человеческих сообщений на собеседника
                         <input
                           type="number"
                           min={1}
-                          max={32}
-                          value={draft.video_max_frames}
+                          max={100}
+                          step={1}
+                          required
+                          value={draft.participant_context_messages}
                           onChange={(e) =>
-                            change("video_max_frames", Number(e.target.value))
+                            change(
+                              "participant_context_messages",
+                              Number(e.target.value),
+                            )
                           }
                         />
                         <small>
-                          Кадры примерно через 2 секунды с учётом лимита,
-                          включая начало и конец при лимите от двух. 20 МиБ на
-                          файл, до трёх вложений на запрос. Применяется к новым
-                          разборам.
+                          От 1 до 100, в каждом чате отдельно. Текущее сообщение
+                          входит в предел; связанные ответы Зари учитываются
+                          отдельно. Работает и при выключенной фоновой памяти.
+                        </small>
+                      </label>
+                      <label>
+                        Персональные сводки сообщений
+                        <select
+                          value={
+                            draft.participant_summaries_enabled ? "on" : "off"
+                          }
+                          disabled={!draft.memory_enabled}
+                          onChange={(e) =>
+                            change(
+                              "participant_summaries_enabled",
+                              e.target.value === "on",
+                            )
+                          }
+                        >
+                          <option value="on">Включены</option>
+                          <option value="off">Выключены</option>
+                        </select>
+                        <small>
+                          Фоновая модель сокращает независимые блоки из пяти
+                          оригинальных сообщений одного человека в одном чате.
+                          Используется только целый блок внутри окна; свежий
+                          хвост и важные детали остаются оригиналами. Диалог не
+                          ждёт обработки. Выключение сводок или фоновой памяти
+                          сохраняет окно и возвращает оригиналы в новых
+                          запросах.
+                        </small>
+                      </label>
+                      <label>
+                        Фоновая память
+                        <select
+                          value={draft.memory_enabled ? "on" : "off"}
+                          onChange={(e) =>
+                            change("memory_enabled", e.target.value === "on")
+                          }
+                        >
+                          <option value="on">Включена</option>
+                          <option value="off">Выключена</option>
+                        </select>
+                        <small>
+                          Выключение останавливает новые разборы и использование
+                          долговременных записей и персональных сводок.
+                        </small>
+                      </label>
+                      <label>
+                        Подбор долговременной памяти
+                        <select
+                          value={draft.memory_retrieval}
+                          disabled={!draft.memory_enabled}
+                          onChange={(e) =>
+                            change(
+                              "memory_retrieval",
+                              e.target.value as Settings["memory_retrieval"],
+                            )
+                          }
+                        >
+                          <option value="legacy">Прежний</option>
+                          <option value="shadow">Теневое сравнение</option>
+                          <option value="graph">Графовый</option>
+                        </select>
+                        <small>
+                          Теневой режим сохраняет прежний ответ и сравнивает
+                          подбор локально, без второго запроса к модели.
+                          Графовый учитывает тему, проверенные реплаи и связи
+                          памяти. Диагностика — в «Диалоги». Повторные чтения
+                          ускорены внутри одной операции. Перед сохранением и
+                          отправкой доступ и актуальность проверяются заново.
+                        </small>
+                      </label>
+                      <label>
+                        Модель памяти
+                        <select
+                          value={draft.memory_model}
+                          onChange={(e) =>
+                            change(
+                              "memory_model",
+                              e.target.value as Settings["memory_model"],
+                            )
+                          }
+                        >
+                          <option value="gpt-6-luna">GPT-6 Luna</option>
+                          <option value="gpt-6.1-sol">GPT-6.1 Sol</option>
+                        </select>
+                        <small>
+                          Низкая глубина обработки. Пакет извлечения фактов — до
+                          20 сообщений; глубина персонального окна задаётся
+                          отдельно. Сводки используют ту же модель с низкой
+                          глубиной; их создание оплачивается отдельно, повторное
+                          использование — без вызова модели.
+                        </small>
+                      </label>
+                    </div>
+                    <details className="timing-diagnostics">
+                      <summary>Инструкция персональной саммаризации</summary>
+                      <label>
+                        Инструкция для сводок
+                        <textarea
+                          rows={6}
+                          maxLength={4000}
+                          required
+                          value={draft.participant_summary_prompt}
+                          onChange={(e) =>
+                            change("participant_summary_prompt", e.target.value)
+                          }
+                        />
+                        <small>
+                          Локальная настройка. Применяется к новым блокам;
+                          готовые не пересоздаются.
                         </small>
                       </label>
                     </details>
-                  </div>
-                </SettingsSection>
-              </fieldset>
-            </form>
+                  </SettingsSection>
+                  <SettingsSection
+                    title="Интернет"
+                    summary={`${draft.research_enabled ? "Включён" : "Выключен"} · ${modelName(draft.research_model)} · ${effortName(draft.research_reasoning)} глубина`}
+                    changed={sectionChanged(
+                      "research_enabled",
+                      "research_model",
+                      "research_reasoning",
+                    )}
+                  >
+                    <div>
+                      <p>
+                        Вопросы и содержательные просьбы по умолчанию проходят
+                        через интернет, независимо от темы и свежести данных.
+                        Приветствия, личная память и простые вычисления остаются
+                        в диалоге. Явная просьба «без интернета» отключает
+                        внешние обращения для этого вопроса.
+                      </p>
+                    </div>
+                    <div className="fields">
+                      <label>
+                        Поиск и проверка в интернете
+                        <select
+                          value={draft.research_enabled ? "on" : "off"}
+                          onChange={(e) =>
+                            change("research_enabled", e.target.value === "on")
+                          }
+                        >
+                          <option value="on">Включены</option>
+                          <option value="off">Выключены</option>
+                        </select>
+                      </label>
+                      <label>
+                        Модель исследования
+                        <select
+                          value={draft.research_model}
+                          onChange={(e) =>
+                            change(
+                              "research_model",
+                              e.target.value as Settings["research_model"],
+                            )
+                          }
+                        >
+                          <option value="gpt-6-luna">GPT-6 Luna</option>
+                          <option value="gpt-6.1-sol">GPT-6.1 Sol</option>
+                        </select>
+                      </label>
+                      <label>
+                        Глубина обработки исследования
+                        <select
+                          value={draft.research_reasoning}
+                          onChange={(e) =>
+                            change(
+                              "research_reasoning",
+                              e.target.value as Settings["research_reasoning"],
+                            )
+                          }
+                        >
+                          <option value="low">Низкая</option>
+                          <option value="medium">Средняя</option>
+                          <option value="high">Высокая</option>
+                        </select>
+                        <small>
+                          До трёх действий поиска. Модель финального ответа
+                          задаётся отдельно. Более частый поиск добавляет время
+                          и расход на ответы.
+                        </small>
+                      </label>
+                    </div>
+                  </SettingsSection>
+                  <SettingsSection
+                    title="Голос и видео"
+                    summary={`${draft.media_enabled ? "Включены" : "Выключены"} · до ${draft.video_max_frames} кадров`}
+                    changed={sectionChanged(
+                      "media_enabled",
+                      "asr_model",
+                      "media_model",
+                      "media_reasoning",
+                      "voice_max_seconds",
+                      "video_max_seconds",
+                      "video_max_frames",
+                    )}
+                  >
+                    <div>
+                      <p className="muted">
+                        Разбор по обращению. Длинные и внешние видео пока не
+                        загружаются.
+                      </p>
+                    </div>
+                    <div className="fields">
+                      <label>
+                        Разбор медиа
+                        <select
+                          value={draft.media_enabled ? "on" : "off"}
+                          onChange={(e) =>
+                            change("media_enabled", e.target.value === "on")
+                          }
+                        >
+                          <option value="on">Включён</option>
+                          <option value="off">Выключен</option>
+                        </select>
+                      </label>
+                      <label>
+                        Распознавание речи
+                        <select
+                          value={draft.asr_model}
+                          onChange={(e) =>
+                            change(
+                              "asr_model",
+                              e.target.value as Settings["asr_model"],
+                            )
+                          }
+                        >
+                          <option value="gpt-4o-mini-transcribe">
+                            GPT-4o Mini Transcribe
+                          </option>
+                          <option value="gpt-4o-transcribe">
+                            GPT-4o Transcribe
+                          </option>
+                        </select>
+                      </label>
+                      <label>
+                        Модель анализа кадров
+                        <select
+                          value={draft.media_model}
+                          onChange={(e) =>
+                            change(
+                              "media_model",
+                              e.target.value as Settings["media_model"],
+                            )
+                          }
+                        >
+                          <option value="gpt-6-luna">GPT-6 Luna</option>
+                          <option value="gpt-6.1-sol">GPT-6.1 Sol</option>
+                        </select>
+                      </label>
+                      <label>
+                        Глубина обработки кадров
+                        <select
+                          value={draft.media_reasoning}
+                          onChange={(e) =>
+                            change(
+                              "media_reasoning",
+                              e.target.value as Settings["media_reasoning"],
+                            )
+                          }
+                        >
+                          <option value="low">Низкая</option>
+                          <option value="medium">Средняя</option>
+                          <option value="high">Высокая</option>
+                        </select>
+                        <small>
+                          Применяется к новым разборам видео, GIF и кружочков.
+                        </small>
+                      </label>
+                      <details className="settings-advanced">
+                        <summary>Лимиты обработки</summary>
+                        <label>
+                          Голосовые: предел, секунд
+                          <input
+                            type="number"
+                            min={10}
+                            max={300}
+                            value={draft.voice_max_seconds}
+                            onChange={(e) =>
+                              change(
+                                "voice_max_seconds",
+                                Number(e.target.value),
+                              )
+                            }
+                          />
+                        </label>
+                        <label>
+                          Видео: предел, секунд
+                          <input
+                            type="number"
+                            min={5}
+                            max={120}
+                            value={draft.video_max_seconds}
+                            onChange={(e) =>
+                              change(
+                                "video_max_seconds",
+                                Number(e.target.value),
+                              )
+                            }
+                          />
+                        </label>
+                        <label>
+                          Максимум кадров
+                          <input
+                            type="number"
+                            min={1}
+                            max={32}
+                            value={draft.video_max_frames}
+                            onChange={(e) =>
+                              change("video_max_frames", Number(e.target.value))
+                            }
+                          />
+                          <small>
+                            Кадры примерно через 2 секунды с учётом лимита,
+                            включая начало и конец при лимите от двух. 20 МиБ на
+                            файл, до трёх вложений на запрос. Применяется к
+                            новым разборам.
+                          </small>
+                        </label>
+                      </details>
+                    </div>
+                  </SettingsSection>
+                </fieldset>
+              </form>
+            </>
           )}
         </div>
       </main>

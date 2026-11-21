@@ -19,22 +19,27 @@ from starlette.types import ASGIApp
 from zarya import __version__
 from zarya.avatars import AvatarEngine
 from zarya.backup import MARKER
-from zarya.behavior import BehaviorEngine, cancel_pending
+from zarya.behavior import BehaviorEngine
 from zarya.config import Config
+from zarya.configuration_bridge import ConfigurationBridge
 from zarya.database import ConflictError, Database
 from zarya.dialogue import DialogueEngine
+from zarya.graph import GraphRepository, GraphUnavailable, vault_zip
 from zarya.media import MediaEngine
 from zarya.media_library import listing as media_library_listing
-from zarya.media_logic import purge as purge_media
 from zarya.media_processing import MediaProcessor
 from zarya.memory import MemoryEngine
 from zarya.models import (
     AccessDecision,
+    ConfigurationDecision,
+    ConfigurationRollback,
     DeliveryDismiss,
     GroupBehaviorUpdate,
     LoginInput,
     MemoryMutation,
     MoodReset,
+    ObsidianDecision,
+    ObsidianUndo,
     PilotPreferences,
     PilotReview,
     ReplayInput,
@@ -42,6 +47,7 @@ from zarya.models import (
     SettingsUpdate,
     SetupInput,
 )
+from zarya.obsidian import ObsidianBridge
 from zarya.openai_adapter import ModelAdapter, OpenAIAdapter, SpeechAdapter
 from zarya.operations import Operations
 from zarya.photos import PhotoEngine
@@ -104,7 +110,27 @@ def create_app(
             "см. docs/operations.md"
         )
     db = Database(config.data_dir / "zarya.sqlite3")
-    prompts = PromptBundle.load(config.prompts_file) if config.prompts_file else DEFAULT_PROMPTS
+    prompts = DEFAULT_PROMPTS
+    if db.path.is_file():
+        with sqlite3.connect(f"file:{db.path.as_posix()}?mode=ro", uri=True) as c:
+            exists = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='configuration_releases'"
+            ).fetchone()
+            saved = (
+                c.execute(
+                    "SELECT prompts_json FROM configuration_releases ORDER BY version DESC LIMIT 1"
+                ).fetchone()
+                if exists
+                else None
+            )
+        if saved:
+            prompts = PromptBundle.parse(saved[0].encode(), set(DEFAULT_PROMPTS.fragments))
+        else:
+            prompts = (
+                PromptBundle.load(config.prompts_file) if config.prompts_file else DEFAULT_PROMPTS
+            )
+    else:
+        prompts = PromptBundle.load(config.prompts_file) if config.prompts_file else DEFAULT_PROMPTS
     telegram_store = TelegramStore(db, prompts)
     behavior = BehaviorEngine(telegram_store)
     operations = Operations(db)
@@ -146,6 +172,14 @@ def create_app(
         media,
         avatars,
     )
+    obsidian = ObsidianBridge(
+        memory,
+        config.obsidian_file or config.data_dir / "obsidian.local.json",
+        lambda: str(telegram.bot["id"]) if telegram.bot else None,
+    )
+    configuration_bridge = ConfigurationBridge(
+        telegram_store, config.obsidian_file or config.data_dir / "obsidian.local.json"
+    )
     sessions = Sessions(config.session_seconds)
     auth_lock = asyncio.Lock()
     attempts: deque[float] = deque()
@@ -168,6 +202,7 @@ def create_app(
         with lock:
             await db.open()
             try:
+                await db.initialize_configuration(prompts)
                 if await db.admin_hash() is None:
                     setup_secret = bootstrap_token(setup_path)
                 else:
@@ -175,10 +210,14 @@ def create_app(
                 started = time.monotonic()
                 ready = True
                 telegram.start()
+                obsidian.start()
+                configuration_bridge.start()
                 yield
             finally:
                 ready = False
                 sessions.values.clear()
+                await configuration_bridge.stop()
+                await obsidian.stop()
                 await telegram.stop()
                 await dialogue.close()
                 await db.close()
@@ -189,6 +228,7 @@ def create_app(
     app.state.sessions = sessions
     app.state.telegram = telegram
     app.state.telegram_store = telegram_store
+    app.state.configuration_bridge = configuration_bridge
     app.state.dialogue = dialogue
     app.state.photos = photos
     app.state.avatars = avatars
@@ -196,6 +236,7 @@ def create_app(
     app.state.research = research
     app.state.media = media
     app.state.behavior = behavior
+    app.state.obsidian = obsidian
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -305,76 +346,51 @@ def create_app(
     async def get_settings() -> SettingsSnapshot:
         return await db.settings()
 
+    @app.get("/api/configuration", dependencies=[Depends(authenticated)])
+    async def configuration_status(page: int = Query(default=0, ge=0, le=10000)) -> dict[str, Any]:
+        return await configuration_bridge.listing(page)
+
+    @app.get("/api/configuration/drafts/{draft_id}", dependencies=[Depends(authenticated)])
+    async def configuration_details(draft_id: str) -> dict[str, Any]:
+        try:
+            return await configuration_bridge.details(draft_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from None
+
+    @app.post("/api/configuration/scan", dependencies=[Depends(authenticated)])
+    async def configuration_scan() -> dict[str, bool]:
+        try:
+            await configuration_bridge.scan()
+            return {"ok": True}
+        except (ValueError, OSError, ConflictError):
+            raise HTTPException(
+                409, "Проверка конфигурации прервана. Проверь файлы и повтори"
+            ) from None
+
+    @app.post("/api/configuration/drafts/{draft_id}", dependencies=[Depends(authenticated)])
+    async def configuration_decide(draft_id: str, body: ConfigurationDecision) -> dict[str, int]:
+        try:
+            version = await configuration_bridge.decide(
+                draft_id, body.action, body.expected_version, body.hash
+            )
+            return {"version": version}
+        except (ValueError, OSError, ConflictError):
+            raise HTTPException(
+                409, "Конфигурация или файлы изменились. Обнови сравнение перед активацией"
+            ) from None
+
+    @app.post("/api/configuration/rollback", dependencies=[Depends(authenticated)])
+    async def configuration_rollback(body: ConfigurationRollback) -> dict[str, str]:
+        try:
+            return {"id": await configuration_bridge.rollback(body.version, body.expected_version)}
+        except (ValueError, ConflictError):
+            raise HTTPException(409, "Конфигурация изменилась или выпуск недоступен") from None
+
     @app.put("/api/settings", dependencies=[Depends(authenticated)])
     async def save_settings(body: SettingsUpdate) -> SettingsSnapshot:
         try:
             async with telegram_store.gate:
                 result = await db.update_settings(body.expected_version, body.settings)
-                if not body.settings.behavior_enabled or not body.settings.dialogue_enabled:
-                    async with db.transaction() as conn:
-                        async with conn.execute(
-                            "SELECT DISTINCT bot_id FROM telegram_access"
-                        ) as cursor:
-                            bots = [r[0] for r in await cursor.fetchall()]
-                        for bot in bots:
-                            await cancel_pending(conn, bot)
-                if not body.settings.media_enabled or not body.settings.dialogue_enabled:
-                    async with db.transaction() as conn:
-                        await purge_media(conn, "state!='cancelled'", ())
-                if not body.settings.photo_enabled or not body.settings.dialogue_enabled:
-                    from zarya.avatar_logic import purge as purge_avatars
-
-                    async with db.transaction() as conn:
-                        await purge_avatars(conn, "state!='cancelled'", ())
-                if not body.settings.research_enabled or not body.settings.dialogue_enabled:
-                    async with db.transaction() as conn:
-                        await conn.execute(
-                            "UPDATE jobs SET state='cancelled' WHERE id IN "
-                            "(SELECT job_id FROM research_runs WHERE state IN "
-                            "('queued','fetching','search_started')) "
-                            "AND state IN ('pending','running')"
-                        )
-                        await conn.execute(
-                            "UPDATE research_runs SET state='cancelled',error_code='disabled' "
-                            "WHERE state IN ('queued','fetching','search_started')"
-                        )
-                if not body.settings.memory_enabled:
-                    async with db.transaction() as conn:
-                        await conn.execute("UPDATE memory_epochs SET version=version+1")
-                        await conn.execute(
-                            "UPDATE memory_batches SET state='cancelled',"
-                            "error_code='disabled' WHERE state='started'"
-                        )
-                if not body.settings.dialogue_enabled or not body.settings.photo_enabled:
-                    async with db.transaction() as conn:
-                        await conn.execute(
-                            "UPDATE photo_batches SET state='cancelled',error_code='disabled' "
-                            "WHERE state IN ('queued','downloading','analyzing')"
-                        )
-                        await conn.execute(
-                            "UPDATE jobs SET state='cancelled' "
-                            "WHERE state IN ('pending','running') "
-                            "AND id IN (SELECT job_id FROM dialogue_runs "
-                            "WHERE json_array_length(snapshot,'$.photo_refs')>0)"
-                        )
-                        await conn.execute(
-                            "UPDATE outbox SET state='cancelled',error_code='photos_disabled' "
-                            "WHERE state='pending' AND job_id IN (SELECT job_id FROM dialogue_runs "
-                            "WHERE json_array_length(snapshot,'$.photo_refs')>0)"
-                        )
-                if not body.settings.dialogue_enabled:
-                    async with db.transaction() as conn:
-                        await conn.execute(
-                            "UPDATE jobs SET state='cancelled' WHERE state IN "
-                            "('pending','running') AND kind='telegram' AND "
-                            "json_extract(payload,'$.service_reply')=0"
-                        )
-                        await conn.execute(
-                            "UPDATE outbox SET state='cancelled',error_code='disabled' "
-                            "WHERE state='pending' AND job_id IN "
-                            "(SELECT job_id FROM model_calls)"
-                        )
-                        await conn.execute("DELETE FROM active_dialogues")
                 return result
         except ConflictError as exc:
             raise HTTPException(
@@ -562,6 +578,43 @@ def create_app(
             raise HTTPException(404, "Чат недоступен")
         return result
 
+    @app.get("/api/memory/chats/{chat_id}/context", dependencies=[Depends(authenticated)])
+    async def participant_context(
+        chat_id: str,
+        sender_id: str = Query(pattern=r"^[1-9][0-9]{0,15}$"),
+    ) -> dict[str, Any]:
+        result = await memory.participant_window(current_bot(), chat_id, sender_id)
+        if result is None:
+            raise HTTPException(404, "Чат недоступен")
+        return result
+
+    graph = GraphRepository(db.path)
+
+    async def graph_snapshot(chat_id: str) -> dict[str, Any]:
+        try:
+            result = await graph.snapshot(current_bot(), chat_id)
+        except GraphUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        if result is None:
+            raise HTTPException(404, "Чат недоступен")
+        return result
+
+    @app.get("/api/memory/chats/{chat_id}/graph", dependencies=[Depends(authenticated)])
+    async def memory_graph(chat_id: str) -> dict[str, Any]:
+        return await graph_snapshot(chat_id)
+
+    @app.get("/api/memory/chats/{chat_id}/graph/vault", dependencies=[Depends(authenticated)])
+    async def memory_graph_vault(chat_id: str) -> Response:
+        snapshot = await graph_snapshot(chat_id)
+        archive = await asyncio.to_thread(vault_zip, snapshot)
+        return Response(
+            archive,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="zarya-memory-vault.zip"',
+            },
+        )
+
     @app.post("/api/memory/facts/{fact_id}", dependencies=[Depends(authenticated)])
     async def memory_mutation(fact_id: int, body: MemoryMutation) -> dict[str, bool]:
         try:
@@ -570,6 +623,48 @@ def create_app(
             raise HTTPException(409, "Запись изменилась. Обновите её перед сохранением") from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+        return {"ok": True}
+
+    @app.get("/api/obsidian", dependencies=[Depends(authenticated)])
+    async def obsidian_status(
+        page: int = Query(default=0, ge=0, le=100000),
+        history_page: int = Query(default=0, ge=0, le=100000),
+    ) -> dict[str, Any]:
+        return await obsidian.listing(
+            str(telegram.bot["id"]) if telegram.bot else None,
+            page,
+            history_page,
+        )
+
+    @app.post("/api/obsidian/scan", dependencies=[Depends(authenticated)])
+    async def obsidian_scan() -> dict[str, bool]:
+        try:
+            await obsidian.scan()
+        except (ValueError, OSError, GraphUnavailable) as exc:
+            obsidian.error = (
+                str(exc) if not isinstance(exc, OSError) else "Папка занята или недоступна"
+            )
+            raise HTTPException(409, obsidian.error) from exc
+        return {"ok": True}
+
+    @app.post("/api/obsidian/changes/{change_id}", dependencies=[Depends(authenticated)])
+    async def obsidian_decision(change_id: str, body: ObsidianDecision) -> dict[str, bool]:
+        try:
+            await obsidian.decide(current_bot(), change_id, body.action)
+        except (ConflictError, ValueError, OSError) as exc:
+            raise HTTPException(
+                409, "Правка изменилась или недоступна. Обнови синхронизацию"
+            ) from exc
+        return {"ok": True}
+
+    @app.post("/api/obsidian/history/{command_id}/undo", dependencies=[Depends(authenticated)])
+    async def obsidian_undo(command_id: str, body: ObsidianUndo) -> dict[str, bool]:
+        try:
+            await obsidian.undo(current_bot(), command_id, body.operation_id)
+        except (ConflictError, ValueError) as exc:
+            raise HTTPException(
+                409, "Отмена недоступна: запись изменилась или сведения отозваны"
+            ) from exc
         return {"ok": True}
 
     @app.get("/api/photos", dependencies=[Depends(authenticated)])

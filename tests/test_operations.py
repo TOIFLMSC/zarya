@@ -7,6 +7,7 @@ from test_app import running, setup
 from test_telegram import store_at
 
 from zarya.operations import Operations
+from zarya.timings import encode
 
 
 async def seed(db):
@@ -68,6 +69,54 @@ async def test_costs_scope_replay_unknown_and_no_private_content(tmp_path):
         assert group["summary"]["known_cost_usd"] == pytest.approx(0.04)
         assert group["total"] == 1 and group["calls"][0]["task"] == "replay"
         assert (await ops.overview(bot="other"))["summary"]["calls"] == 0
+
+
+async def test_response_timing_filters_history_partial_and_per_stage_samples(tmp_path):
+    async with store_at(tmp_path) as store:
+        await seed(store.db)
+        now = datetime.now(UTC).isoformat()
+        async with store.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE dialogue_runs SET timings_json=? WHERE id IN (1,2)",
+                (encode({"model_ms": 80, "queue_ms": 0, "received_at": 1234}),),
+            )
+            for number, bot, chat, raw in [
+                (4, "999", "-100", encode({"model_ms": 300})),
+                (5, "999", "42", None),
+                (6, "888", "42", encode({"model_ms": 99999})),
+            ]:
+                await conn.execute(
+                    "INSERT INTO dialogue_runs(id,bot_id,chat_id,sender_id,message_id,trigger,"
+                    "state,snapshot,created_at,timings_json) VALUES (?,?,?,'42',1,'private',"
+                    "'completed','{}',?,?)",
+                    (number, bot, chat, now, raw),
+                )
+                await conn.execute(
+                    "INSERT INTO model_calls(provider,model,state,created_at,run_id) "
+                    "VALUES ('test','test','completed',?,?)",
+                    (now, number),
+                )
+            await conn.execute(
+                "INSERT INTO behavior_decisions VALUES (4,'live','reaction','{}','',0,0)"
+            )
+        ops = Operations(store.db)
+        result = (await ops.overview(bot="999", page=3, problems=True))["response_timings"]
+        assert result["operations"] == 2 and result["historical"] == 1
+        assert result["partial"] == 1
+        assert result["stages"]["model_ms"] == {"samples": 1, "avg_ms": 80, "p95_ms": 80}
+        assert result["stages"]["queue_ms"] == {"samples": 1, "avg_ms": 0, "p95_ms": 0}
+        assert result["stages"]["total_first_reply_ms"]["avg_ms"] is None
+        assert "received_at" not in json.dumps(result)
+        assert result == (await ops.overview(bot="999"))["response_timings"]
+        async with store.db.transaction() as conn:
+            await conn.execute("UPDATE behavior_decisions SET action='text' WHERE run_id=4")
+        result = (await ops.overview(bot="999"))["response_timings"]
+        assert result["stages"]["model_ms"] == {"samples": 2, "avg_ms": 190, "p95_ms": 300}
+        group = (await ops.overview(bot="999", scope="group", chat="-100"))["response_timings"]
+        assert group["operations"] == 1 and group["stages"]["model_ms"]["avg_ms"] == 300
+        assert (await ops.overview(bot="999", chat="missing"))["response_timings"][
+            "operations"
+        ] == 0
 
 
 async def test_api_auth_filters_review_conflict_and_persistence(tmp_path):
