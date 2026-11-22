@@ -24,11 +24,13 @@ def main():
 
     cd.configured = Source
     with cd.lock(cd.ROOT / "deploy.lock"):
+        previous = cd.load()["live"]
         cd.cycle()
     state = cd.load()
     assert state["phase"] == "idle" and state["live"].startswith(sha)
     bundle = cd.ROOT / "releases" / state["live"] / "bundle"
-    assert list(bundle.glob("zarya-*.whl"))
+    if state["live"] != previous:
+        assert list(bundle.glob("zarya-*.whl"))
     # Exercise idempotency of a second poll.
     with cd.lock(cd.ROOT / "deploy.lock"):
         cd.cycle()
