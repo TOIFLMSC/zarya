@@ -72,7 +72,7 @@ function App() {
       </div>
     );
   if (!session)
-    return <div className="loading">Подключаемся к локальной панели…</div>;
+    return <div className="loading">Подключаемся к панели…</div>;
   if (!session.authenticated)
     return <Login session={session} onLogin={setSession} />;
   return <Panel session={session} onExit={() => void loadSession()} />;
@@ -118,13 +118,12 @@ function Login({
             Заря<small>ТВОЯ СОБЕСЕДНИЦА</small>
           </span>
         </div>
-        <p className="eyebrow">ЛОКАЛЬНЫЙ ЦЕНТР УПРАВЛЕНИЯ</p>
         <h1>
-          {session.setup_required ? "Давай познакомимся." : "С возвращением."}
+          {session.setup_required ? "Настройка доступа" : "Вход в панель"}
         </h1>
         <p className="muted">
           {session.setup_required
-            ? "Создай доступ к панели. Настройки и будущая память будут храниться на этом компьютере."
+            ? "Создай пароль администратора для доступа к панели."
             : "Войди, чтобы настроить Зарю и проверить состояние приложения."}
         </p>
         <form onSubmit={submit}>
@@ -139,8 +138,8 @@ function Login({
                 autoComplete="off"
               />
               <small>
-                Открой файл <code>data/bootstrap-token.txt</code> в папке
-                проекта и вставь ключ. После настройки файл удалится.
+                Открой <code>bootstrap-token.txt</code> в каталоге данных Зари.
+                После настройки файл удалится.
               </small>
             </label>
           )}
@@ -176,41 +175,48 @@ function Login({
                 : "Войти →"}
           </button>
         </form>
-        <p className="login-note">
-          <span className="dot" /> Только на этом компьютере
-        </p>
       </section>
-      <span className="login-edition">ЗАРЯ / ПЕРВАЯ ГЛАВА</span>
     </div>
   );
 }
 
+const sections = {
+  overview: { title: "Обзор", icon: "◫", description: "" },
+  settings: {
+    title: "Настройки",
+    icon: "☷",
+    description: "Характер, модели и обработка сообщений.",
+  },
+  telegram: {
+    title: "Telegram и доступ",
+    icon: "↗",
+    description: "Подключение бота и разрешения групп и личных разговоров.",
+  },
+  dialogues: { title: "Диалоги", icon: "◌", description: "Сообщения, ответы и доставка." },
+  memory: {
+    title: "Память",
+    icon: "◇",
+    description: "Сведения о собеседниках, источники и сводки обсуждений.",
+  },
+  research: {
+    title: "Интернет",
+    icon: "↗",
+    description: "Источники и результаты проверки утверждений.",
+  },
+  media: { title: "Медиа", icon: "▷", description: "Обработка фото, речи и видео." },
+  behavior: {
+    title: "Поведение",
+    icon: "♡",
+    description: "Настроение, реакции и самостоятельное участие в чатах.",
+  },
+  pilot: { title: "Эксплуатация", icon: "◉", description: "Расходы, задержки и очереди." },
+};
+
 function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
-  const [page, rawSetPage] = useState<
-    | "overview"
-    | "settings"
-    | "telegram"
-    | "dialogues"
-    | "memory"
-    | "research"
-    | "media"
-    | "behavior"
-    | "pilot"
-  >("overview");
+  const [page, rawSetPage] = useState<keyof typeof sections>("overview");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const pageHeading = useRef<HTMLHeadingElement>(null);
-  const pageNames = {
-    overview: "Обзор",
-    settings: "Настройки",
-    telegram: "Telegram и доступ",
-    dialogues: "Диалоги",
-    memory: "Память",
-    research: "Интернет",
-    media: "Медиа",
-    behavior: "Поведение",
-    pilot: "Пилот",
-  };
   const [memoryDirty, setMemoryDirty] = useState(false);
   function setPage(value: typeof page) {
     if (value !== page) {
@@ -356,179 +362,56 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
             type="button"
             className="mobile-nav-toggle"
             ref={menuButton}
-            aria-label={`Разделы. Текущий раздел: ${pageNames[page]}`}
+            aria-label={`Разделы. Текущий раздел: ${sections[page].title}`}
             aria-expanded={mobileMenuOpen}
             aria-controls="main-navigation"
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
           >
-            {pageNames[page]}{" "}
+            {sections[page].title}{" "}
             <span aria-hidden="true">{mobileMenuOpen ? "−" : "+"}</span>
             {dirty && <span className="mobile-dirty">Есть изменения</span>}
           </button>
-        </div>
-        <div className="workspace">
-          <span className="dot" /> Локальное пространство
         </div>
         <nav
           id="main-navigation"
           className={mobileMenuOpen ? "is-open" : ""}
           aria-label="Основная навигация"
         >
-          <button
-            className={page === "overview" ? "active" : ""}
-            aria-current={page === "overview" ? "page" : undefined}
-            onClick={() => setPage("overview")}
-          >
-            <span aria-hidden="true">◫</span>Обзор
-          </button>
-          <button
-            className={page === "settings" ? "active" : ""}
-            aria-current={page === "settings" ? "page" : undefined}
-            onClick={() => setPage("settings")}
-          >
-            <span aria-hidden="true">☷</span>Настройки
-            {dirty && (
-              <i
-                className="unsaved"
-                role="img"
-                aria-label="Есть несохранённые изменения"
-              />
-            )}
-          </button>
-          <button
-            className={page === "telegram" ? "active" : ""}
-            aria-current={page === "telegram" ? "page" : undefined}
-            onClick={() => setPage("telegram")}
-          >
-            <span aria-hidden="true">↗</span>Telegram и доступ
-          </button>
-          <button
-            className={page === "dialogues" ? "active" : ""}
-            aria-current={page === "dialogues" ? "page" : undefined}
-            onClick={() => setPage("dialogues")}
-          >
-            <span aria-hidden="true">◌</span>Диалоги
-          </button>
-          <button
-            className={page === "memory" ? "active" : ""}
-            aria-current={page === "memory" ? "page" : undefined}
-            onClick={() => setPage("memory")}
-          >
-            <span aria-hidden="true">◇</span>Память
-          </button>
-          <button
-            className={page === "research" ? "active" : ""}
-            aria-current={page === "research" ? "page" : undefined}
-            onClick={() => setPage("research")}
-          >
-            <span aria-hidden="true">↗</span>Интернет
-          </button>
-          <button
-            className={page === "media" ? "active" : ""}
-            aria-current={page === "media" ? "page" : undefined}
-            onClick={() => setPage("media")}
-          >
-            <span aria-hidden="true">▷</span>Медиа
-          </button>
-          <button
-            className={page === "behavior" ? "active" : ""}
-            aria-current={page === "behavior" ? "page" : undefined}
-            onClick={() => setPage("behavior")}
-          >
-            <span aria-hidden="true">♡</span>Поведение
-          </button>
-          <button
-            className={page === "pilot" ? "active" : ""}
-            aria-current={page === "pilot" ? "page" : undefined}
-            onClick={() => setPage("pilot")}
-          >
-            <span aria-hidden="true">◉</span>Пилот
-          </button>
+          {(Object.keys(sections) as (keyof typeof sections)[]).map((id) => (
+            <button
+              key={id}
+              className={page === id ? "active" : ""}
+              aria-current={page === id ? "page" : undefined}
+              onClick={() => setPage(id)}
+            >
+              <span aria-hidden="true">{sections[id].icon}</span>
+              {sections[id].title}
+              {id === "settings" && dirty && (
+                <i
+                  className="unsaved"
+                  role="img"
+                  aria-label="Есть несохранённые изменения"
+                />
+              )}
+            </button>
+          ))}
         </nav>
-        <div className="sidebar-bottom">
-          <div className="companion">
-            <Portrait className="portrait-small" />
-            <div>
-              Заря<small>Всё начинается с разговора.</small>
-            </div>
-          </div>
-          <span>ЛОКАЛЬНАЯ ВЕРСИЯ · {status?.version ?? "0.1.0"}</span>
-        </div>
+        {status && <div className="sidebar-bottom">Версия {status.version}</div>}
       </aside>
       <main>
         <header>
-          <div className="breadcrumb">
-            Пространство /{" "}
-            <strong>
-              {page === "overview"
-                ? "Обзор"
-                : page === "telegram"
-                  ? "Telegram и доступ"
-                  : page === "dialogues"
-                    ? "Диалоги"
-                    : page === "memory"
-                      ? "Память"
-                      : page === "research"
-                        ? "Интернет"
-                        : page === "media"
-                          ? "Медиа"
-                          : page === "behavior"
-                            ? "Поведение"
-                            : page === "pilot"
-                              ? "Пилот"
-                              : "Настройки"}
-            </strong>
-          </div>
           <button className="quiet" onClick={() => void logout()}>
             Выйти ↗
           </button>
         </header>
         <div className="content">
           <div className="page-heading">
-            <div>
-              <p className="eyebrow">ЭТАП 09 / ЛОКАЛЬНЫЙ ПИЛОТ</p>
-              <h1 ref={pageHeading} tabIndex={-1}>
-                {page === "overview"
-                  ? "Заря начинается здесь."
-                  : page === "telegram"
-                    ? "Telegram и доступ."
-                    : page === "dialogues"
-                      ? "Диалоги."
-                      : page === "memory"
-                        ? "Память."
-                        : page === "research"
-                          ? "Интернет и проверка."
-                          : page === "media"
-                            ? "Медиа."
-                            : page === "behavior"
-                              ? "Поведение."
-                              : page === "pilot"
-                                ? "Локальный пилот."
-                                : "Настройки Зари."}
-              </h1>
-              <p className="muted">
-                {page === "overview"
-                  ? "Состояние приложения и первые настройки твоей собеседницы."
-                  : page === "telegram"
-                    ? "Подключение бота и разрешения для групп и личных разговоров."
-                    : page === "dialogues"
-                      ? "Сообщения, ответы и доставка."
-                      : page === "memory"
-                        ? "Сведения о собеседниках, источники и сводки обсуждений."
-                        : page === "research"
-                          ? "Материалы, источники и результаты проверки утверждений."
-                          : page === "media"
-                            ? "Фото, альбомы, речь и видео: исходники и результаты разбора."
-                            : page === "behavior"
-                              ? "Настроение разговоров, выразительность и самостоятельное участие."
-                              : page === "pilot"
-                                ? "Расходы, задержки и состояние локального запуска."
-                                : "Характер, модели и обработка сообщений. Изменения применяются после сохранения."}
-              </p>
-            </div>
-            <span className="badge">
-              <span className="dot" /> Локальный режим
-            </span>
+            <h1 ref={pageHeading} tabIndex={-1}>
+              {sections[page].title}
+            </h1>
+            {sections[page].description && (
+              <p className="muted">{sections[page].description}</p>
+            )}
           </div>
           {error && (
             <div className="notice error" role="alert">
@@ -581,22 +464,15 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
             <>
               <section className="hero">
                 <div>
-                  <span className="eyebrow">ПЕРВАЯ ГЛАВА</span>
-                  <h2>
-                    Место, где у Зари
-                    <br />
-                    появится свой голос.
-                  </h2>
-                  <p>
-                    Настрой характер и разреши разговоры. Историю ответов и
-                    использованный контекст можно проверить в журнале.
-                  </p>
-                  <button
-                    className="primary"
-                    onClick={() => setPage("settings")}
-                  >
-                    Настроить Зарю <span>↗</span>
-                  </button>
+                  <h2>Управление Зарёй</h2>
+                  <div className="hero-actions">
+                    <button className="primary" onClick={() => setPage("settings")}>
+                      Открыть настройки
+                    </button>
+                    <button onClick={() => setPage("dialogues")}>
+                      Журнал диалогов
+                    </button>
+                  </div>
                 </div>
                 <div className="portrait-panel" aria-hidden="true">
                   <Portrait />
@@ -608,7 +484,6 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                   <h3>
                     <span className="dot" /> Работает
                   </h3>
-                  <p>Python · локальный сервер</p>
                   <small>
                     Время работы: {Math.floor(status.uptime_seconds / 60)} мин.
                   </small>
@@ -630,29 +505,12 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                     {status.integrations.openai === "configured"
                       ? "ключ настроен"
                       : "ключ не настроен"}
-                    . Подключение Telegram и разрешения — в отдельном разделе.
                   </p>
                   <button onClick={() => setPage("telegram")}>
                     Открыть подключение ↗
                   </button>
                 </section>
               </div>
-              <section className="next-step">
-                <div className="step-number">10</div>
-                <div>
-                  <p className="eyebrow">ПО РЕШЕНИЮ ВЛАДЕЛЬЦА</p>
-                  <h3>Перенос на VPS</h3>
-                  <p>
-                    Опционально, когда будет нужно: постоянный запуск,
-                    защищённый доступ и резервные копии.
-                  </p>
-                </div>
-                <span className="pill">Опционально</span>
-              </section>
-              <footer>
-                Данные хранятся на этом компьютере.{" "}
-                <span>ЗАРЯ · {status.version}</span>
-              </footer>
             </>
           ) : (
             <>
@@ -665,7 +523,7 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
               />
               <form onSubmit={save} noValidate className="settings-form">
                 <fieldset disabled={busy}>
-                  <div className="save-bar settings-save-bar">
+                  <div className={`save-bar settings-save-bar${dirty || busy ? " is-sticky" : ""}`}>
                     <div aria-live="polite" aria-atomic="true">
                       <strong>
                         {busy
@@ -765,7 +623,7 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                         />
                         <small>
                           Любопытство, привычки речи и отношение к собеседникам.
-                          До 4000 символов. Сохраняется локально в базе. Полные
+                          До 4000 символов. Сохраняется в базе Зари. Полные
                           инструкции редактируются через Obsidian и карточку
                           конфигурации выше. Сохранение формы активирует новый
                           выпуск.
@@ -848,7 +706,7 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                   >
                     <div>
                       <p>
-                        Применяется к новым операциям. Ключ хранится локально,
+                        Применяется к новым операциям. Ключ хранится на стороне Зари,
                         отдельно от настроек.
                       </p>
                       <small>
@@ -1034,7 +892,7 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                           onChange={(e) => change("topic_context_chat_id", e.target.value.trim())}
                         />
                         <small>
-                          Оставьте пустым, чтобы выключить пилот. В разрешённой
+                          Оставьте пустым, чтобы выключить хронологию темы. В разрешённой
                           тестовой группе Заря учитывает до восьми реплик
                           текущего топика за сутки, в том числе без реплая.
                           Фоновая память для этого не нужна.
@@ -1146,7 +1004,7 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                           }
                         />
                         <small>
-                          Локальная настройка. Применяется к новым блокам;
+                          Применяется к новым блокам;
                           готовые не пересоздаются.
                         </small>
                       </label>

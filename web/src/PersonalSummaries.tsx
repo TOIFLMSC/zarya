@@ -76,7 +76,7 @@ export function PersonalSummaries({
         </p>
       ) : (
         <details>
-          <summary>Сводки в этом окне · {data.blocks.length} блоков</summary>
+          <summary>Сводки в этом окне ({data.blocks.length})</summary>
           {data.blocks.map((b) => (
             <div className="context-message" key={b.id}>
               <strong>

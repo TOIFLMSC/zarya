@@ -171,7 +171,7 @@ export function ResearchPanel({
         </div>
         {list && (
           <p className="muted">
-            {list.bot_id ?? "Telegram не подключён"} ·{" "}
+            {list.bot_id ? `Бот Telegram · ID ${list.bot_id}` : "Telegram не подключён"} ·{" "}
             {list.enabled ? "Поиск включён" : "Поиск выключен"} · {list.model}
           </p>
         )}

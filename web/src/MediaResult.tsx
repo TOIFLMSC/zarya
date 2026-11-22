@@ -115,7 +115,7 @@ export function MediaResult({ detail }: { detail: MediaDetail }) {
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    Открыть кадр {i + 1} · {time(frame.seconds)} ↗
+                    Открыть кадр {i + 1} · {time(frame.seconds)}&nbsp;↗
                   </a>
                 </figcaption>
               </figure>

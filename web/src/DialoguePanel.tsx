@@ -58,7 +58,7 @@ const triggers: Record<string, string> = {
   not_configured: "Ключ не настроен",
   superseded: "Вопрос обновлён",
   replay: "Тестовый прогон",
-  legacy: "Событие этапа 2",
+  legacy: "Событие из прежней версии",
   expired: "Вопрос устарел",
 };
 const money = (value: number | null | undefined) =>
@@ -205,19 +205,14 @@ export function DialoguePanel({
     <div className="dialogue-panel">
       <section className="card connection-card">
         <div>
-          <span className="card-label">ДИАЛОГ И НАБЛЮДЕНИЕ</span>
           <h2>
-            {list?.configured ? "Ключ OpenAI настроен" : "Ожидаем подключение"}
+            {list
+              ? list.configured ? "Ключ OpenAI настроен" : "Ключ OpenAI не настроен"
+              : error ? "Состояние OpenAI недоступно" : "Проверяем подключение…"}
           </h2>
-          <p className="muted">
-            Журнал входящих сообщений, контекста, ответов и доставки. Здесь
-            показаны события приложения.
-            Новые ответы должны учитывать уточнения собеседника и пересматривать
-            ранее предложенные варианты, если они недоступны.
-          </p>
         </div>
         <div>
-          <strong>{money(list?.known_cost_usd)}</strong>
+          <strong>{list ? money(list.known_cost_usd) : "—"}</strong>
           <p className="muted">Известная оценка расходов</p>
           <small>
             Без оценки: {list?.unknown_cost_calls ?? "…"} вызовов. Включая

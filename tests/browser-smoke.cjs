@@ -96,7 +96,7 @@ async function openSettingsSection(page, title) {
   const page = await context.newPage();
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(origin);
-  await page.getByRole("heading", { name: "Давай познакомимся." }).waitFor();
+  await page.getByRole("heading", { name: "Настройка доступа" }).waitFor();
   await page.screenshot({
     path: path.join(output, "setup.png"),
     fullPage: true,
@@ -107,7 +107,8 @@ async function openSettingsSection(page, title) {
   await page.getByLabel("Одноразовый ключ").fill(token);
   await page.getByLabel("Новый пароль администратора").fill(password);
   await page.getByRole("button", { name: "Создать доступ →" }).click();
-  await page.getByRole("heading", { name: "Заря начинается здесь." }).waitFor();
+  await page.getByRole("heading", { name: "Обзор", exact: true }).waitFor();
+  assert.equal(await page.getByText(/Перенос на VPS|Локальный режим|ЭТАП 09/).count(), 0);
   await page.getByText("Настройки сохранены", { exact: true }).waitFor();
   await page.locator(".portrait-panel img").evaluate((img) => img.decode());
   await page.screenshot({
@@ -566,8 +567,10 @@ async function openSettingsSection(page, title) {
     if (n === 79) throw new Error("Personal summary worker did not complete");
     await page.waitForTimeout(100);
   }
-  const vaultCopy = page.getByText(/^Локальное хранилище памяти\. Персональные сводки/);
+  const vaultCopy = page.getByText(/^Заметки памяти и предложенные правки/);
   await vaultCopy.waitFor();
+  await page.getByText("Папка Obsidian не подключена на стороне Зари.", { exact: false }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Обновить синхронизацию" }).count(), 0);
   await vaultCopy.evaluate(el => el.scrollIntoView({ block: "start" }));
   await page.waitForTimeout(200);
   await page.screenshot({ path: path.join(output, "summary-vault-copy-desktop.png") });
@@ -721,7 +724,9 @@ async function openSettingsSection(page, title) {
   const depthRestore = page.waitForResponse((response) => response.url().endsWith("/api/settings") && response.request().method() === "PUT");
   await page.getByRole("button", { name: "Сохранить настройки" }).click();
   assert.equal((await depthRestore).ok(), true);
-  await page.getByText("Повторные чтения ускорены внутри одной операции.", { exact: false }).waitFor();
+  await page.locator(".settings-save-bar:not(.is-sticky)").waitFor();
+  assert.equal(await page.locator(".settings-save-bar").evaluate((el) => getComputedStyle(el).position), "static");
+  await page.getByText("E5 ищет по смыслу в доступной истории до 90", { exact: false }).waitFor();
   await page.screenshot({ path: path.join(output, "retrieval-settings.png"), fullPage: true });
   await page.setViewportSize({ width: 360, height: 800 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -970,7 +975,7 @@ async function openSettingsSection(page, title) {
     guardedTransition = true;
     await dialog.dismiss();
   });
-  await navigate(page, "Пилот");
+  await navigate(page, "Эксплуатация");
   assert.equal(guardedTransition, true);
   assert.equal(
     await page.getByLabel("Выразительность").inputValue(),
@@ -1004,7 +1009,7 @@ async function openSettingsSection(page, title) {
     await page.getByLabel("Режим инициативы", { exact: true }).count(),
     0,
   );
-  await navigate(page, "Пилот");
+  await navigate(page, "Эксплуатация");
   await page
     .getByRole("heading", { name: "Расходы по направлениям", exact: true })
     .waitFor();
@@ -1098,7 +1103,7 @@ async function openSettingsSection(page, title) {
   await stop();
   await start(data);
   await page.reload();
-  await page.getByRole("heading", { name: "С возвращением." }).waitFor();
+  await page.getByRole("heading", { name: "Вход в панель" }).waitFor();
   await page.screenshot({
     path: path.join(output, "login-mobile.png"),
     fullPage: true,
@@ -1111,7 +1116,7 @@ async function openSettingsSection(page, title) {
     "После сохранения",
   );
   await page.getByRole("button", { name: "Выйти ↗" }).click();
-  await page.getByRole("heading", { name: "С возвращением." }).waitFor();
+  await page.getByRole("heading", { name: "Вход в панель" }).waitFor();
   assert.deepEqual(errors, []);
   console.log(
     "Browser smoke passed: setup, access, dialogue/replay, settings/conflict, photos, research, media, memory, behavior/mood/reset/reaction/shadow/chance/polling/draft/stop/conflict/mobile360, pilot/filters/review/draft/threshold/mobile360, restart/login/logout. Telegram and OpenAI adapters are synthetic; zero external calls.",
