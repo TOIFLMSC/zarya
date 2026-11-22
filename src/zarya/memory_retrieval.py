@@ -187,26 +187,25 @@ async def candidates(
     if read is None:
         with MemoryRead(conn) as read:
             return await candidates(conn, bot, chat, grant, participants, now, read=read)
-    ids = set(participants)
     async with conn.execute(
         "SELECT f.id,f.version,f.sender_id,f.category,f.text,f.provenance,f.chat_id,"
         "f.access_version,f.context_dependencies,f.state,f.observation_kind "
         "FROM memory_facts f JOIN telegram_access a ON a.bot_id=f.bot_id AND "
         "a.subject_id=f.chat_id AND a.scope=f.scope AND a.version=f.access_version "
-        "WHERE f.bot_id=? AND (f.state='active' OR (f.state='proposed' AND f.chat_id=? "
+        "WHERE f.bot_id=? AND f.sender_id IN (SELECT value FROM json_each(?)) "
+        "AND (f.state='active' OR (f.state='proposed' AND f.chat_id=? "
         "AND f.observation_kind!='none')) AND a.state='approved' "
         "AND a.member_state NOT IN ('left','kicked','migrated') AND (f.chat_id=? OR "
         "(? LIKE '-%' AND EXISTS (SELECT 1 FROM memory_shares s WHERE s.fact_id=f.id "
         "AND s.fact_version=f.version AND s.state='active'))) "
         "ORDER BY (f.chat_id=?) DESC,f.id DESC LIMIT 150",
-        (bot, chat, chat, chat, chat),
+        (bot, json.dumps(participants), chat, chat, chat, chat),
     ) as cur:
         rows = list(await cur.fetchall())
     facts = []
     for f in rows:
-        if f[2] not in ids or (
-            f[8] is not None
-            and not await valid_dependencies(conn, bot, f[6], f[7], f[8], depth=1, read=read)
+        if f[8] is not None and not await valid_dependencies(
+            conn, bot, f[6], f[7], f[8], depth=1, read=read
         ):
             continue
         assessment = (
