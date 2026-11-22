@@ -20,14 +20,46 @@ def reception_clock(monkeypatch):
 
 
 async def pilot(store, *, research=False):
-    await ready(store, -100)
+    await ready(store, -100, message_batches=True)
     settings = await store.db.settings()
     await store.db.update_settings(
         settings.version,
-        settings.settings.model_copy(
-            update={"message_batch_chat_id": "-100", "research_enabled": research}
-        ),
+        settings.settings.model_copy(update={"research_enabled": research}),
     )
+
+
+async def test_group_default_and_individual_opt_out(tmp_path):
+    from zarya.database import ConflictError
+
+    async with store_at(tmp_path) as store:
+        await store.ingest("999", "zarya_test", [event(1, -100), event(2, -200), event(3)])
+        for chat in ("-100", "-200"):
+            await store.decide("999", "group", chat, "approved", 1)
+        await store.decide("999", "private", "42", "approved", 1)
+        by_chat = {p["id"]: p for p in (await store.peers("999", "group", 0))["items"]}
+        assert all(p["message_batches_enabled"] for p in by_chat.values())
+        await store.set_message_batches("999", "-100", 2, True, False)
+        with pytest.raises(ConflictError):
+            await store.set_message_batches("999", "-100", 2, True, True)
+        assert (await store.peers("999", "private", 0))["items"][0][
+            "message_batches_enabled"
+        ] is None
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(4, -100, "Заря, без поиска назови число"),
+                event(5, -200, "Заря, без поиска назови цвет"),
+                event(6, 42, "Заря, без поиска назови день"),
+            ],
+        )
+        assert await store.db.all("SELECT chat_id FROM text_batches") == [("-200",)]
+        await store.decide("999", "group", "-100", "revoked", 2)
+        await store.decide("999", "group", "-100", "approved", 3)
+        by_chat = {p["id"]: p for p in (await store.peers("999", "group", 0))["items"]}
+        assert by_chat["-100"]["version"] == 4
+        assert by_chat["-100"]["message_batches_enabled"] is False
+        assert by_chat["-200"]["message_batches_enabled"] is True
 
 
 def text(mid, value, topic=8, sender=42, **extra):

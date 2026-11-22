@@ -8,6 +8,7 @@ type Peer = {
   state: string;
   version: number;
   member_state: string;
+  message_batches_enabled: boolean | null;
 };
 type Peers = {
   items: Peer[];
@@ -187,6 +188,34 @@ export function TelegramPanel({
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось сохранить решение");
       if (e instanceof ApiError && e.status === 401) onUnauthorized();
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function setMessageBatches(peer: Peer, enabled: boolean) {
+    if (!peers?.bot_id || peer.message_batches_enabled === null) return;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await api(
+        "telegram/message-batches",
+        "PUT",
+        {
+          bot_id: peers.bot_id,
+          subject_id: peer.id,
+          expected_version: peer.version,
+          expected_enabled: peer.message_batches_enabled,
+          enabled,
+        },
+        csrf,
+      );
+      setMessage(enabled ? "Серии в этой группе включены." : "Серии в этой группе выключены.");
+      setRevision((v) => v + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось сохранить настройку серий");
+      if (e instanceof ApiError && e.status === 401) onUnauthorized();
+      if (e instanceof ApiError && e.status === 409) setRevision((v) => v + 1);
     } finally {
       setBusy(false);
     }
@@ -373,6 +402,19 @@ export function TelegramPanel({
                   {["left", "kicked", "migrated"].includes(
                     peer.member_state,
                   ) && <p>Бот удалён, заблокирован или группа перенесена.</p>}
+                  {scope === "group" && peer.state === "approved" &&
+                    !["left", "kicked", "migrated"].includes(peer.member_state) && (
+                      <label className="peer-option">
+                        <input
+                          type="checkbox"
+                          checked={peer.message_batches_enabled === true}
+                          disabled={busy || !!connectionError}
+                          aria-label={`Серии сообщений в группе «${peer.title}»`}
+                          onChange={(e) => void setMessageBatches(peer, e.target.checked)}
+                        />
+                        Серии сообщений
+                      </label>
+                    )}
                 </div>
                 <div className="peer-actions">
                   {peer.state !== "approved" && (

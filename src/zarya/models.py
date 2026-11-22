@@ -1,6 +1,13 @@
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+
+
+def without_retired_settings(value: Any) -> Any:
+    if isinstance(value, dict) and "message_batch_chat_id" in value:
+        # Early PR builds stored a single-group pilot, which no longer controls access.
+        return {key: item for key, item in value.items() if key != "message_batch_chat_id"}
+    return value
 
 
 class StrictModel(BaseModel):
@@ -8,6 +15,11 @@ class StrictModel(BaseModel):
 
 
 class Settings(StrictModel):
+    @model_validator(mode="before")
+    @classmethod
+    def read_retired_settings(cls, value: Any) -> Any:
+        return without_retired_settings(value)
+
     display_name: str = Field(default="Заря", min_length=1, max_length=40)
     owner_telegram_id: str = Field(default="", pattern=r"^(|[1-9][0-9]{0,15})$")
     owner_username: str = Field(default="", pattern=r"^(@?[A-Za-z0-9_]{1,32})?$")
@@ -29,7 +41,6 @@ class Settings(StrictModel):
     memory_retrieval: Literal["legacy", "shadow", "graph", "e5"] = "shadow"
     participant_context_messages: int = Field(default=20, ge=1, le=100, strict=True)
     topic_context_chat_id: str = Field(default="", pattern=r"^(|-[1-9][0-9]{0,15})$")
-    message_batch_chat_id: str = Field(default="", pattern=r"^(|-[1-9][0-9]{0,15})$")
     participant_summaries_enabled: bool = True
     participant_summary_prompt: str = Field(
         default=(
@@ -108,6 +119,14 @@ class AccessDecision(StrictModel):
     subject_id: str = Field(pattern=r"^-?[1-9][0-9]{0,15}$")
     state: Literal["approved", "rejected", "revoked"]
     expected_version: int = Field(ge=1)
+
+
+class GroupMessageBatchesUpdate(StrictModel):
+    bot_id: str = Field(pattern=r"^[1-9][0-9]{0,15}$")
+    subject_id: str = Field(pattern=r"^-[1-9][0-9]{0,15}$")
+    expected_version: int = Field(ge=1)
+    expected_enabled: bool = Field(strict=True)
+    enabled: bool = Field(strict=True)
 
 
 class DeliveryDismiss(StrictModel):

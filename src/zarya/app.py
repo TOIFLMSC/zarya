@@ -35,6 +35,7 @@ from zarya.models import (
     ConfigurationRollback,
     DeliveryDismiss,
     GroupBehaviorUpdate,
+    GroupMessageBatchesUpdate,
     LoginInput,
     MemoryMutation,
     MoodReset,
@@ -557,6 +558,22 @@ def create_app(
             ) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+        return {"ok": True}
+
+    @app.put("/api/telegram/message-batches", dependencies=[Depends(authenticated)])
+    async def set_message_batches(body: GroupMessageBatchesUpdate) -> dict[str, bool]:
+        try:
+            await telegram_store.set_message_batches(
+                current_bot(body.bot_id),
+                body.subject_id,
+                body.expected_version,
+                body.expected_enabled,
+                body.enabled,
+            )
+        except ConflictError as exc:
+            raise HTTPException(
+                409, "Группа или настройка изменилась. Обновите список групп"
+            ) from exc
         return {"ok": True}
 
     @app.get("/api/dialogues", dependencies=[Depends(authenticated)])

@@ -16,7 +16,6 @@ export type Settings = {
   memory_retrieval: "legacy" | "shadow" | "graph" | "e5";
   participant_context_messages: number;
   topic_context_chat_id: string;
-  message_batch_chat_id: string;
   participant_summaries_enabled: boolean;
   participant_summary_prompt: string;
   research_enabled: boolean;
