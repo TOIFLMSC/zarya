@@ -11,7 +11,7 @@ from uuid import uuid4
 from zarya import obsidian_fs as fs
 from zarya.configuration import canonical, digest, document, validate
 from zarya.database import ConflictError
-from zarya.models import Settings
+from zarya.models import Settings, without_retired_settings
 from zarya.prompts import DEFAULT_PROMPTS, MAX_BYTES, _unique
 from zarya.telegram_store import TelegramStore, row
 
@@ -303,6 +303,8 @@ class ConfigurationBridge:
                     raise ValueError
                 for name, keys in GROUPS.items():
                     value = json.loads(raw_bodies[f"{name}.md"], object_pairs_hook=_unique)
+                    if name == "Модели и лимиты":
+                        value = without_retired_settings(value)
                     if "memory_retrieval" in keys and "memory_retrieval" not in value:
                         value["memory_retrieval"] = "shadow"
                     if "participant_context_messages" in keys:

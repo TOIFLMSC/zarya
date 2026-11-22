@@ -209,6 +209,7 @@ export type DialogDetail = DialogItem & {
       forwarded: boolean;
       received_at: number;
     }[];
+    current_messages?: { message_id: number; event_id: number; text: string }[];
     participant_context?: {
       algorithm: string;
       limit: number;
@@ -277,6 +278,7 @@ export type DialogDetail = DialogItem & {
     error: string | null;
   } | null;
   parts: {
+    reply_id?: number | null;
     index: number;
     state: string;
     text: string;

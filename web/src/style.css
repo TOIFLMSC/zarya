@@ -1145,6 +1145,16 @@ summary:focus-visible {
 .peer-info {
   min-width: 0;
 }
+.peer-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.peer-option input {
+  width: auto;
+  margin: 0;
+}
 .peer-actions {
   display: flex;
   flex-wrap: wrap;

@@ -165,7 +165,15 @@ async def invalidate(
     await conn.execute(
         "UPDATE jobs SET state='cancelled',payload=json_remove(payload,'$.service_text') "
         "WHERE event_id IN (SELECT id FROM events WHERE " + affected + ") "
-        "AND state IN ('pending','running')",
+        "AND state IN ('pending','running')"
+        + (
+            # Open batches have no assembled context. Admission already replaced or
+            # removed the previous member revision in this same ingestion transaction.
+            " AND NOT (state='pending' AND EXISTS (SELECT 1 FROM text_batches b "
+            "WHERE b.job_id=jobs.id AND b.sealed=0))"
+            if before_event is not None and not shared
+            else ""
+        ),
         args,
     )
     await conn.execute(
@@ -275,6 +283,8 @@ async def suppress_sources(
     *,
     scrub: bool = True,
 ) -> None:
+    from zarya.message_batches import forget
+
     if scrub:
         from zarya.memory_commands import scrub_scope
 
@@ -315,6 +325,7 @@ async def suppress_sources(
             "DELETE FROM recent_messages WHERE bot_id=? AND chat_id=? AND message_id=?",
             (bot, chat, source[0]),
         )
+        await forget(conn, source[1])
         await conn.execute("UPDATE events SET payload='{}' WHERE id=?", (source[1],))
         await conn.execute(
             "UPDATE jobs SET state='cancelled' WHERE event_id=? AND state IN ('pending','running')",

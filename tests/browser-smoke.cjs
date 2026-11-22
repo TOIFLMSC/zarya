@@ -141,6 +141,11 @@ async function openSettingsSection(page, title) {
   await page.getByText("Тестовая группа друзей", { exact: true }).waitFor();
   await page.getByRole("button", { name: /^Разрешить:/ }).click();
   await page.getByText("Разрешён", { exact: true }).waitFor();
+  const batches = page.getByRole("checkbox", { name: /^Серии сообщений в группе/ });
+  assert.equal(await batches.isChecked(), true);
+  await batches.click();
+  await page.getByText("Серии в этой группе выключены.", { exact: true }).waitFor();
+  await page.getByRole("checkbox", { name: /^Серии сообщений в группе/, checked: false }).waitFor();
   await page.setViewportSize({ width: 360, height: 800 });
   await page.screenshot({
     path: path.join(output, "telegram-mobile.png"),

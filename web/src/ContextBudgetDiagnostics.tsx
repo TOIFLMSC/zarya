@@ -12,6 +12,7 @@ const states: Record<string, string> = {
 const categories: Record<string, string> = {
   instructions: "Инструкции",
   current_message: "Текущее сообщение",
+  current_messages: "Текущая серия",
   topic_context: "Хронология топика",
   recent_originals: "Недавние реплики · оригиналы",
   recent_summaries: "Недавние реплики · сводки",

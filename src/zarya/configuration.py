@@ -7,7 +7,7 @@ from typing import Any
 
 import aiosqlite
 
-from zarya.models import Settings
+from zarya.models import Settings, without_retired_settings
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle, _unique
 
 
@@ -34,13 +34,14 @@ def validate(raw: str) -> tuple[Settings, PromptBundle]:
             "participant_summaries_enabled",
             "participant_summary_prompt",
         }
-        if set(data) != {"settings", "prompts"} or not (
-            set(Settings.model_fields) - optional
-            <= set(data["settings"])
-            <= set(Settings.model_fields)
+        if set(data) != {"settings", "prompts"}:
+            raise ValueError
+        fields = without_retired_settings(data["settings"])
+        if not isinstance(fields, dict) or not (
+            set(Settings.model_fields) - optional <= set(fields) <= set(Settings.model_fields)
         ):
             raise ValueError
-        settings = Settings.model_validate(data["settings"], strict=True)
+        settings = Settings.model_validate(fields, strict=True)
         prompts = PromptBundle.parse(
             canonical(data["prompts"]).encode(), set(DEFAULT_PROMPTS.fragments)
         )
