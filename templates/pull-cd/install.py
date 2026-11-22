@@ -50,6 +50,8 @@ def validate(config):
         raise ValueError("health_url must use HTTP on 127.0.0.1 with a dedicated port")
     for key in ("poll_seconds", "health_timeout_seconds", "backup_retry_seconds"):
         limit(config[key], key)
+    if not isinstance(config.get("prune_install_inputs", False), bool):
+        raise ValueError("prune_install_inputs must be a boolean")
     backup = config["backup"]
     for key in ("keep_nightly", "keep_predeploy"):
         limit(backup[key], key)
