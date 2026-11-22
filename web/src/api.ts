@@ -199,6 +199,7 @@ export type DialogDetail = DialogItem & {
   replay_of: number | null;
   snapshot: {
     invalidated?: boolean;
+    verbatim_quote?: boolean;
     context_budget?: ContextBudget;
     topic_context?: {
       message_id: number;

@@ -6,9 +6,10 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from test_dialogue import FakeModel, drain
 from test_photos import PhotoTransport, VisionModel, analyze, photo, ready
 from test_research import Fetch
-from test_telegram import event, store_at
+from test_telegram import FakeTransport, event, store_at
 
 from zarya.dialogue import DialogueEngine
 from zarya.memory import MemoryEngine
@@ -16,6 +17,7 @@ from zarya.openai_adapter import ModelResult
 from zarya.photos import PhotoEngine
 from zarya.research import ResearchEngine
 from zarya.source_material import resolve
+from zarya.telegram_runtime import TelegramRuntime
 
 
 async def answer(dialogue, research, number):
@@ -39,6 +41,235 @@ async def deliver(store, work, message_id):
     async with store.db.transaction() as conn:
         await conn.execute("UPDATE outbox SET state='sending' WHERE id=?", (item[0],))
     await store.delivery_result(item[0], "sent", message_id=message_id)
+
+
+async def test_verbatim_reply_does_not_generate_even_when_model_repeats_previous_answer(tmp_path):
+    async with store_at(tmp_path) as store:
+        await ready(store, -100)
+        model = FakeModel(ModelResult(text="20:00"))
+        dialogue = DialogueEngine(store, model)
+        original = "Проверка Зари:  созвон Маяк — в 19:00.\n\nТочно."
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [event(2, -100, original), event(3, -100, "Заря, во сколько? Ответь только временем.")],
+        )
+        await drain(dialogue)
+        (previous_job,) = await store.db.one("SELECT job_id FROM dialogue_runs WHERE message_id=3")
+        await deliver(store, {"job_id": previous_job}, 4)
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(
+                    5,
+                    -100,
+                    "Заря, процитируй это сообщение дословно.",
+                    reply_to_message={"message_id": 2, "text": "Устаревшая вложенная копия"},
+                )
+            ],
+        )
+        await drain(dialogue)
+        (run,) = await store.db.one("SELECT id FROM dialogue_runs WHERE message_id=5")
+        detail = await dialogue.details(run)
+        assert detail["response"] == original
+        assert detail["call"] is None
+        assert len(model.calls) == 1
+        (payload,) = await store.db.one(
+            "SELECT payload FROM outbox WHERE job_id=?", (detail["job_id"],)
+        )
+        assert json.loads(payload)["text"] == original
+        assert json.loads(payload)["reply_id"] == 5
+        await deliver(store, {"job_id": detail["job_id"]}, 6)
+        assert await store.db.one("SELECT remaining FROM active_dialogues WHERE chat_id='-100'")
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(
+                    7,
+                    -100,
+                    "А почему?",
+                    reply_to_message={
+                        "message_id": 6,
+                        "from": {"id": 999, "is_bot": True},
+                    },
+                )
+            ],
+        )
+        await drain(dialogue)
+        data = json.loads(model.calls[-1]["input"])
+        assert len(model.calls) == 2
+        assert data["selected_material"]["messages"][0]["text"] == original
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(
+                    8,
+                    -100,
+                    "Заря, процитируй это сообщение дословно.",
+                    reply_to_message={
+                        "message_id": 6,
+                        "from": {"id": 999, "is_bot": True},
+                    },
+                )
+            ],
+        )
+        await drain(dialogue)
+        assert len(model.calls) == 3
+        with pytest.raises(ValueError, match="цитата копируется напрямую"):
+            await dialogue.replay(run, "paid")
+
+
+@pytest.mark.parametrize(
+    "chat,address", [(-100, "Заря "), (-100, "@zarya_test, "), (42, "@zarya_test, ")]
+)
+async def test_verbatim_reply_accepts_name_without_comma_and_bot_mention(tmp_path, chat, address):
+    async with store_at(tmp_path) as store:
+        await ready(store, chat)
+        entities = (
+            [{"type": "mention", "offset": 0, "length": len("@zarya_test")}]
+            if address.startswith("@")
+            else []
+        )
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(2, chat, "Точный текст."),
+                event(
+                    3,
+                    chat,
+                    address + "процитируй это сообщение дословно.",
+                    reply_to_message={"message_id": 2},
+                    entities=entities,
+                ),
+            ],
+        )
+        await drain(DialogueEngine(store, None))
+        assert (
+            json.loads((await store.db.one("SELECT payload FROM outbox"))[0])["text"]
+            == "Точный текст."
+        )
+
+
+@pytest.mark.parametrize("is_caption", [False, True])
+async def test_verbatim_reply_preserves_opted_in_text_link_to_transport(tmp_path, is_caption):
+    async with store_at(tmp_path) as store:
+        await ready(store, -100)
+        link = {"type": "text_link", "offset": 3, "length": 4, "url": "https://example.org"}
+        if is_caption:
+            original = event(2, -100, "", caption="🙂 План", caption_entities=[link])
+        else:
+            original = event(2, -100, "🙂 План", entities=[link])
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                original,
+                event(
+                    3,
+                    -100,
+                    "Заря, процитируй это сообщение дословно со ссылкой.",
+                    reply_to_message={"message_id": 2},
+                ),
+            ],
+        )
+        await drain(DialogueEngine(store, None))
+
+        class LinkedTransport(FakeTransport):
+            async def send(self, chat_id, text, thread_id, reply_id=None, *, entities=None):
+                assert (text, reply_id, entities) == ("🙂 План", 3, [link])
+                return 10
+
+        await TelegramRuntime(store, transport=LinkedTransport()).deliver_one("999")
+        assert await store.db.all("SELECT state FROM outbox") == [("sent",)]
+
+
+@pytest.mark.parametrize("change", ["source", "request", "access", "disabled"])
+async def test_verbatim_reply_respects_pending_delivery_guards(tmp_path, change):
+    async with store_at(tmp_path) as store:
+        await ready(store, -100)
+        original = event(2, -100, "Точный текст — 19:00.")
+        request = event(
+            3, -100, "Заря, дословно процитируй это сообщение.", reply_to_message={"message_id": 2}
+        )
+        await store.ingest("999", "zarya_test", [original, request])
+        await drain(DialogueEngine(store, None))
+        assert await store.db.all("SELECT state FROM outbox") == [("pending",)]
+        if change in {"source", "request"}:
+            target = original if change == "source" else request
+            edit = {**target["message"], "text": "Изменённая реплика."}
+            await store.ingest("999", "zarya_test", [{"update_id": 4, "edited_message": edit}])
+        elif change == "access":
+            async with store.db.transaction() as conn:
+                await conn.execute("UPDATE telegram_access SET version=version+1")
+        else:
+            current = await store.db.settings()
+            await store.db.update_settings(
+                current.version, current.settings.model_copy(update={"dialogue_enabled": False})
+            )
+        assert await store.claim_delivery("999") is None
+        assert await store.db.all("SELECT state FROM outbox") == [("cancelled",)]
+
+
+@pytest.mark.parametrize(
+    "text,target,source",
+    [
+        ("Заря, процитируй это сообщение дословно.", 99, "Устаревшая копия"),
+        ("Заря, процитируй это сообщение дословно.", 2, "со ссылкой"),
+        ("Заря, процитируй это сообщение дословно со ссылкой.", 2, "https://example.org"),
+    ],
+)
+async def test_verbatim_reply_uses_current_source_and_keeps_link_policy(
+    tmp_path, text, target, source
+):
+    async with store_at(tmp_path) as store:
+        await ready(store, -100)
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(2, -100, "План — https://example.org"),
+                event(
+                    3,
+                    -100,
+                    text,
+                    reply_to_message={"message_id": target, "text": "Устаревшая копия"},
+                ),
+            ],
+        )
+        await drain(DialogueEngine(store, None))
+        result = json.loads((await store.db.one("SELECT payload FROM outbox"))[0])["text"]
+        if target == 99:
+            assert "не вижу сохранённого текста" in result and source not in result
+        else:
+            assert source in result
+            assert ("https://example.org" in result) == ("со ссылкой" in text)
+
+
+async def test_reply_with_a_quote_and_explanation_still_uses_model(tmp_path):
+    async with store_at(tmp_path) as store:
+        await ready(store, -100)
+        model = FakeModel(ModelResult(text="Объяснение."))
+        dialogue = DialogueEngine(store, model)
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(2, -100, "Точный текст."),
+                event(
+                    3,
+                    -100,
+                    "Заря, процитируй это сообщение дословно и объясни.",
+                    reply_to_message={"message_id": 2},
+                ),
+            ],
+        )
+        await drain(dialogue)
+        assert len(model.calls) == 1
+        assert "selected_material" in json.loads(model.calls[0]["input"])
 
 
 @pytest.mark.parametrize("keep_topic_marker", [True, False])
@@ -94,7 +325,7 @@ async def test_forum_topic_marker_does_not_replace_the_exact_reply(tmp_path, kee
         reply = event(
             7,
             -100,
-            "Заря, процитируй это сообщение дословно.",
+            "Заря, что было написано в исходном сообщении?",
             reply_to_message=embedded,
             **thread,
         )
