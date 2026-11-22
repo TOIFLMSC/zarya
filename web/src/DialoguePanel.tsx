@@ -397,6 +397,21 @@ export function DialoguePanel({
                           Диагностика персональных окон не сохранена.
                         </p>
                       )}
+                      {!!detail.snapshot.topic_context?.length && (
+                        <details>
+                          <summary>Хронология топика</summary>
+                          {detail.snapshot.topic_context.map((m) => (
+                            <div className="context-message" key={m.event_id}>
+                              <small>
+                                {m.name} · сообщение {m.message_id} ·{" "}
+                                {new Date(m.received_at * 1000).toLocaleString()}
+                                {m.forwarded ? " · пересылка" : ""}
+                              </small>
+                              <p className="dialogue-text">{m.text}</p>
+                            </div>
+                          ))}
+                        </details>
+                      )}
                       <details>
                         <summary>Показать использованные сообщения</summary>
                         {detail.snapshot.context.map((m, i) => (

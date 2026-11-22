@@ -307,7 +307,11 @@ class ConfigurationBridge:
                         value["memory_retrieval"] = "shadow"
                     if "participant_context_messages" in keys:
                         value.setdefault("participant_context_messages", 20)
-                    for key in ("participant_summaries_enabled", "participant_summary_prompt"):
+                    for key in (
+                        "participant_summaries_enabled",
+                        "participant_summary_prompt",
+                        "topic_context_chat_id",
+                    ):
                         if key in keys:
                             value.setdefault(key, getattr(Settings(), key))
                     if set(value) != set(keys):

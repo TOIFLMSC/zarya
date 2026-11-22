@@ -12,6 +12,7 @@ from zarya.avatar_logic import AVATAR_WAIT
 from zarya.avatar_logic import valid as avatar_valid
 from zarya.chat_style import chat_dashes
 from zarya.dialogue_logic import (
+    TOPIC_CONTEXT_POLICY,
     answer_mode,
     delivery_chunks,
     instructions,
@@ -328,7 +329,17 @@ class DialogueEngine:
                 if waiting:
                     return {"skip": True}
             from zarya.participant_context import select as select_participant
+            from zarya.participant_context import topic_history
 
+            pilot_thread = (
+                (thread_id or 0)
+                if should_answer
+                and trigger != "initiative"
+                and chat_id == settings.topic_context_chat_id
+                and message.get("chat", {}).get("is_forum")
+                and not payload.get("service_reply")
+                else None
+            )
             context, participant_coverage, context_refs = await select_participant(
                 conn,
                 bot_id,
@@ -340,6 +351,7 @@ class DialogueEngine:
                 and trigger != "initiative"
                 and not payload.get("service_reply")
                 and not (behavior_state and behavior_state.get("mode") == "shadow"),
+                thread=pilot_thread,
             )
             incoming = {
                 "message_id": payload["message_id"],
@@ -401,6 +413,32 @@ class DialogueEngine:
                     diagnostics=retrieval,
                 )
                 measured["context_ms"] = timings.elapsed(context_start)
+            topic_context: list[dict[str, Any]] = []
+            if pilot_thread is not None:
+                selected_by_id = {m["message_id"]: m for m in selected_material}
+                personal_context = []
+                for item in context:
+                    selected = selected_by_id.get(item["message_id"])
+                    if item["role"] == "user" and selected and selected["text"] == item["text"]:
+                        selected.update(
+                            name=item["name"],
+                            sender_id=item["sender_id"],
+                            received_at=item["received_at"],
+                        )
+                    else:
+                        personal_context.append(item)
+                context = personal_context
+                participant_coverage["characters"] = sum(len(m["text"]) for m in context)
+                topic_context, topic_refs = await topic_history(
+                    conn,
+                    bot_id,
+                    chat_id,
+                    access_version,
+                    pilot_thread,
+                    incoming["message_id"],
+                    {r["message_id"] for r in context_refs["humans"]} | selected_by_id.keys(),
+                )
+                context_refs["humans"].extend(topic_refs)
             request: dict[str, Any] = {
                 "model": settings.model,
                 "reasoning": {"effort": settings.reasoning},
@@ -416,8 +454,12 @@ class DialogueEngine:
                     sources_requested=show_sources,
                     prompts=prompts,
                 ),
-                "input": model_input(context, incoming, memory_context),
+                "input": model_input(
+                    context, incoming, memory_context, topic_context=topic_context
+                ),
             }
+            if topic_context:
+                request["instructions"] += TOPIC_CONTEXT_POLICY
             if selected_material or material["unavailable"]:
                 request["input"] = json.dumps(
                     {
@@ -459,6 +501,7 @@ class DialogueEngine:
                 "question_text": message_text(message),
                 "sources_requested": show_sources,
                 "context": context,
+                **({"topic_context": topic_context} if topic_context else {}),
                 "participant_context": participant_coverage,
                 "context_refs": context_refs,
                 "settings": settings.model_dump(),
@@ -630,9 +673,7 @@ class DialogueEngine:
                     None
                     if preflight_only
                     else int(work.get("timings", {}).get("model_ms", latency)),
-                    0
-                    if preflight_only
-                    else estimate_cost(result, work["request"]["model"]),
+                    0 if preflight_only else estimate_cost(result, work["request"]["model"]),
                     result.error,
                     stamp(),
                     pricing_profile(result.model or work["request"]["model"]),
@@ -1368,6 +1409,8 @@ class DialogueEngine:
         if mode == "paid" and saved.get("avatar_id"):
             saved["request"]["instructions"] += prompts.text("dialogue.avatar")
         if mode == "paid":
+            if saved.get("topic_context"):
+                saved["request"]["instructions"] += TOPIC_CONTEXT_POLICY
             saved["request"] = context_budget.pack(saved["request"])
             saved["context_budget"] = context_budget.inspect(saved["request"])
             saved["context_budget"]["stage"] = "assembled"

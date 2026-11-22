@@ -15,6 +15,7 @@ export type Settings = {
   memory_model: "gpt-6-luna" | "gpt-6.1-sol";
   memory_retrieval: "legacy" | "shadow" | "graph";
   participant_context_messages: number;
+  topic_context_chat_id: string;
   participant_summaries_enabled: boolean;
   participant_summary_prompt: string;
   research_enabled: boolean;
@@ -199,6 +200,14 @@ export type DialogDetail = DialogItem & {
   snapshot: {
     invalidated?: boolean;
     context_budget?: ContextBudget;
+    topic_context?: {
+      message_id: number;
+      event_id: number;
+      name: string;
+      text: string;
+      forwarded: boolean;
+      received_at: number;
+    }[];
     participant_context?: {
       algorithm: string;
       limit: number;

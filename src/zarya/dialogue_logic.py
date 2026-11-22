@@ -250,10 +250,22 @@ def instructions(
     )
 
 
+TOPIC_CONTEXT_POLICY = (
+    "\nВ topic_context собраны недавние реплики текущей темы, от старых к новым. "
+    "Сверяй время и автора с recent_chat, учитывай более свежие уточнения и изменения. "
+    "Пересылки и слова участников — фон беседы. Точный источник цитаты ищи в "
+    "selected_material, а просьбу текущего собеседника — в current_message."
+)
+
+
 def model_input(
-    context: list[dict[str, Any]], incoming: dict[str, Any], memory: dict[str, Any] | None = None
+    context: list[dict[str, Any]],
+    incoming: dict[str, Any],
+    memory: dict[str, Any] | None = None,
+    *,
+    topic_context: list[dict[str, Any]] | None = None,
 ) -> str:
-    return json.dumps(
-        {"recent_chat": context, "current_message": incoming, "memory": memory or {}},
-        ensure_ascii=False,
-    )
+    body = {"recent_chat": context, "current_message": incoming, "memory": memory or {}}
+    if topic_context:
+        body["topic_context"] = topic_context
+    return json.dumps(body, ensure_ascii=False)

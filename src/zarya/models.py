@@ -28,6 +28,7 @@ class Settings(StrictModel):
     memory_model: Literal["gpt-6-luna", "gpt-6.1-sol"] = "gpt-6-luna"
     memory_retrieval: Literal["legacy", "shadow", "graph"] = "shadow"
     participant_context_messages: int = Field(default=20, ge=1, le=100, strict=True)
+    topic_context_chat_id: str = Field(default="", pattern=r"^(|-[1-9][0-9]{0,15})$")
     participant_summaries_enabled: bool = True
     participant_summary_prompt: str = Field(
         default=(
