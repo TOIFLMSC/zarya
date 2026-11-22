@@ -539,11 +539,13 @@ class TelegramStore:
                             )
                     if not service_text:
                         from zarya.task_state import observe as observe_task
+                        from zarya.verbatim_quote import match as quote_request
 
-                        await observe_task(
-                            conn, bot_id, subject, access[1], event_id,
-                            message, settings, trigger, edited,
-                        )
+                        if not quote_request(message, settings.display_name, bot_id, username):
+                            await observe_task(
+                                conn, bot_id, subject, access[1], event_id,
+                                message, settings, trigger, edited,
+                            )
                     # Retire the old revision even when it never reached dialogue_runs.
                     if replacement:
                         await conn.execute(

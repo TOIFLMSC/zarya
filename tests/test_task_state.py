@@ -8,6 +8,7 @@ from test_telegram import event, store_at
 from zarya import task_state
 from zarya.dialogue import DialogueEngine
 from zarya.memory import MemoryEngine
+from zarya.memory_reset import scrub
 from zarya.openai_adapter import ModelResult
 from zarya.task_state import TaskStateEngine
 
@@ -242,6 +243,8 @@ async def test_invalid_source_erases_state_and_rejects_in_flight_extraction(tmp_
         assert await store.db.one(
             "SELECT state,request_json FROM model_calls WHERE id=?", (work["call"],)
         ) == ("cancelled", None)
+        if action == "revoke":
+            assert await store.db.all("SELECT event_id FROM task_members") == []
         if action == "edit":
             model.result = extraction(("goal", 2, GOAL), ("constraint", 3, "Документы уже нашли"))
             updated = await background(worker)
@@ -304,3 +307,89 @@ async def test_current_correction_keeps_the_goal_and_late_background_result_is_d
         await ingest(store, post(6, REPLY, sender=44))
         await drain(dialogue)
         assert "task_state" not in json.loads(model.calls[-1]["input"])
+
+
+async def test_budget_does_not_hide_a_contribution_or_truncate_a_long_correction(
+    tmp_path, monkeypatch
+):
+    async with store_at(tmp_path) as store:
+        await pilot(store)
+        await ingest(store, post(2, ANCHOR), post(3, QUESTION, reply=2))
+        model = FakeModel(extraction(("goal", 2, GOAL), ("question", 3, QUESTION)))
+        worker = TaskStateEngine(store, model)
+        await background(worker)
+        long_text = "Детали обсуждения " * 90 + LIMIT
+        await ingest(store, post(4, long_text, reply=2))
+        model.result = extraction(("goal", 2, GOAL), ("decision", 4, LIMIT))
+        work = await background(worker)
+        assert work["messages"] == [{"message_id": 4, "sender_id": "42", "text": long_text}]
+        assert await store.db.one("SELECT ready_revision=revision FROM task_states") == (1,)
+        monkeypatch.setattr(task_state, "MAX_RECENT", 2)
+        await ingest(
+            store,
+            post(5, "Четверг отменяется.", reply=2),
+            post(6, "Проверим варианты жилья.", reply=2),
+            post(7, "Отправлю расписание.", reply=2),
+            post(8, REPLY),
+        )
+        assert (await worker.claim(BOT)) == {"skip": True}
+        assert len(model.calls) == 2
+        async with store.db.transaction() as conn:
+            assert await task_state.context(conn, BOT, CHAT, 2, 8, [8]) is None
+
+
+async def test_reply_keeps_its_task_and_unrelated_dialogue_does_not_join(tmp_path):
+    async with store_at(tmp_path) as store:
+        await pilot(store)
+        await ingest(store, post(2, ANCHOR))
+        worker = TaskStateEngine(store, FakeModel(extraction(("goal", 2, GOAL))))
+        await background(worker)
+        await ingest(store, post(3, "Заря, помоги подобрать жильё.", reply=2))
+        async with store.db.transaction() as conn:
+            associated = await task_state.context(conn, BOT, CHAT, 2, 8, [3])
+            assert associated["fields"][0]["quote"] == GOAL
+        assert await store.db.one("SELECT COUNT(*) FROM task_states") == (1,)
+
+        model = FakeModel(ModelResult(text="Попробуй простой рецепт."))
+        dialogue = DialogueEngine(store, model)
+        await ingest(store, post(4, "Заря, как испечь хлеб?"))
+        await drain(dialogue)
+        (outbox_id,) = await store.db.one(
+            "SELECT o.id FROM outbox o JOIN dialogue_runs d ON o.job_id=d.job_id "
+            "WHERE d.message_id=4"
+        )
+        async with store.db.transaction() as conn:
+            await conn.execute("UPDATE outbox SET next_attempt=0 WHERE id=?", (outbox_id,))
+        outgoing = await store.claim_delivery(BOT)
+        assert outgoing["id"] == outbox_id
+        await store.delivery_result(outbox_id, "sent", message_id=90)
+        await ingest(store, post(5, "Мука уже есть."))
+        assert await store.db.one(
+            "SELECT json_extract(payload,'$.trigger') FROM jobs "
+            "WHERE json_extract(payload,'$.message_id')=5"
+        ) == ("continuation",)
+        assert await store.db.all("SELECT message_id FROM task_members ORDER BY message_id") == [
+            (2,),
+            (3,),
+        ]
+        await scrub(store.db)
+        assert await store.db.all("SELECT event_id FROM task_members") == []
+
+
+async def test_task_reply_verbatim_quote_does_not_queue_a_model_call(tmp_path):
+    async with store_at(tmp_path) as store:
+        await pilot(store)
+        await ingest(store, post(2, ANCHOR))
+        worker = TaskStateEngine(store, FakeModel(extraction(("goal", 2, GOAL))))
+        await background(worker)
+        model = FakeModel()
+        dialogue = DialogueEngine(store, model)
+        await drain(dialogue)
+        initial = len(model.calls)
+        await ingest(store, post(3, "Заря, процитируй это сообщение дословно.", reply=2))
+        await drain(dialogue)
+        assert len(model.calls) == initial
+        assert await worker.claim(BOT) is None
+        assert await store.db.one(
+            "SELECT response FROM dialogue_runs WHERE message_id=3"
+        ) == (ANCHOR,)

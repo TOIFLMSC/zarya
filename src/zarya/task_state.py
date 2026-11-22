@@ -17,9 +17,9 @@ from zarya.source_material import one
 from zarya.source_material import purge as purge_dialogues
 from zarya.telegram_store import stamp
 
+NEW_TASK = re.compile(r"^(?:новая задача\b|задача[:—]|начн[её]м новую задачу\b)", re.IGNORECASE)
 START = re.compile(
-    r"\b(?:новая задача|задача[:—]|начн[её]м (?:новую )?задачу|"
-    r"давай(?:те)? (?:составим|спланируем|разбер[её]мся|решим|подготовим|"
+    r"\b(?:давай(?:те)? (?:составим|спланируем|разбер[её]мся|решим|подготовим|"
     r"настроим|сделаем|начн[её]м|запланируем)|помоги(?:те)?\s+\S)",
     re.IGNORECASE,
 )
@@ -29,10 +29,11 @@ RESUME = re.compile(
     re.IGNORECASE,
 )
 UPDATE = re.compile(
-    r"^(?:уточнен|поправк|теперь |обновлен|(?:ну )?вот |нет[, ]|ограничение)",
+    r"^(?:уточнение\b|поправка\b|обновление\b|ограничение\b|по (?:этой )?задаче\b)",
     re.IGNORECASE,
 )
 MAX_RECENT = 18
+MAX_INPUT_CHARS = 32_000
 DEBOUNCE = 4
 CURRENT_MEMBERS = """
  FROM task_members t
@@ -52,8 +53,9 @@ CURRENT_MEMBERS = """
  AND p.received_at>? AND CAST(strftime('%s',e.received_at) AS REAL)>?
 """
 EXTRACT = (
-    "Обнови состояние одной задачи из принятых реплик участников. Первая реплика задаёт задачу. "
-    "Фрагменты, помеченные previous, были полями предыдущей сводки. Учитывай хронологию: "
+    "Обнови состояние одной задачи. В previous даны действующие поля предыдущей сводки. "
+    "В messages даны новые реплики в порядке поступления. При первом обновлении "
+    "первая реплика задаёт задачу. Учитывай хронологию: "
     "поздняя поправка заменяет старое условие, закрытый вопрос исчезает, отменённое обещание "
     "не действует. Параллельные разговоры и вопросы без ответа не являются решениями. "
     "Для каждого поля укажи message_id и дословный непрерывный фрагмент этой реплики. "
@@ -175,7 +177,7 @@ async def observe(
     if task is None:
         reply = explicit_reply(message)
         addressed = trigger in {"private", "name", "mention", "reply", "continuation"}
-        if addressed and START.search(spoken):
+        if addressed and (NEW_TASK.match(spoken) or (not reply and START.search(spoken))):
             inserted = await conn.execute(
                 "INSERT OR IGNORE INTO task_states(bot_id,chat_id,access_version,thread_id,"
                 "anchor_id) VALUES (?,?,?,?,?) RETURNING id",
@@ -189,7 +191,7 @@ async def observe(
             task = await reply_task(conn, scope, reply)
         elif addressed and resume:
             task = await unique_open(conn, scope, None)
-        elif addressed and (trigger == "continuation" or UPDATE.match(spoken)):
+        elif addressed and UPDATE.match(spoken):
             task = await unique_open(conn, scope, str(message["from"]["id"]))
     if task is None:
         return
@@ -252,8 +254,11 @@ async def context(
         matched = [r[0] for r in await cursor.fetchall()]
     if revision != ready_revision and await one(
         conn,
-        "SELECT 1 FROM task_members WHERE task_id=? AND contributes=1 AND event_id>? "
-        "AND message_id NOT IN (SELECT value FROM json_each(?)) LIMIT 1",
+        "SELECT 1 FROM task_members t JOIN events e ON e.id=t.event_id "
+        "WHERE t.task_id=? AND t.contributes=1 AND t.event_id>? "
+        "AND (t.message_id NOT IN (SELECT value FROM json_each(?)) OR "
+        "LENGTH(COALESCE(json_extract(e.payload,'$.edited_message.text'),"
+        "json_extract(e.payload,'$.message.text')))>4000) LIMIT 1",
         (task, max(r["event_id"] for r in proof), json.dumps(matched)),
     ):
         # The reply may use the previous state when it sees every new contribution itself.
@@ -290,17 +295,20 @@ async def validate_snapshot(conn: aiosqlite.Connection, bot: str, snapshot: dict
 async def scrub(
     conn: aiosqlite.Connection, where: str, args: tuple[Any, ...], *, retire: bool = False
 ) -> None:
-    ids = "SELECT id FROM task_states WHERE " + where
-    if not await one(conn, ids + " LIMIT 1", args):
+    async with conn.execute("SELECT id FROM task_states WHERE " + where, args) as cursor:
+        affected = [row[0] for row in await cursor.fetchall()]
+    if not affected:
         return
-    await purge_dialogues(conn, "json_extract(snapshot,'$.task_state.id') IN (" + ids + ")", args)
+    ids = (json.dumps(affected),)
+    match = " IN (SELECT value FROM json_each(?))"
+    await purge_dialogues(conn, "json_extract(snapshot,'$.task_state.id')" + match, ids)
     await conn.execute(
         "UPDATE task_states SET result=NULL,proof=NULL,ready_revision=NULL,"
-        "revision=revision+1,ready_at=?,retired=? WHERE " + where,
-        (time.time() + DEBOUNCE, int(retire), *args),
+        "revision=revision+1,ready_at=?,retired=? WHERE id" + match,
+        (time.time() + DEBOUNCE, int(retire), *ids),
     )
     if retire:
-        await conn.execute("DELETE FROM task_members WHERE task_id IN (" + ids + ")", args)
+        await conn.execute("DELETE FROM task_members WHERE task_id" + match, ids)
 
 
 async def invalidate_source(conn: aiosqlite.Connection, event: int) -> None:
@@ -355,36 +363,51 @@ class TaskStateEngine:
                 return None
             state = await one(
                 conn,
-                "SELECT id,chat_id,access_version,anchor_id,revision,result FROM task_states "
+                "SELECT id,chat_id,access_version,anchor_id,revision,result,proof FROM task_states "
                 "WHERE bot_id=? AND retired=0 AND attempted<revision AND ready_at<=? "
                 "ORDER BY ready_at,id LIMIT 1",
                 (bot, time.time()),
             )
             if not state:
                 return None
-            task, chat, grant, anchor, revision, stored = state
+            task, chat, grant, anchor, revision, stored, stored_proof = state
             await conn.execute("UPDATE task_states SET attempted=? WHERE id=?", (revision, task))
             previous = json.loads(stored)["fields"] if stored else []
             keep = [anchor, *(field["message_id"] for field in previous)]
+            checkpoint = json.loads(stored_proof) if stored_proof else []
+            after = max((ref["event_id"] for ref in checkpoint), default=0)
             cutoff = time.time() - RETENTION
             async with conn.execute(
-                "SELECT t.message_id,t.event_id,p.received_at,m.sender_id,m.text "
+                "SELECT t.message_id,t.event_id,p.received_at,m.sender_id,"
+                "COALESCE(json_extract(e.payload,'$.edited_message.text'),"
+                "json_extract(e.payload,'$.message.text')) "
                 + CURRENT_MEMBERS
-                + " AND t.contributes=1 ORDER BY "
-                "(t.message_id IN (SELECT value FROM json_each(?))) DESC,t.event_id DESC LIMIT ?",
-                (task, cutoff, cutoff, json.dumps(keep), MAX_RECENT + len(set(keep))),
+                + " AND t.contributes=1 AND (t.event_id>? "
+                "OR t.message_id IN (SELECT value FROM json_each(?))) "
+                "ORDER BY t.event_id LIMIT ?",
+                (task, cutoff, cutoff, after, json.dumps(keep), MAX_RECENT + len(set(keep)) + 1),
             ) as cursor:
-                rows = await cursor.fetchall()
+                rows = list(await cursor.fetchall())
             if not any(r[0] == anchor for r in rows):
                 await scrub(conn, "id=?", (task,), retire=True)
                 return {"skip": True}
-            # The intent is first even if the original message was edited. Remaining texts
-            # are presented in revision order so corrections can supersede earlier details.
+            if checkpoint and not await valid_sources(conn, bot, chat, grant, task, checkpoint):
+                await scrub(conn, "id=?", (task,))
+                return {"skip": True}
+            # Initial input starts with the anchor, even if its most recent revision
+            # arrived after other linked messages.
             rows.sort(key=lambda r: (r[0] != anchor, r[1]))
             messages = [
-                {"message_id": mid, "sender_id": sender, "text": text[:1200]}
-                for mid, _, _, sender, text in rows
+                {"message_id": mid, "sender_id": sender, "text": text}
+                for mid, event, _, sender, text in rows
+                if event > after and text
             ]
+            if (
+                not messages
+                or len(messages) > MAX_RECENT
+                or (sum(len(m["text"]) for m in messages) > MAX_INPUT_CHARS)
+            ):
+                return {"skip": True}
             proof = [
                 {"message_id": mid, "event_id": event, "received_at": at}
                 for mid, event, at, _, _ in rows
@@ -428,6 +451,7 @@ class TaskStateEngine:
                 "revision": revision,
                 "request": request,
                 "messages": messages,
+                "previous": previous,
                 "proof": proof,
                 "call": cursor.lastrowid,
             }
@@ -473,7 +497,7 @@ class TaskStateEngine:
         extracted = None
         if result.state == "completed":
             try:
-                extracted = checked_extraction(result.text, work["messages"])
+                extracted = checked_extraction(result.text, work["messages"], work["previous"])
             except (ValidationError, ValueError):
                 result.state, result.error = "error", "invalid_task_state"
         async with self.store.gate, self.db.transaction() as conn:
@@ -502,16 +526,25 @@ class TaskStateEngine:
                 )
 
 
-def checked_extraction(raw: str, messages: list[dict[str, Any]]) -> str:
+def checked_extraction(
+    raw: str, messages: list[dict[str, Any]], previous: list[dict[str, Any]]
+) -> str:
     parsed = Extraction.model_validate_json(raw)
-    by_id = {m["message_id"]: m for m in messages}
+    by_id: dict[int, list[tuple[str, str]]] = {}
+    for message in messages:
+        by_id[message["message_id"]] = [(message["text"], message["sender_id"])]
+    for saved in previous:
+        by_id.setdefault(saved["message_id"], []).append((saved["quote"], saved["sender_id"]))
     fields = []
     seen: set[tuple[str, int, str]] = set()
     for field in parsed.fields:
         quote = field.quote.strip()
-        message = by_id.get(field.message_id)
         key = (field.kind, field.message_id, quote)
-        if not message or not quote or quote not in message["text"] or key in seen:
+        author = next(
+            (sender for fragment, sender in by_id.get(field.message_id, []) if quote in fragment),
+            None,
+        )
+        if author is None or not quote or key in seen:
             raise ValueError("task field is not a unique source fragment")
         seen.add(key)
         fields.append(
@@ -519,7 +552,7 @@ def checked_extraction(raw: str, messages: list[dict[str, Any]]) -> str:
                 "kind": field.kind,
                 "message_id": field.message_id,
                 "quote": quote,
-                "sender_id": message["sender_id"],
+                "sender_id": author,
             }
         )
     kinds = {f["kind"] for f in fields}
