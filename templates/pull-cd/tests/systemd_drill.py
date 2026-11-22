@@ -45,12 +45,16 @@ def release(fixtures, sha, version, marker=None):
         payload = Path(scratch)
         shutil.copyfile(KIT / "demo/app.py", payload / "app.py")
         (payload / "VERSION").write_text(str(version))
+        inputs = payload / "install-inputs"
+        inputs.mkdir()
+        (inputs / "package.whl").write_bytes(b"installation-only test fixture")
         if marker:
             (payload / marker).touch()
         bundle(payload, sha)
         with zipfile.ZipFile(fixtures / f"{sha}.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-            for path in payload.iterdir():
-                archive.write(path, path.name)
+            for path in payload.rglob("*"):
+                if path.is_file():
+                    archive.write(path, path.relative_to(payload).as_posix())
 
 
 def replace(path, text):
@@ -117,7 +121,13 @@ def main():
             port.bind(("127.0.0.1", 0))
             url = f"http://127.0.0.1:{port.getsockname()[1]}/healthz"
         profile = json.loads((KIT / "project.example.json").read_text())
-        profile.update(name=name, health_url=url, health_timeout_seconds=4, poll_seconds=2)
+        profile.update(
+            name=name,
+            health_url=url,
+            health_timeout_seconds=4,
+            poll_seconds=2,
+            prune_install_inputs=True,
+        )
         profile["backup"]["remote"] = "drill:backups/v1"
         (work / "project.json").write_text(json.dumps(profile))
 
@@ -136,7 +146,27 @@ def main():
             doc = journal()
             return doc["phase"] == "idle" and doc["live"] == sha and health()["revision"] == sha
 
-        a, b, c, d, e = [character * 40 for character in "abcde"]
+        def retained(sha, previous=None):
+            if not landed(sha):
+                return None
+            doc = journal()
+            snapshot = state / "predeploy" / doc["last_predeploy"]
+            releases = {path.name for path in (state / "releases").iterdir()}
+            expected = {sha, previous} if previous else {sha}
+            if (
+                releases == expected
+                and all(
+                    (state / "releases" / revision / "app.py").is_file()
+                    and not (state / "releases" / revision / "install-inputs").exists()
+                    for revision in expected
+                )
+                and list(snapshot.parent.iterdir()) == [snapshot]
+                and (snapshot / "app.sqlite3").is_file()
+            ):
+                return snapshot
+            return None
+
+        a, b, c, d, e, f = [character * 40 for character in "abcdef"]
         database = state / "data/app.sqlite3"
         record = "preserve me " + "x" * 5000
         try:
@@ -152,6 +182,7 @@ def main():
                 KIT / "demo/adapter.py",
                 work / "rclone.conf",
             )
+            run("install", "-d", "-m", "0750", "-o", user, "-g", user, state / "predeploy")
             contents = work / "checksum-input"
             contents.mkdir()
             (contents / "empty").mkdir()
@@ -170,6 +201,7 @@ def main():
                 (c, 3, "FAIL_APPLY"),
                 (d, 4, "FAIL_HEALTH"),
                 (e, 3, "INTERRUPT_APPLY"),
+                (f, 3, None),
             ):
                 release(fixtures, sha, version, marker)
             (work / "feed.py").write_bytes((KIT / "tests/feed.py").read_bytes())
@@ -197,6 +229,7 @@ def main():
             assert not (state / "state.json").exists(), "red CI was deployed"
             promote(a)
             wait_for(lambda: landed(a), "timer applying release A")
+            wait_for(lambda: retained(a), "cleanup after A")
             run("runuser", "-u", app, "--", "test", "!", "-w", state / "state.json")
             run("runuser", "-u", app, "--", "test", "!", "-r", state / "storage/rclone.conf")
             assert (
@@ -219,13 +252,18 @@ def main():
             with closing(sqlite3.connect(database)) as db, db:
                 db.execute("INSERT INTO records VALUES (?)", (record,))
             promote(b)
-            wait_for(lambda: landed(b), "timer applying release B")
+            snapshot_b = wait_for(lambda: retained(b, a), "promotion and cleanup after B")
+            assert data_status(snapshot_b / "app.sqlite3") == (1, [record])
+            assert snapshot_b.parent.stat().st_mode & 0o777 == 0o700
+            run("runuser", "-u", app, "--", "test", "!", "-r", snapshot_b / "app.sqlite3")
             assert data_status(database) == (2, [record])
+            assert (snapshot_b / "app.sqlite3").is_file()
             print("PASS: timer promoted a green artifact and preserved existing data", flush=True)
 
             promote(c)
             wait_for(lambda: journal().get("rejected") == c and landed(b), "pre-admission rollback")
             assert data_status(database) == (2, [record])
+            assert (snapshot_b / "app.sqlite3").is_file()
             print(
                 "PASS: failure after writing candidate restored original database and B", flush=True
             )
@@ -276,6 +314,13 @@ def main():
                 flush=True,
             )
 
+            promote(f)
+            snapshot_f = wait_for(lambda: retained(f, b), "rotation after third healthy release")
+            assert data_status(snapshot_f / "app.sqlite3") == (2, [record])
+            assert not snapshot_b.exists()
+            print(
+                "PASS: kept two releases and one snapshot, removed installation inputs", flush=True
+            )
             promote(d)
             wait_for(lambda: journal()["phase"] == "blocked", "failed health after admission")
             wait_for(
@@ -288,6 +333,9 @@ def main():
                 "stopped unhealthy release",
             )
             assert data_status(database) == (4, [record, "write after admission"])
+            assert (snapshot_f / "app.sqlite3").is_file()
+            assert (state / "attempt/snapshot/app.sqlite3").is_file()
+            assert (state / "releases" / d / "install-inputs/package.whl").is_file()
             print(
                 "PASS: after admission controller preserved new data and blocked bad release",
                 flush=True,

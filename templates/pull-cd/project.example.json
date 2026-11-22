@@ -10,6 +10,7 @@
   "health_timeout_seconds": 45,
   "poll_seconds": 120,
   "backup_retry_seconds": 600,
+  "prune_install_inputs": false,
   "backup": {
     "remote": "vault:pull-cd/v1",
     "keep_nightly": 30,

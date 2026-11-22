@@ -27,6 +27,7 @@ class Controller:
         self.releases = self.root / "releases"
         self.run = self.root / "attempt"
         self.pending = self.root / "pending"
+        self.predeploy = self.root / "predeploy"
         self.adapter = Path(f"/etc/pull-cd/{self.name}/adapter.py")
         self.state_file = self.root / "state.json"
 
@@ -152,12 +153,42 @@ class Controller:
             self.service("start")
         if not self.healthy(state["live"]):
             raise RuntimeError("previous release requires attention")
-        self.save(state, "idle")
+        self.save(state, "idle", attempt_id=None)
         self.clean_attempt()
 
     def finish(self, state):
         if self.healthy(state["live"]):
-            self.save(state, "idle", rejected=None, retry_after=0)
+            stamp = state.get("attempt_id")
+            if stamp is not None:
+                if not re.fullmatch(backup.ID, stamp):
+                    raise ValueError("invalid predeploy snapshot ID")
+                self.predeploy.mkdir(mode=0o700, exist_ok=True)
+                if (
+                    self.predeploy.resolve() != self.predeploy
+                    or self.predeploy.stat().st_uid != os.geteuid()
+                ):
+                    raise ValueError("invalid predeploy snapshot directory")
+                self.predeploy.chmod(0o700)
+                source = self.run / "snapshot"
+                retained = self.predeploy / stamp
+                if source.exists() or source.is_symlink():
+                    if not source.is_dir() or source.resolve() != source:
+                        raise ValueError("invalid attempt snapshot")
+                    if retained.exists() or retained.is_symlink():
+                        raise ValueError("predeploy snapshot already exists")
+                    source.rename(retained)
+                # An interrupted finish can find the snapshot already moved.
+                if not retained.is_dir() or retained.resolve() != retained:
+                    raise ValueError("missing predeploy snapshot")
+                subprocess.run(["sync", "-f", self.root], check=True)
+            self.save(
+                state,
+                "idle",
+                rejected=None,
+                retry_after=0,
+                attempt_id=None,
+                last_predeploy=stamp or state.get("last_predeploy"),
+            )
             self.clean_attempt()
             return
         self.save(state, "blocked")
@@ -171,13 +202,14 @@ class Controller:
     def deploy(self, state, sha):
         self.clean_attempt()
         self.run.mkdir(mode=0o700)
-        self.save(state, "stopping", target=sha)
+        stamp = backup.new_id()
+        self.save(state, "stopping", target=sha, attempt_id=stamp)
         try:
             self.service("stop")
             original = self.run / "snapshot"
             self.snapshot(original)
             self.save(state, "offsite")
-            self.publish(original, self.run, "predeploy", backup.new_id())
+            self.publish(original, self.run, "predeploy", stamp)
             self.save(state, "preparing")
             candidate = self.run / "candidate"
             shutil.copytree(original, candidate)
@@ -212,6 +244,37 @@ class Controller:
             release.rename(target)
             subprocess.run(["sync", "-f", self.releases], check=True)
 
+    def prune_local(self, state):
+        self.clean_attempt()
+        keep = {state["live"], state.get("previous")}
+        for path in self.releases.iterdir():
+            if not re.fullmatch(r"[0-9a-f]{40}", path.name) or path.resolve() != path:
+                continue
+            if not path.is_dir():
+                continue
+            if path.name not in keep:
+                shutil.rmtree(path)
+            elif self.config.get("prune_install_inputs") is True:
+                inputs = path / "install-inputs"
+                if inputs.is_dir() and inputs.resolve() == inputs:
+                    shutil.rmtree(inputs)
+        last = state.get("last_predeploy")
+        if last is None:
+            return
+        if not re.fullmatch(backup.ID, last):
+            raise ValueError("invalid retained predeploy snapshot ID")
+        retained = self.predeploy / last
+        if not retained.is_dir() or retained.resolve() != retained:
+            raise ValueError("invalid retained predeploy snapshot")
+        for path in self.predeploy.iterdir():
+            if (
+                path.name != last
+                and re.fullmatch(backup.ID, path.name)
+                and path.is_dir()
+                and path.resolve() == path
+            ):
+                shutil.rmtree(path)
+
     def poll(self, feed=None):
         state = self.state()
         phase = state["phase"]
@@ -233,16 +296,9 @@ class Controller:
             raise RuntimeError("unknown journal phase")
         if (self.data / ".restore-quarantine").exists():
             raise RuntimeError("quarantined data")
-        for path in self.releases.iterdir():
-            if (
-                path.name not in {state["live"], state.get("previous")}
-                and re.fullmatch(r"[0-9a-f]{40}", path.name)
-                and path.is_dir()
-                and not path.is_symlink()
-            ):
-                shutil.rmtree(path)
         if state["live"] and not self.service("is-active", check=False):
             return
+        self.prune_local(state)
         if time.time() < state.get("retry_after", 0):
             return
         if feed is None:
