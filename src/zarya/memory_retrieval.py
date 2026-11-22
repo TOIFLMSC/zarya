@@ -16,6 +16,7 @@ from zarya.memory_context import (
     select_episodes,
     valid_dependencies,
 )
+from zarya.memory_e5 import Ranking, text_hash
 from zarya.memory_observations import strength
 from zarya.memory_read import MemoryRead
 from zarya.source_material import accepted
@@ -183,14 +184,42 @@ async def candidates(
     now: float,
     *,
     read: MemoryRead | None = None,
+    semantic: Ranking | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if read is None:
         with MemoryRead(conn) as read:
-            return await candidates(conn, bot, chat, grant, participants, now, read=read)
+            return await candidates(
+                conn, bot, chat, grant, participants, now, read=read, semantic=semantic
+            )
+    fact_source, episode_source = "memory_facts f", "memory_batches"
+    fact_filter = episode_filter = ""
+    fact_order, episode_order = "(f.chat_id=?) DESC,f.id DESC", "id DESC"
+    episode_id = "id"
+    fact_args: tuple[object, ...] = (bot, json.dumps(participants), chat, chat, chat, chat)
+    cutoff = datetime.fromtimestamp(now - RETENTION, UTC).isoformat()
+    episode_args: tuple[object, ...] = (bot, chat, grant, cutoff)
+    hashes: dict[tuple[str, int, int], str] = {}
+    if semantic is not None:
+        for kind, ident, version, checksum in semantic:
+            hashes[kind, ident, version] = checksum
+        fact_refs = json.dumps([(i, v) for k, i, v, _ in semantic if k == "f"])
+        episode_refs = json.dumps([i for k, i, _, _ in semantic if k == "e"])
+        # Scan each ranked ID once and look up the live row by primary key.
+        fact_source = "json_each(?) AS ranked CROSS JOIN memory_facts f"
+        episode_source = "json_each(?) AS ranked CROSS JOIN memory_batches"
+        fact_filter = (
+            "AND f.id=json_extract(ranked.value,'$[0]') "
+            "AND f.version=json_extract(ranked.value,'$[1]') AND f.updated_at>? "
+        )
+        episode_filter = "AND memory_batches.id=ranked.value "
+        fact_order = episode_order = "ranked.key"
+        episode_id = "memory_batches.id"
+        fact_args = (fact_refs, *fact_args[:-1], cutoff)
+        episode_args = (episode_refs, *episode_args)
     async with conn.execute(
         "SELECT f.id,f.version,f.sender_id,f.category,f.text,f.provenance,f.chat_id,"
         "f.access_version,f.context_dependencies,f.state,f.observation_kind "
-        "FROM memory_facts f JOIN telegram_access a ON a.bot_id=f.bot_id AND "
+        f"FROM {fact_source} JOIN telegram_access a ON a.bot_id=f.bot_id AND "
         "a.subject_id=f.chat_id AND a.scope=f.scope AND a.version=f.access_version "
         "WHERE f.bot_id=? AND f.sender_id IN (SELECT value FROM json_each(?)) "
         "AND (f.state='active' OR (f.state='proposed' AND f.chat_id=? "
@@ -198,12 +227,15 @@ async def candidates(
         "AND a.member_state NOT IN ('left','kicked','migrated') AND (f.chat_id=? OR "
         "(? LIKE '-%' AND EXISTS (SELECT 1 FROM memory_shares s WHERE s.fact_id=f.id "
         "AND s.fact_version=f.version AND s.state='active'))) "
-        "ORDER BY (f.chat_id=?) DESC,f.id DESC LIMIT 150",
-        (bot, json.dumps(participants), chat, chat, chat, chat),
+        + fact_filter
+        + f"ORDER BY {fact_order} LIMIT 150",
+        fact_args,
     ) as cur:
         rows = list(await cur.fetchall())
     facts = []
     for f in rows:
+        if semantic is not None and hashes.get(("f", f[0], f[1])) != text_hash(f[4]):
+            continue
         if f[8] is not None and not await valid_dependencies(
             conn, bot, f[6], f[7], f[8], depth=1, read=read
         ):
@@ -228,14 +260,17 @@ async def candidates(
             }
         )
     async with conn.execute(
-        "SELECT id,summary,dependencies FROM memory_batches WHERE bot_id=? AND chat_id=? "
+        f"SELECT {episode_id},summary,dependencies FROM {episode_source} "
+        "WHERE bot_id=? AND chat_id=? "
         "AND access_version=? AND state='completed' AND summary IS NOT NULL "
-        "AND created_at>? ORDER BY id DESC LIMIT 200",
-        (bot, chat, grant, datetime.fromtimestamp(now - RETENTION, UTC).isoformat()),
+        "AND created_at>? " + episode_filter + f"ORDER BY {episode_order} LIMIT 200",
+        episode_args,
     ) as cur:
         rows = list(await cur.fetchall())
     episodes = []
     for r in rows:
+        if semantic is not None and hashes.get(("e", r[0], 1)) != text_hash(r[1]):
+            continue
         if r[2] is None or await valid_dependencies(
             conn, bot, chat, grant, r[2], depth=1, read=read
         ):
@@ -442,6 +477,7 @@ async def select_context(
     speaker: str,
     thread: int | None,
     read: MemoryRead | None = None,
+    semantic: Ranking | None = None,
 ) -> dict[str, Any]:
     if read is None:
         with MemoryRead(conn) as read:
@@ -461,6 +497,7 @@ async def select_context(
                 speaker=speaker,
                 thread=thread,
                 read=read,
+                semantic=semantic,
             )
     now = time.time()
     started = time.perf_counter()
@@ -539,6 +576,43 @@ async def select_context(
             graph = baseline
             diag["fallback"] = "graph_unavailable" if not diag["capped"] else "edge_budget"
         diag["graph_ms"] = round((time.perf_counter() - selected) * 1000, 2)
+    result = graph if mode in {"graph", "e5"} else baseline
+    if mode == "e5":
+        if semantic is None:
+            diag["fallback"] = "e5_unavailable"
+        else:
+            try:
+                semantic_start = time.perf_counter()
+                ranked_facts, ranked_episodes = await candidates(
+                    conn, bot, chat, grant, participants, now, read=read, semantic=semantic
+                )
+                fact_ids = {f["id"] for f in ranked_facts}
+                episode_ids = {e["id"] for e in ranked_episodes[:3]}
+                conflict_chars = sum(
+                    len(s["text"])
+                    for pair in graph.get("conflicts", [])
+                    for s in pair["statements"]
+                )
+                chosen_facts = take_facts(
+                    ranked_facts + [f for f in facts if f["id"] not in fact_ids],
+                    5000 - conflict_chars,
+                )
+                episode_pool = (
+                    ranked_episodes[:3] + [e for e in episodes if e["id"] not in episode_ids][:2]
+                )
+                chosen_episodes = []
+                budget = 5000
+                for episode in episode_pool:
+                    if len(episode["text"]) <= budget:
+                        chosen_episodes.append(episode)
+                        budget -= len(episode["text"])
+                result = {**graph, "facts": chosen_facts, "summaries": chosen_episodes}
+                reasons = {f"f:{i}": ["semantic"] for i in fact_ids}
+                reasons.update({f"e:{i}": ["semantic"] for i in episode_ids})
+                diag["semantic"] = describe_selection(result, reasons)
+                diag["semantic_ms"] = round((time.perf_counter() - semantic_start) * 1000, 2)
+            except Exception:
+                diag["fallback"] = "e5_unavailable"
     if diagnostics is not None:
         diagnostics.update(diag)
-    return graph if mode == "graph" else baseline
+    return result

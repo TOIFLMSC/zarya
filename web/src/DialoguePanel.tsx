@@ -33,6 +33,7 @@ const states: Record<string, string> = {
   expired: "Истёк срок",
 };
 const retrievalReasons: Record<string, string> = {
+  semantic: "Смысловая близость",
   query_match: "совпадение с темой",
   accepted_reply: "связь с проверенным реплаем",
   same_topic: "тот же топик",
@@ -448,18 +449,25 @@ export function DialoguePanel({
                               ? "графовый"
                               : detail.snapshot.retrieval.mode === "shadow"
                                 ? "теневое сравнение"
-                                : "прежний"}
+                                : detail.snapshot.retrieval.mode === "e5"
+                                  ? "семантический (E5)"
+                                  : "прежний"}
                           </summary>
                           <p className="muted">
                             {detail.snapshot.retrieval.mode === "shadow"
                               ? "Ответ использует прежний подбор. Графовый рассчитан для сравнения, без второго запроса к модели."
                               : detail.snapshot.retrieval.mode === "graph"
                                 ? "В ответ передан графовый подбор; при ошибке используется прежний."
-                                : "В ответ передан прежний подбор."}
+                                : detail.snapshot.retrieval.mode === "e5"
+                                  ? "E5 ищет по смыслу, а доступ проверяется по базе Зари."
+                                  : "В ответ передан прежний подбор."}
                           </p>
                           <p>
-                            Проверенные кандидаты:{" "}
-                            {detail.snapshot.retrieval.candidates.facts} фактов,{" "}
+                            {detail.snapshot.retrieval.mode === "e5"
+                              ? "Кандидаты для графа"
+                              : "Проверенные кандидаты"}
+                            : {detail.snapshot.retrieval.candidates.facts}{" "}
+                            фактов,{" "}
                             {detail.snapshot.retrieval.candidates.episodes}{" "}
                             эпизодов. Загрузка:{" "}
                             {detail.snapshot.retrieval.load_ms} мс.
@@ -474,6 +482,11 @@ export function DialoguePanel({
                               "Графовый",
                               detail.snapshot.retrieval.graph,
                               detail.snapshot.retrieval.graph_ms,
+                            ],
+                            [
+                              "Семантический (E5)",
+                              detail.snapshot.retrieval.semantic,
+                              detail.snapshot.retrieval.semantic_ms,
                             ],
                           ].map(([label, raw, latency]) => {
                             const selection = raw as
@@ -492,6 +505,8 @@ export function DialoguePanel({
                                     {selection.conflicts.length} · реплаев:{" "}
                                     {selection.reply_messages.length} ·{" "}
                                     {selection.chars} символов ·{" "}
+                                    {label === "Семантический (E5)" &&
+                                      "сборка контекста "}
                                     {latency as number} мс
                                   </p>
                                   <p className="muted">

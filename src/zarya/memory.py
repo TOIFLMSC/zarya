@@ -10,6 +10,7 @@ from typing import Any, Literal
 import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from zarya import message_batches
 from zarya.database import ConflictError
 from zarya.memory_context import (
     dependencies,
@@ -18,6 +19,7 @@ from zarya.memory_context import (
     valid_dependencies,
     valid_snapshot,
 )
+from zarya.memory_e5 import LocalIndex, Ranking, query_identity
 from zarya.memory_logic import (
     RETENTION,
     SHAREABLE,
@@ -70,6 +72,7 @@ class MemoryEngine:
         self.store, self.db, self.adapter, self.data_dir = store, store.db, adapter, data_dir
         self.summaries = SummaryEngine(store, adapter)
         self.last_cleanup = 0.0
+        self.semantic_index = LocalIndex(self.db)
 
     async def recover(self, bot: str) -> None:
         await self.summaries.recover(bot)
@@ -583,6 +586,39 @@ class MemoryEngine:
                 ),
             )
 
+    async def prepare_search(self, bot: str, pending_sql: str) -> tuple[Any, Ranking | None]:
+        snapshot = await self.db.settings()
+        settings = snapshot.settings
+        if (
+            not settings.dialogue_enabled
+            or not settings.memory_enabled
+            or settings.memory_retrieval != "e5"
+        ):
+            self.semantic_index.deactivate()
+            return None, None
+        self.semantic_index.schedule(bot)
+        job = await self.db.one(pending_sql, (bot, time.time()))
+        if job is None:
+            return None, None
+        job_id, payload_json, grant, update_json, *_ = job
+        payload = json.loads(payload_json)
+        access = await self.db.one(
+            "SELECT 1 FROM telegram_access WHERE bot_id=? AND scope=? AND subject_id=? "
+            "AND version=? AND state='approved' "
+            "AND member_state NOT IN ('left','kicked','migrated')",
+            (bot, payload["scope"], payload["chat_id"], grant),
+        )
+        if access is None:
+            return None, None
+        update = json.loads(update_json)
+        message = update.get("message") or update.get("edited_message") or {}
+        async with self.db.read_lock:
+            members = await message_batches.current_members(
+                self.db.reader, job_id, bot, payload["chat_id"], grant
+            )
+        identity = query_identity(message, members)
+        return (snapshot.version, job, identity), await self.semantic_index.rank(bot, identity[0])
+
     async def context(
         self,
         conn: aiosqlite.Connection,
@@ -598,6 +634,7 @@ class MemoryEngine:
         event_id: int | None = None,
         speaker: str = "",
         thread: int | None = None,
+        semantic: Ranking | None = None,
     ) -> tuple[dict[str, Any], int]:
         from zarya.memory_retrieval import select_context
 
@@ -622,6 +659,7 @@ class MemoryEngine:
             event_id=event_id,
             speaker=speaker,
             thread=thread,
+            semantic=semantic,
         )
         return result, version
 

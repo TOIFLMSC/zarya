@@ -221,6 +221,7 @@ def create_app(
                 await obsidian.stop()
                 await telegram.stop()
                 await dialogue.close()
+                await memory.semantic_index.close()
                 await db.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)

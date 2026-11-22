@@ -13,7 +13,7 @@ export type Settings = {
   photo_model: "gpt-6-luna" | "gpt-6.1-sol";
   memory_enabled: boolean;
   memory_model: "gpt-6-luna" | "gpt-6.1-sol";
-  memory_retrieval: "legacy" | "shadow" | "graph";
+  memory_retrieval: "legacy" | "shadow" | "graph" | "e5";
   participant_context_messages: number;
   topic_context_chat_id: string;
   participant_summaries_enabled: boolean;
@@ -235,11 +235,13 @@ export type DialogDetail = DialogItem & {
       load_ms: number;
       legacy_ms: number;
       graph_ms?: number;
+      semantic_ms?: number;
       candidates: { facts: number; episodes: number };
       fallback: string | null;
       capped: boolean;
       legacy: RetrievalSelection;
       graph?: RetrievalSelection;
+      semantic?: RetrievalSelection;
     };
     avatar_profile?: {
       user_id: string;

@@ -178,6 +178,12 @@ async def freeze(
     if not await one(conn, "SELECT 1 FROM text_batches WHERE job_id=?", (job,)):
         return None
     await conn.execute("UPDATE text_batches SET sealed=1 WHERE job_id=?", (job,))
+    return await current_members(conn, job, bot, chat, grant)
+
+
+async def current_members(
+    conn: aiosqlite.Connection, job: int, bot: str, chat: str, grant: int
+) -> list[dict[str, Any]]:
     async with conn.execute(
         "SELECT message_id,event_id FROM text_batch_members WHERE job_id=? ORDER BY message_id",
         (job,),

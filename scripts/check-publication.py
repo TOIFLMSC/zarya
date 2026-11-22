@@ -106,7 +106,10 @@ def allowed(path: str) -> bool:
     if p.parent.as_posix() == "scripts":
         return p.name in {"setup-media.ps1", "check-publication.py", "check-upgrade.py"}
     if p.parts[:2] == ("src", "zarya"):
-        return p.suffix in {".py", ".sql"} or path == "src/zarya/prompts.example.json"
+        return p.suffix in {".py", ".sql"} or path in {
+            "src/zarya/prompts.example.json",
+            "src/zarya/e5_license.txt",
+        }
     if p.parts[0] == "tests":
         return p.suffix in {".py", ".cjs"}
     if p.parent.as_posix() == "web":
