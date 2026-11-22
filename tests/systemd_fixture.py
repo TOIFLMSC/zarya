@@ -27,10 +27,15 @@ def main():
         cd.cycle()
     state = cd.load()
     assert state["phase"] == "idle" and state["live"].startswith(sha)
+    bundle = cd.ROOT / "releases" / state["live"] / "bundle"
+    assert list(bundle.glob("zarya-*.whl"))
     # Exercise idempotency of a second poll.
     with cd.lock(cd.ROOT / "deploy.lock"):
         cd.cycle()
     assert cd.load() == state
+    assert not list(bundle.glob("zarya-*.whl"))
+    assert (bundle / "web/index.html").is_file()
+    cd.python(state["live"], "-c", "import zarya.app, zarya.database")
 
 
 if __name__ == "__main__":
