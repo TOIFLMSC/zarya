@@ -1,10 +1,11 @@
 import asyncio
 import hashlib
 import importlib
+import os
 import sqlite3
 import sys
 import zipfile
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 
 import pytest
@@ -98,7 +99,10 @@ def test_busy_model_call_defers_cutover(modules, tmp_path, monkeypatch):
     assert cd.in_flight()
 
 
-def test_preupload_failures_do_not_accumulate_local_snapshots(modules, tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_rollback", [False, True])
+def test_preupload_failures_do_not_accumulate_local_files(
+    modules, tmp_path, monkeypatch, legacy_rollback
+):
     cd, _, _ = modules
     monkeypatch.setattr(cd, "ROOT", tmp_path)
     monkeypatch.setattr(cd, "sync", lambda _: None)
@@ -125,15 +129,25 @@ def test_preupload_failures_do_not_accumulate_local_snapshots(modules, tmp_path,
     monkeypatch.setattr(cd, "python", capture)
     monkeypatch.setattr(cd.disk_backup, "publish", deny_write)
     state = {}
-    cd.save(state, "idle", live=None)
+    releases = tmp_path / "releases"
+    releases.mkdir()
+    keep = {"b" * 40 + "-older", "c" * 40 + "-live"} if legacy_rollback else set()
+    for name in keep:
+        (releases / name).mkdir()
+    live = "c" * 40 + "-live" if legacy_rollback else None
+    cd.save(state, "idle", live=live, old=live, rejected="d" * 40)
+    cd.prune_local(state)
     for attempt in range(3):
         target = "a" * 40 + f"-{attempt}"
+        (releases / target).mkdir()
         run = tmp_path / "runs" / target
         run.mkdir(parents=True)
         with pytest.raises(RuntimeError, match="storage quota"):
             cd.deploy(state, target, run)
         state = cd.load()
         assert running and state["phase"] == "idle" and state["disk_retry_at"] > 0
+        cd.cycle()
+        assert {folder.name for folder in releases.iterdir()} == keep
     assert not list((tmp_path / "runs").iterdir())
 
 
@@ -156,6 +170,132 @@ def test_preupload_cleanup_resumes_after_interruption(modules, tmp_path, monkeyp
     cd.cycle()
     assert cd.load()["phase"] == "idle"
     assert not run.exists()
+
+
+def test_idle_poll_bounds_successful_deploys_across_upgrade_and_failure(
+    modules, tmp_path, monkeypatch
+):
+    cd, _, _ = modules
+    monkeypatch.setattr(cd, "ROOT", tmp_path)
+    monkeypatch.setattr(cd, "sync", lambda _: None)
+    running = True
+
+    def control(action):
+        nonlocal running
+        running = action == "start"
+
+    monkeypatch.setattr(cd, "systemctl", control)
+    monkeypatch.setattr(cd, "active", lambda: running)
+    monkeypatch.setattr(cd, "healthy", lambda _: True)
+    monkeypatch.setattr(cd, "lock", lambda _: nullcontext())
+    monkeypatch.setattr(cd.subprocess, "run", lambda *_, **__: None)
+    monkeypatch.setattr(cd.disk_backup, "publish", lambda *_: None)
+    monkeypatch.setattr(cd, "python", lambda *_: None)
+
+    releases = tmp_path / "releases"
+    runs = tmp_path / "runs"
+    releases.mkdir()
+    runs.mkdir()
+    initial = "a" * 40
+    state = {}
+    cd.save(state, "idle", live=initial + "-env", old=None, run=initial + "-copy", target=initial)
+    (releases / state["live"]).mkdir()
+    (runs / state["run"]).mkdir()
+    legacy = runs / ("0" * 40 + "-unclassified")
+    legacy.mkdir()
+
+    class GitHub:
+        def tip(self):
+            return cd.load()["live"][:40]
+
+    monkeypatch.setattr(cd, "configured", GitHub)
+    for char in "bcd":
+        sha = char * 40
+        target = sha + "-env"
+        run = runs / (sha + "-copy")
+        (releases / target).mkdir()
+        run.mkdir()
+        for name in ("candidate.sqlite3", "candidate.sqlite3-wal", "candidate.sqlite3-shm"):
+            (run / name).touch()
+        if char == "c":
+            with monkeypatch.context() as patch:
+
+                def fail_prepare(_release, *args):
+                    if args[1] == "prepare":
+                        raise ValueError("bad migration")
+
+                patch.setattr(cd, "python", fail_prepare)
+                with pytest.raises(ValueError, match="bad migration"):
+                    cd.deploy(cd.load(), target, run)
+        else:
+            cd.deploy(cd.load(), target, run)
+            assert not list(run.glob("candidate.sqlite3*"))
+        cd.cycle()
+        cd.cycle()
+        state = cd.load()
+        assert (releases / state["live"]).is_dir()
+        assert (releases / ("a" * 40 + "-env")).exists() == (char != "d")
+        if char == "c":
+            assert (runs / ("b" * 40 + "-copy")).is_dir()
+    assert {folder.name for folder in releases.iterdir()} == {c * 40 + "-env" for c in "bd"}
+    assert {folder.name for folder in runs.iterdir()} == {
+        legacy.name,
+        "c" * 40 + "-copy",
+        "d" * 40 + "-copy",
+    }
+
+
+def test_upgrade_after_legacy_rollback_keeps_unidentified_previous(modules, tmp_path, monkeypatch):
+    cd, _, _ = modules
+    monkeypatch.setattr(cd, "ROOT", tmp_path)
+    monkeypatch.setattr(cd, "sync", lambda _: None)
+    old = tmp_path / "releases" / ("a" * 40 + "-env")
+    old.mkdir(parents=True)
+    os.utime(old, (946684800, 946684800))
+    live = "b" * 40 + "-env"
+    (old.parent / live).mkdir()
+    state = dict(live=live, old=live, rejected="c" * 40)
+    cd.prune_local(state)
+    assert old.is_dir()
+    target = "d" * 40 + "-env"
+    (old.parent / target).mkdir()
+    run = tmp_path / "runs" / ("d" * 40 + "-copy")
+    run.mkdir(parents=True)
+    cd.save(state, "admitted", live=target, old=live, run=run.name)
+    monkeypatch.setattr(cd, "healthy", lambda _: True)
+    cd.finish(state)
+    cd.prune_local(cd.load())
+    assert {p.name for p in old.parent.iterdir()} == {live, target}
+
+
+def test_retired_run_cleanup_retries_after_interruption(modules, tmp_path, monkeypatch):
+    cd, _, _ = modules
+    monkeypatch.setattr(cd, "ROOT", tmp_path)
+    monkeypatch.setattr(cd, "sync", lambda _: None)
+    (tmp_path / "releases").mkdir()
+    runs = tmp_path / "runs"
+    old = runs / ("a" * 40 + "-old")
+    current = runs / ("b" * 40 + "-current")
+    old.mkdir(parents=True)
+    current.mkdir()
+    cd.save(
+        {}, "idle", live=None, retired_run=old.name, run=current.name, successful_run=current.name
+    )
+    with monkeypatch.context() as patch:
+
+        def interrupt(_):
+            raise InterruptedError
+
+        patch.setattr(cd, "sync", interrupt)
+        with pytest.raises(InterruptedError):
+            cd.prune_local(cd.load())
+    assert not old.exists() and cd.load()["retired_run"] == old.name
+    cd.prune_local(cd.load())
+    assert current.is_dir() and cd.load()["retired_run"] is None
+    for unexpected in (current.name, "../outside"):
+        with pytest.raises(ValueError, match="invalid retired"):
+            cd.prune_local(dict(cd.load(), retired_run=unexpected))
+    assert current.is_dir()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="controller uses Linux flock/fsync/systemd")
