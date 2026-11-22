@@ -6,7 +6,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from zarya.dialogue_logic import topic_id
+from zarya.dialogue_logic import explicit_reply, topic_id
 from zarya.models import Settings
 from zarya.source_material import one
 from zarya.source_material import valid as source_valid
@@ -55,7 +55,7 @@ async def valid(conn: Any, run: int | None) -> bool:
 async def previous(
     conn: Any, bot: str, chat: str, grant: int, message: dict[str, Any]
 ) -> dict[str, Any] | None:
-    reply = message.get("reply_to_message") or {}
+    reply = explicit_reply(message)
     # Explicit replies bind only to an actually delivered assistant response.
     extra = "o.message_id=?" if reply else "r.sender_id=? AND r.created_at>=?"
     params: tuple[Any, ...] = (

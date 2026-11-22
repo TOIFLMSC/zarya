@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from zarya.avatar_logic import AVATAR_WORD, FOLLOWUP, previous, purge, valid
+from zarya.dialogue_logic import explicit_reply
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
 from zarya.photos import MAX_BATCH_BYTES, image_part, normalize
@@ -64,7 +65,7 @@ class AvatarEngine:
         source = await row(conn, "SELECT event_id FROM jobs WHERE id=?", (job,))
         binding = [{"message_id": message["message_id"], "event_id": source[0]}]
         target = None
-        reply = message.get("reply_to_message") or {}
+        reply = explicit_reply(message)
         own = bool(re.search(r"\b(?:мо(?:я|ю|ей|и|их|его|е|ё)|у меня)\b", text, re.I))
         if own:
             target = message.get("from")

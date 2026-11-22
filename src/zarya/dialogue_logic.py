@@ -26,6 +26,16 @@ def topic_id(message: dict[str, Any]) -> int | None:
     return int(value) if value is not None and message.get("chat", {}).get("is_forum") else None
 
 
+def explicit_reply(message: dict[str, Any]) -> dict[str, Any]:
+    reply = message.get("reply_to_message") or {}
+    # Telegram attaches the topic creation service message to ordinary posts in a topic.
+    if reply.get("forum_topic_created") is not None and reply.get("message_id") == topic_id(
+        message
+    ):
+        return {}
+    return reply
+
+
 def direct_trigger(message: dict[str, Any], bot_id: str, username: str, name: str) -> str:
     if message.get("from", {}).get("is_bot") or message.get("sender_chat"):
         return "bot_or_channel"
@@ -33,7 +43,7 @@ def direct_trigger(message: dict[str, Any], bot_id: str, username: str, name: st
         return "private" if message_text(message) else "no_text"
     if message.get("forward_origin") or message.get("forward_date"):
         return "forwarded"
-    reply = message.get("reply_to_message") or {}
+    reply = explicit_reply(message)
     if str(reply.get("from", {}).get("id")) == bot_id:
         return "reply"
     text = str(message.get("text") or message.get("caption") or "")

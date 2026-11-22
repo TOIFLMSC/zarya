@@ -6,7 +6,7 @@ from typing import Any
 
 import aiosqlite
 
-from zarya.dialogue_logic import topic_id
+from zarya.dialogue_logic import explicit_reply, topic_id
 from zarya.memory_read import MemoryRead
 from zarya.models import Settings
 from zarya.source_material import accepted, describe, one
@@ -372,7 +372,7 @@ async def select(
         (bot, chat, grant, current),
     )
     people = {sender: "speaker"} if sender else {}
-    target = (message.get("reply_to_message") or {}).get("message_id")
+    target = explicit_reply(message).get("message_id")
     visited: set[int] = set()
     for _ in range(6):
         if not target or target in visited:
@@ -383,7 +383,7 @@ async def select(
             source = original[1]
             if human(source):
                 people.setdefault(str(source["from"]["id"]), "reply_chain")
-            target = (source.get("reply_to_message") or {}).get("message_id")
+            target = explicit_reply(source).get("message_id")
         else:
             sent = await one(
                 conn,

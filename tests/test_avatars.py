@@ -80,11 +80,11 @@ def engines(store):
     return dialogue, avatars, model
 
 
-async def process(store, dialogue, avatars, transport, number, text, reply=None, chat=42):
+async def process(store, dialogue, avatars, transport, number, text, reply=None, chat=42, **extra):
     await store.ingest(
         "999",
         "zarya_test",
-        [event(number, chat, text, **({"reply_to_message": reply} if reply else {}))],
+        [event(number, chat, text, **({"reply_to_message": reply} if reply else {}), **extra)],
     )
     result = await dialogue.claim("999")
     if result["skip"]:
@@ -179,6 +179,32 @@ async def test_unavailable_honest_no_paid_vision(tmp_path, kind):
         profile = json.loads(answer["request"]["input"])["avatar_profile"]
         assert profile["observations"] is None and profile["analysed_indices"] == []
         assert not [r for r in model.requests if isinstance(r["input"], list)]
+
+
+async def test_topic_marker_cannot_select_avatar_or_break_same_topic_followup(tmp_path):
+    async with store_at(tmp_path) as store:
+        await ready(store, -100)
+        dialogue, avatars, _ = engines(store)
+        transport = Transport()
+        marker = {
+            "message_id": 2,
+            "from": {"id": 77, "first_name": "Создатель топика"},
+            "forum_topic_created": {"name": "Тест"},
+        }
+        topic = {"reply": marker, "chat": -100, "message_thread_id": 2, "is_topic_message": True}
+        unknown = await process(
+            store, dialogue, avatars, transport, 3, "Заря, как тебе его ава?", **topic
+        )
+        profile = json.loads(unknown["request"]["input"])["avatar_profile"]
+        assert not transport.list_calls
+        assert profile["error"] == "target_unavailable"
+        await process(store, dialogue, avatars, transport, 4, "Заря, как тебе моя ава?", **topic)
+        followup = await process(
+            store, dialogue, avatars, transport, 5, "Заря, а остальные?", **topic
+        )
+        profile = json.loads(followup["request"]["input"])["avatar_profile"]
+        assert profile["user_id"] == "42" and profile["analysed_indices"] == list(range(2, 10))
+        assert transport.list_calls and all(user == "42" for user, _, _ in transport.list_calls)
 
 
 async def test_profile_shift_follows_identity_and_deleted_anchor_is_not_reused(tmp_path):
