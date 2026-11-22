@@ -12,6 +12,7 @@ from test_telegram import event, store_at
 
 from zarya.dialogue import DialogueEngine
 from zarya.memory import MemoryEngine
+from zarya.openai_adapter import ModelResult
 from zarya.photos import PhotoEngine
 from zarya.research import ResearchEngine
 from zarya.source_material import resolve
@@ -38,6 +39,80 @@ async def deliver(store, work, message_id):
     async with store.db.transaction() as conn:
         await conn.execute("UPDATE outbox SET state='sending' WHERE id=?", (item[0],))
     await store.delivery_result(item[0], "sent", message_id=message_id)
+
+
+@pytest.mark.parametrize("keep_topic_marker", [True, False])
+async def test_forum_topic_marker_does_not_replace_the_exact_reply(tmp_path, keep_topic_marker):
+    async with store_at(tmp_path) as store:
+        await ready(store, -100)
+        settings = await store.db.settings()
+        await store.db.update_settings(
+            settings.version,
+            settings.settings.model_copy(update={"topic_context_chat_id": "-100"}),
+        )
+        thread = {"message_thread_id": 2, "is_topic_message": True}
+        marker = event(2, -100, "", forum_topic_created={"name": "Тест"}, **thread)
+        original = event(
+            3,
+            -100,
+            "Проверка Зари: созвон Маяк в 19:00.",
+            reply_to_message=marker["message"],
+            **thread,
+        )
+        correction = event(
+            4, -100, "Созвон Маяк перенесли на 20:00.", reply_to_message=marker["message"], **thread
+        )
+        correction["message"]["from"] = {"id": 84, "first_name": "Второй участник"}
+        question = event(
+            5,
+            -100,
+            "Заря, во сколько созвон? Ответь только временем.",
+            reply_to_message=marker["message"],
+            **thread,
+        )
+        await store.ingest(
+            "999",
+            "zarya_test",
+            ([marker] if keep_topic_marker else []) + [original, correction, question],
+        )
+
+        class QuoteModel:
+            async def generate(self, request):
+                payload = json.loads(request["input"])
+                materials = payload.get("selected_material", {}).get("messages", [])
+                exact = materials[0]["text"] if materials else ""
+                return ModelResult(text=exact or "20:00")
+
+        dialogue = DialogueEngine(store, QuoteModel())
+        initial = await answer(dialogue, None, 5)
+        await deliver(store, initial, 6)
+        # Telegram includes one reply level. The topic marker lives in the retained original.
+        embedded = {
+            key: value for key, value in original["message"].items() if key != "reply_to_message"
+        }
+        embedded["text"] = "Устаревшая копия Telegram."
+        reply = event(
+            7,
+            -100,
+            "Заря, процитируй это сообщение дословно.",
+            reply_to_message=embedded,
+            **thread,
+        )
+        await store.ingest("999", "zarya_test", [reply])
+        quoted = await answer(dialogue, None, 7)
+        data = json.loads(quoted["request"]["input"])
+        assert data["selected_material"]["unavailable"] is False
+        assert [m["text"] for m in data["selected_material"]["messages"]] == [
+            "Проверка Зари: созвон Маяк в 19:00."
+        ]
+        assert [ref["message_id"] for ref in quoted["snapshot"]["source_manifest"]] == [3]
+        detail = await dialogue.details(quoted["run_id"])
+        assert detail["response"] == "Проверка Зари: созвон Маяк в 19:00."
+        assert "selected_material" not in json.loads(initial["request"]["input"])
+        assert initial["snapshot"]["source_manifest"] == []
+        assert json.loads(initial["request"]["input"])["topic_context"][0]["text"].endswith(
+            "20:00."
+        )
 
 
 @pytest.mark.parametrize("with_research", [False, True])

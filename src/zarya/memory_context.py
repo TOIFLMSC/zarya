@@ -7,6 +7,7 @@ from typing import Any
 
 import aiosqlite
 
+from zarya.dialogue_logic import explicit_reply
 from zarya.memory_read import MemoryRead
 from zarya.source_material import accepted
 from zarya.source_material import valid as material_valid
@@ -161,9 +162,7 @@ async def reply_context(
     update = json.loads(event[0])
     message = update.get("edited_message") or update.get("message") or {}
     target = (
-        message.get("message_id")
-        if include_message
-        else (message.get("reply_to_message") or {}).get("message_id")
+        message.get("message_id") if include_message else explicit_reply(message).get("message_id")
     )
     if not target:
         return None, deps

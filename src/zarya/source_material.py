@@ -6,6 +6,7 @@ from typing import Any
 
 import aiosqlite
 
+from zarya.dialogue_logic import explicit_reply
 from zarya.memory_read import MemoryRead
 from zarya.research_logic import urls
 
@@ -144,11 +145,7 @@ async def resolve(
         or urls(message)
         or any(message.get(k) for k in ("video", "animation", "voice", "video_note", "sticker"))
     )
-    target_id = (
-        message["message_id"]
-        if own_material
-        else (message.get("reply_to_message") or {}).get("message_id")
-    )
+    target_id = message["message_id"] if own_material else explicit_reply(message).get("message_id")
     if not target_id:
         return result
     seen: set[int] = set()
@@ -160,7 +157,7 @@ async def resolve(
         if source:
             event, original = source
             result["manifest"].append({"message_id": target_id, "event_id": event})
-            reply = (original.get("reply_to_message") or {}).get("message_id")
+            reply = explicit_reply(original).get("message_id")
             material = bool(
                 original.get("forward_origin")
                 or original.get("forward_date")

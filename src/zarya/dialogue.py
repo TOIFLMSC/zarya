@@ -15,6 +15,7 @@ from zarya.dialogue_logic import (
     TOPIC_CONTEXT_POLICY,
     answer_mode,
     delivery_chunks,
+    explicit_reply,
     instructions,
     message_text,
     model_input,
@@ -174,9 +175,10 @@ class DialogueEngine:
                         should_answer, trigger = True, "initiative"
                         payload["initiative_mode"] = behavior_state["mode"]
             material_message = message
+            reply = explicit_reply(message)
             if (
                 message.get("voice")
-                and message.get("reply_to_message")
+                and reply
                 and not (message.get("forward_origin") or message.get("forward_date"))
             ):
                 # Own spoken reply is a question about its reply-chain, not a new post.
@@ -402,9 +404,7 @@ class DialogueEngine:
                     chat_id,
                     access_version,
                     [sender_id] + [str(item["sender_id"]) for item in context],
-                    query=message_text(message)
-                    + " "
-                    + str((message.get("reply_to_message") or {}).get("text", ""))[:4000],
+                    query=message_text(message) + " " + str(reply.get("text", ""))[:4000],
                     current_query=message_text(message),
                     recent=context,
                     event_id=source[0],
