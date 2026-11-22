@@ -251,21 +251,18 @@ class TelegramRuntime:
 
     async def memory_worker(self, bot_id: str) -> None:
         assert self.memory
-        summaries_first = False
+        engines = (self.memory, self.memory.summaries, self.memory.task_states)
+        first = 0
         try:
             while self.connection not in {"failed", "blocked"}:
                 await self.memory.cleanup(bot_id)
-                engines = (
-                    (self.memory.summaries, self.memory)
-                    if summaries_first
-                    else (self.memory, self.memory.summaries)
-                )
-                summaries_first = not summaries_first
                 work = None
-                for engine in engines:
+                for index in range(len(engines)):
+                    engine = engines[(first + index) % len(engines)]
                     work = await engine.claim(bot_id)
                     if work:
                         await engine.execute(work)
+                        first = (first + index + 1) % len(engines)
                         break
                 if not work:
                     await asyncio.sleep(1)

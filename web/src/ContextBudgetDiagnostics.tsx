@@ -14,6 +14,7 @@ const categories: Record<string, string> = {
   current_message: "Текущее сообщение",
   current_messages: "Текущая серия",
   topic_context: "Хронология топика",
+  task_state: "Состояние задачи",
   recent_originals: "Недавние реплики · оригиналы",
   recent_summaries: "Недавние реплики · сводки",
   assistant_replies: "Связанные ответы Зари",

@@ -54,6 +54,7 @@ const names: Record<string, string> = {
   photo: "Фото",
   memory: "Память",
   participant_summary: "Персональные сводки",
+  task_state: "Состояние задач",
   context_preflight: "Проверка вместимости",
   context_count: "Подсчёт токенов API",
   research: "Поиск",

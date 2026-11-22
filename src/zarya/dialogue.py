@@ -431,6 +431,17 @@ class DialogueEngine:
             # Search supplies evidence; requested detail still controls response length.
             style = writing_style(random.random())
             media_refs = list({r["id"]: r for r in media_refs + context_refs["media"]}.values())
+            task_state = None
+            if (
+                should_answer and trigger != "initiative" and settings.memory_enabled
+                and not payload.get("service_reply") and not avatar
+            ):
+                from zarya.task_state import context as task_context
+
+                task_state = await task_context(
+                    conn, bot_id, chat_id, access_version, thread_id or 0,
+                    [m["message_id"] for m in current_messages] or [incoming["message_id"]],
+                )
             memory_context: dict[str, Any] = {}
             memory_epoch = None
             retrieval: dict[str, Any] = {}
@@ -505,6 +516,20 @@ class DialogueEngine:
             }
             if topic_context:
                 request["instructions"] += TOPIC_CONTEXT_POLICY
+            if task_state:
+                from zarya.task_state import USE
+
+                request["instructions"] += USE
+                request["input"] = json.dumps(
+                    {
+                        **json.loads(request["input"]),
+                        "task_state": {
+                            "for_message_ids": task_state["for_message_ids"],
+                            "fields": task_state["fields"],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
             if selected_material or material["unavailable"]:
                 request["input"] = json.dumps(
                     {
@@ -554,6 +579,7 @@ class DialogueEngine:
                 "context": context,
                 **({"current_messages": current_messages} if current_messages else {}),
                 **({"topic_context": topic_context} if topic_context else {}),
+                **({"task_state": task_state} if task_state else {}),
                 "participant_context": participant_coverage,
                 "context_refs": context_refs,
                 "settings": settings.model_dump(),
@@ -1500,6 +1526,10 @@ class DialogueEngine:
         if mode == "paid":
             if saved.get("topic_context"):
                 saved["request"]["instructions"] += TOPIC_CONTEXT_POLICY
+            if saved.get("task_state"):
+                from zarya.task_state import USE
+
+                saved["request"]["instructions"] += USE
             if saved.get("current_messages"):
                 message_batches.configure(saved["request"], saved["current_messages"])
             saved["request"] = context_budget.pack(saved["request"])

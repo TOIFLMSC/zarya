@@ -212,6 +212,11 @@ class TelegramStore:
         await purge_media(conn, "bot_id=? AND chat_id=?", (bot_id, subject))
         await purge_avatars(conn, "bot_id=? AND chat_id=?", (bot_id, subject))
         await erase_chat(conn, bot_id, subject)
+        from zarya.task_state import scrub as scrub_tasks
+
+        await scrub_tasks(
+            conn, "bot_id=? AND chat_id=? AND retired=0", (bot_id, subject), retire=True
+        )
         shared = await row(
             conn,
             "SELECT 1 FROM memory_shares s JOIN memory_facts f ON f.id=s.fact_id "
@@ -531,6 +536,15 @@ class TelegramStore:
                                 "UPDATE active_dialogues SET remaining=remaining-1 "
                                 "WHERE bot_id=? AND chat_id=? AND thread_id=? AND sender_id=?",
                                 (bot_id, subject, thread_id or 0, sender_id),
+                            )
+                    if not service_text:
+                        from zarya.task_state import observe as observe_task
+                        from zarya.verbatim_quote import match as quote_request
+
+                        if not quote_request(message, settings.display_name, bot_id, username):
+                            await observe_task(
+                                conn, bot_id, subject, access[1], event_id,
+                                message, settings, trigger, username, edited,
                             )
                     # Retire the old revision even when it never reached dialogue_runs.
                     if replacement:

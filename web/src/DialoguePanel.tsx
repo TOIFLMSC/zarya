@@ -43,6 +43,15 @@ const retrievalReasons: Record<string, string> = {
   related_episode: "связанный эпизод",
   dependency_edge: "контекстная зависимость",
 };
+const taskFields: Record<string, string> = {
+  goal: "Цель",
+  constraint: "Ограничение",
+  status: "Текущий статус",
+  decision: "Решение",
+  attempt: "Опробованный шаг",
+  question: "Открытый вопрос",
+  commitment: "Обещание",
+};
 const triggers: Record<string, string> = {
   private: "Личное сообщение",
   name: "Обращение по имени",
@@ -331,6 +340,19 @@ export function DialoguePanel({
                         budget={detail.snapshot.context_budget}
                         recorded={detail.mode === "recorded"}
                       />
+                      {detail.snapshot.task_state && (
+                        <details>
+                          <summary>Состояние задачи</summary>
+                          {detail.snapshot.task_state.fields.map((field, index) => (
+                            <div className="context-message" key={index}>
+                              <small>
+                                {taskFields[field.kind] ?? "Фрагмент"} · сообщение {field.message_id}
+                              </small>
+                              <p className="dialogue-text">{field.quote}</p>
+                            </div>
+                          ))}
+                        </details>
+                      )}
                       {detail.snapshot.participant_context ? (
                         <details className="timing-diagnostics">
                           <summary>Состав персональных окон</summary>
