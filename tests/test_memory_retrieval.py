@@ -87,6 +87,61 @@ async def test_shadow_preserves_exact_baseline_but_finds_older_relevant_fact(tmp
         assert "query" not in diagnostic and diagnostic["fallback"] is None
 
 
+@pytest.mark.parametrize("retrieval_mode", ["legacy", "shadow", "graph"])
+@pytest.mark.parametrize("unrelated_count", [149, 150, 151])
+async def test_model_input_keeps_speaker_fact_at_candidate_limit(
+    tmp_path, monkeypatch, retrieval_mode, unrelated_count
+):
+    monkeypatch.setattr("zarya.dialogue.random.random", lambda: 0.5)
+    async with store_at(tmp_path) as store:
+        await ready(store)
+        await mode(store, retrieval_mode)
+        adapter = FakeModel(ModelResult(text="Привет"))
+        dialogue = DialogueEngine(store, adapter)
+        memory = MemoryEngine(store, adapter, tmp_path)
+        dialogue.memory = memory
+        await store.ingest("999", "zarya_test", [event(4, -100, "Я люблю Python")])
+        await extract(memory)
+        await filler(store, unrelated_count, person="43")
+        await store.ingest("999", "zarya_test", [event(5, -100, "Заря, что я думаю про Python?")])
+
+        work = await answer(dialogue, None, 5)
+        facts = json.loads(work["request"]["input"])["memory"]["facts"]
+
+        assert [(fact["sender_id"], fact["text"]) for fact in facts] == [("42", "Любит Python")]
+
+
+async def test_model_input_keeps_reply_participant_facts_but_excludes_other_chat(tmp_path):
+    async with store_at(tmp_path) as store:
+        await ready(store)
+        adapter = FakeModel(ModelResult(text="Привет"))
+        dialogue = DialogueEngine(store, adapter)
+        dialogue.memory = MemoryEngine(store, adapter, tmp_path)
+        await filler(store, 1, person="42")
+        await filler(store, 1, person="43")
+        await filler(store, 1, chat="-200", person="42")
+        await filler(store, 151, person="44")
+        source = event(
+            4,
+            -100,
+            "Посоветуйте яблоки",
+            **{"from": {"id": 43, "first_name": "Собеседник", "is_bot": False}},
+        )
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [source, event(5, -100, "Заря, что нам подойдёт?", reply_to_message=source["message"])],
+        )
+
+        work = await answer(dialogue, None, 5)
+        facts = json.loads(work["request"]["input"])["memory"]["facts"]
+
+        assert [(fact["sender_id"], fact["shared"]) for fact in facts] == [
+            ("43", False),
+            ("42", False),
+        ]
+
+
 async def test_shadow_one_call_and_identical_model_input(tmp_path, monkeypatch):
     monkeypatch.setattr("zarya.dialogue.random.random", lambda: 0.5)
     requests = []
@@ -235,6 +290,8 @@ async def test_shared_fact_terminal_and_revocation_checked(tmp_path):
             assert await valid_snapshot(conn, "999", snapshot)
             await conn.execute("UPDATE memory_shares SET state='revoked'")
             assert not await valid_snapshot(conn, "999", snapshot)
+        after, _ = await selected(memory)
+        assert not after["facts"]
 
 
 async def test_graph_fallback_and_shadow_metadata_has_no_response_dependencies(
@@ -278,7 +335,8 @@ async def test_candidate_window_and_final_text_budget(tmp_path):
         async with store.db.transaction() as conn:
             facts, episodes = await candidates(conn, "999", "-100", 2, ["42"], time.time())
             denied, _ = await candidates(conn, "999", "-100", 2, ["77"], time.time())
-        assert len(facts) == 150 and not episodes and not denied
+            empty, _ = await candidates(conn, "999", "-100", 2, [], time.time())
+        assert len(facts) == 150 and not episodes and not denied and not empty
         result, diagnostic = await selected(memory)
         assert len(result["facts"]) <= 25
         assert sum(len(f["text"]) for f in result["facts"]) <= 5000
