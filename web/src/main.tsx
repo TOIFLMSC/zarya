@@ -218,11 +218,13 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
   const menuButton = useRef<HTMLButtonElement>(null);
   const pageHeading = useRef<HTMLHeadingElement>(null);
   const [memoryDirty, setMemoryDirty] = useState(false);
+  const [promptDirty, setPromptDirty] = useState(false);
   function setPage(value: typeof page) {
     if (value !== page) {
-      if (memoryDirty && !window.confirm("Отменить несохранённые изменения?"))
+      if ((memoryDirty || promptDirty) && !window.confirm("Отменить несохранённые изменения?"))
         return;
       setMemoryDirty(false);
+      setPromptDirty(false);
       rawSetPage(value);
     }
     if (mobileMenuOpen) {
@@ -267,14 +269,14 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
   );
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (dirty || memoryDirty) {
+      if (dirty || memoryDirty || promptDirty) {
         event.preventDefault();
         event.returnValue = "";
       }
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty, memoryDirty]);
+  }, [dirty, memoryDirty, promptDirty]);
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy || !snapshot || !draft) return;
@@ -313,7 +315,7 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
   }
   async function logout() {
     if (
-      (dirty || memoryDirty) &&
+      (dirty || memoryDirty || promptDirty) &&
       !window.confirm("Выйти без сохранения изменений?")
     )
       return;
@@ -520,6 +522,7 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                 currentVersion={snapshot.version}
                 onUnauthorized={onExit}
                 onChanged={() => void load()}
+                onPromptDirtyChange={setPromptDirty}
               />
               <form onSubmit={save} noValidate className="settings-form">
                 <fieldset disabled={busy}>
@@ -623,10 +626,9 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                         />
                         <small>
                           Любопытство, привычки речи и отношение к собеседникам.
-                          До 4000 символов. Сохраняется в базе Зари. Полные
-                          инструкции редактируются через Obsidian и карточку
-                          конфигурации выше. Сохранение формы активирует новый
-                          выпуск.
+                          До 4000 символов. Полные инструкции доступны
+                          в разделе «Промпты Зари». Сохранение формы активирует
+                          новый выпуск.
                         </small>
                       </label>
                     </div>

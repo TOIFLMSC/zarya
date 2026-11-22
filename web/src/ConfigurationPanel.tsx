@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "./api";
 
 type Release = {
@@ -22,6 +22,15 @@ type Comparison = Draft & {
   state: string;
   nodes: Node[];
 };
+type PromptPackage = {
+  version: number;
+  fragments: Record<string, string>;
+  hash?: string;
+};
+type PromptEditor = PromptPackage & {
+  id?: string;
+  saved: Record<string, string>;
+};
 type Bridge = {
   configured: boolean;
   path: string | null;
@@ -30,6 +39,8 @@ type Bridge = {
   last_scan: string | null;
   current: Release;
   drafts: Draft[];
+  draft_total: number;
+  prompt_draft_id: string | null;
   history: Release[];
   total: number;
   page: number;
@@ -40,8 +51,47 @@ const origin = (s: string) =>
     bootstrap: "Начальная конфигурация",
     obsidian: "Obsidian",
     web: "Web UI",
+    prompt_editor: "Редактор промптов",
     rollback: "Откат",
   })[s] ?? s;
+
+const promptGroups: Record<string, string> = {
+  dialogue: "Диалог",
+  links: "Ссылки",
+  behavior: "Поведение",
+  memory: "Память",
+  research: "Интернет",
+  media: "Медиа",
+};
+const promptNames: Record<string, string> = {
+  "dialogue.identity_prefix": "Вступление",
+  "dialogue.identity": "Роль Зари",
+  "dialogue.photo_available": "Фото доступно",
+  "dialogue.photo_unavailable": "Фото недоступно",
+  "dialogue.context": "Контекст разговора",
+  "dialogue.style_general": "Общий стиль",
+  "dialogue.length_brief": "Короткий ответ",
+  "dialogue.length_analysis": "Аналитический ответ",
+  "dialogue.length_detailed": "Подробный ответ",
+  "dialogue.tone_label": "Подпись тона",
+  "dialogue.persona_label": "Подпись характера",
+  "dialogue.style_clean": "Нейтральное оформление",
+  "dialogue.style_relaxed": "Неформальный ответ",
+  "dialogue.style_rushed": "Быстрый ответ",
+  "dialogue.owner": "Общение с владельцем",
+  "dialogue.other": "Общение с другими",
+  "dialogue.voice": "Сила авторского голоса",
+  "dialogue.discretion": "Инициатива и уместность",
+  "dialogue.avatar": "Контекст аватара",
+  "links.requested": "Когда попросили ссылки",
+  "links.not_requested": "Когда не попросили ссылки",
+  "behavior.plan": "План реакции и ответа",
+  "memory.extract": "Извлечение воспоминаний",
+  "research.analyse": "Оценка источников",
+  "media.photo": "Анализ фото",
+  "media.video": "Анализ видео",
+  "media.avatar": "Анализ аватара",
+};
 
 export function ConfigurationPanel({
   csrf,
@@ -49,12 +99,14 @@ export function ConfigurationPanel({
   currentVersion,
   onUnauthorized,
   onChanged,
+  onPromptDirtyChange,
 }: {
   csrf: string | null;
   dirty: boolean;
   currentVersion: number;
   onUnauthorized: () => void;
   onChanged: () => void;
+  onPromptDirtyChange: (dirty: boolean) => void;
 }) {
   const [data, setData] = useState<Bridge | null>(null);
   const [detail, setDetail] = useState<Comparison | null>(null);
@@ -62,9 +114,28 @@ export function ConfigurationPanel({
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(0);
+  const [draftPage, setDraftPage] = useState(0);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [editor, setEditor] = useState<PromptEditor | null>(null);
+  const [fragment, setFragment] = useState("");
+  const editorSelect = useRef<HTMLSelectElement>(null);
+  const reviewSummary = useRef<HTMLParagraphElement>(null);
+  const editorOpen = editor !== null;
+  const reviewedId = detail?.id;
+  const promptKeys = Object.keys(editor?.fragments ?? {});
+  const changedPrompts = promptKeys.filter(
+    (key) => editor?.fragments[key] !== editor?.saved[key],
+  );
+  const promptDirty = changedPrompts.length > 0;
+  useEffect(() => onPromptDirtyChange(promptDirty), [onPromptDirtyChange, promptDirty]);
+  useEffect(() => {
+    if (editorOpen) editorSelect.current?.focus();
+  }, [editorOpen]);
+  useEffect(() => {
+    if (reviewedId) reviewSummary.current?.focus();
+  }, [reviewedId]);
   function fail(e: unknown) {
     if (e instanceof ApiError && e.status === 401) onUnauthorized();
     setError(
@@ -77,9 +148,13 @@ export function ConfigurationPanel({
   useEffect(() => {
     if (busy) return;
     let active = true;
-    api<Bridge>(`configuration?page=${page}`)
+    api<Bridge>(`configuration?page=${page}&draft_page=${draftPage}`)
       .then((v) => {
-        if (active) setData(v);
+        if (!active) return;
+        setData(v);
+        if (draftPage * 10 >= v.draft_total && draftPage > 0) {
+          setDraftPage(Math.max(0, Math.ceil(v.draft_total / 10) - 1));
+        }
       })
       .catch((e) => {
         if (active) fail(e);
@@ -87,7 +162,7 @@ export function ConfigurationPanel({
     return () => {
       active = false;
     };
-  }, [page, revision, detail, busy, currentVersion]);
+  }, [page, draftPage, revision, detail, busy, currentVersion]);
   useEffect(() => {
     if (detail || busy || !data?.scanning) return;
     const timer = window.setTimeout(() => setRevision((v) => v + 1), 3000);
@@ -96,18 +171,67 @@ export function ConfigurationPanel({
   useEffect(() => {
     setConfirmed(false);
   }, [currentVersion, dirty]);
-  const stale =
-    !!detail &&
-    detail.current_version <
-      Math.max(currentVersion, data?.current.version ?? 0);
+  const activeVersion = Math.max(currentVersion, data?.current.version ?? 0);
+  const stale = !!detail && detail.current_version < activeVersion;
+  const editorStale = !!editor && editor.version < activeVersion;
+  const draftChanged =
+    !!detail && data?.drafts.some((d) => d.id === detail.id && d.hash !== detail.hash);
+  function readComparison(value: Comparison) {
+    setDetail(value);
+    setEditor(null);
+    setSelected(value.nodes[0]?.path ?? "");
+  }
   async function open(id: string) {
     setBusy(true);
     setError("");
     setConfirmed(false);
     try {
       const value = await api<Comparison>(`configuration/drafts/${id}`);
-      setDetail(value);
-      setSelected(value.nodes[0]?.path ?? "");
+      readComparison(value);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function openPrompt(id?: string) {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const query = id ? `?draft_id=${encodeURIComponent(id)}` : "";
+      const value = await api<PromptPackage>(`configuration/prompts${query}`);
+      setEditor({ ...value, id, saved: value.fragments });
+      setFragment((previous) =>
+        value.fragments[previous] !== undefined ? previous : "dialogue.identity",
+      );
+      setDetail(null);
+      setConfirmed(false);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function savePrompt() {
+    if (!editor || editorStale || !promptDirty || busy) return;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const saved = await api<{ id: string; hash: string }>(
+        "configuration/prompts",
+        "POST",
+        {
+          expected_version: editor.version,
+          fragments: editor.fragments,
+          draft_id: editor.id,
+          expected_hash: editor.hash,
+        },
+        csrf,
+      );
+      setEditor({ ...editor, ...saved, saved: editor.fragments });
+      setMessage("Черновик сохранён. Активный выпуск остался прежним");
     } catch (e) {
       fail(e);
     } finally {
@@ -143,7 +267,7 @@ export function ConfigurationPanel({
       setMessage(
         action === "apply"
           ? `Выпуск №${result.version} активирован`
-          : "Черновик отклонён. Файлы обновятся при следующей синхронизации",
+          : "Черновик отклонён",
       );
       setDetail(null);
       setConfirmed(false);
@@ -168,8 +292,7 @@ export function ConfigurationPanel({
         csrf,
       );
       const value = await api<Comparison>(`configuration/drafts/${result.id}`);
-      setDetail(value);
-      setSelected(value.nodes[0]?.path ?? "");
+      readComparison(value);
     } catch (e) {
       fail(e);
     } finally {
@@ -177,25 +300,25 @@ export function ConfigurationPanel({
     }
   }
   const node = detail?.nodes.find((n) => n.path === selected);
+  const groups = [...new Set([...Object.keys(promptGroups), ...promptKeys.map(
+    (key) => key.split(".")[0],
+  )])];
   return (
     <section className="card obsidian-panel configuration-panel">
       <div className="obsidian-heading">
         <div>
-          <h2>Конфигурация · Obsidian</h2>
-          <p className="muted">Характер, поведение и инструкции по маршрутам</p>
+          <h2>Промпты Зари</h2>
+          <p className="muted">Инструкции для диалога, памяти и других функций</p>
         </div>
         <button
           type="button"
-          disabled={busy || !!detail || !data?.configured || data.scanning}
-          onClick={() => void scan()}
+          className="primary"
+          disabled={busy || !data || !!editor || !!detail}
+          onClick={() => void openPrompt(data?.prompt_draft_id ?? undefined)}
         >
-          Проверить правки из Obsidian
+          {data?.prompt_draft_id ? "Продолжить черновик" : "Редактировать промпты"}
         </button>
       </div>
-      <p>
-        Правки из Obsidian становятся рабочими только после проверки и активации
-        выпуска здесь
-      </p>
       {error && (
         <p className="notice error" role="alert">
           {error}
@@ -217,36 +340,124 @@ export function ConfigurationPanel({
             <summary>Технические сведения</summary>
             <p className="obsidian-path">SHA-256: {data.current.hash}</p>
           </details>
-          {data.configured ? (
-            <p>
-              Папка: <code className="obsidian-path">{data.path}</code>
-            </p>
-          ) : (
-            <p className="muted">
-              Папка Obsidian для конфигурации не подключена на стороне Зари.
-            </p>
+          {data.configured && (
+            <details className="obsidian-section">
+              <summary>Файловый мост Obsidian</summary>
+              <p>Папка <code className="obsidian-path">{data.path}</code></p>
+              {data.last_scan && (
+                <p className="muted">
+                  {data.scanning
+                    ? "Проверяем правки…"
+                    : `Последняя проверка: ${date(data.last_scan)}`}
+                </p>
+              )}
+              <button
+                type="button"
+                disabled={busy || !!detail || !!editor || data.scanning}
+                onClick={() => void scan()}
+              >
+                Проверить правки из Obsidian
+              </button>
+            </details>
           )}
-          {data.last_scan && (
-            <p className="muted">
-              {data.scanning
-                ? "Проверяем правки…"
-                : `Последняя проверка: ${date(data.last_scan)}`}
-            </p>
+          {data.error && <p className="notice error" role="alert">{data.error}</p>}
+          {editor && (
+            <div className="configuration-comparison prompt-editor">
+              <div className="obsidian-heading">
+                <h3>{editor.id ? "Черновик промптов" : "Редактирование промптов"}</h3>
+                <span className="muted">Основа №{editor.version}</span>
+              </div>
+              <label>
+                <span id="prompt-fragment-label">Фрагмент</span>
+                <select
+                  ref={editorSelect}
+                  aria-labelledby="prompt-fragment-label"
+                  value={fragment}
+                  disabled={busy}
+                  onChange={(e) => setFragment(e.target.value)}
+                >
+                  {groups.map((group) => {
+                    const keys = promptKeys.filter((key) => key.split(".")[0] === group);
+                    return keys.length > 0 && (
+                      <optgroup key={group} label={promptGroups[group] ?? group}>
+                        {keys.map((key) => (
+                          <option key={key} value={key}>
+                            {promptNames[key] ?? key}{changedPrompts.includes(key) ? " · изменён" : ""}
+                          </option>
+                        ))}
+                      </optgroup>
+                    );
+                  })}
+                </select>
+              </label>
+              <label>
+                <span id="prompt-text-label">Текст промпта</span>
+                <code className="prompt-key" id="prompt-fragment-key">{fragment}</code>
+                <textarea
+                  aria-labelledby="prompt-text-label"
+                  aria-describedby="prompt-fragment-key"
+                  rows={12}
+                  value={editor.fragments[fragment] ?? ""}
+                  spellCheck={false}
+                  readOnly={editorStale || busy}
+                  onChange={(e) => setEditor({
+                    ...editor,
+                    fragments: { ...editor.fragments, [fragment]: e.target.value },
+                  })}
+                />
+              </label>
+              {promptDirty && (
+                <p className="muted" role="status">
+                  Несохранённых фрагментов: {changedPrompts.length}
+                </p>
+              )}
+              {editorStale && (
+                <p className="notice" role="status">
+                  Активный выпуск изменился. Текст здесь можно скопировать в новый черновик.
+                </p>
+              )}
+              <div className="action-bar">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy || editorStale || !promptDirty}
+                  onClick={() => void savePrompt()}
+                >
+                  Сохранить черновик
+                </button>
+                {editor.id && (
+                  <button
+                    type="button"
+                    disabled={busy || promptDirty}
+                    onClick={() => { if (editor.id) void open(editor.id); }}
+                  >
+                    Сравнить изменения
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    if (!promptDirty || window.confirm("Закрыть редактор без сохранения?")) {
+                      setEditor(null);
+                      setError("");
+                    }
+                  }}
+                >
+                  Закрыть редактор
+                </button>
+              </div>
+            </div>
           )}
-          {data.error && (
-            <p className="notice error" role="alert">
-              {data.error}
-            </p>
-          )}
-          {dirty && (
+          {dirty && detail && (
             <p className="notice">
               Есть несохранённые настройки в форме. Сохрани или отмени их перед
               активацией выпуска
             </p>
           )}
           <details className="obsidian-section" open={!!detail}>
-            <summary>Черновики конфигурации ({data.drafts.length})</summary>
-            {!data.drafts.length && !detail && (
+            <summary>Черновики конфигурации ({data.draft_total})</summary>
+            {!data.draft_total && !detail && (
               <p className="muted">
                 Новых правок конфигурации нет. Заря использует выпуск №
                 {data.current.version}
@@ -257,49 +468,71 @@ export function ConfigurationPanel({
                 <span>
                   {origin(d.origin)} · {date(d.created_at)} · основа №
                   {d.base_version} ·{" "}
-                  {d.conflict ? "Конфликт версий" : "Проверка пройдена"}
+                  {d.conflict ? "Основа устарела" : "Готов к сравнению"}
                 </span>
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={busy || !!editor}
                   onClick={() => void open(d.id)}
                 >
-                  Просмотреть выпуск
+                  Сравнить изменения
                 </button>
               </div>
             ))}
+            {data.draft_total > 10 && (
+              <div className="pagination" aria-label="Страницы черновиков">
+                <button
+                  type="button"
+                  disabled={busy || !!detail || !!editor || draftPage === 0}
+                  onClick={() => setDraftPage((v) => v - 1)}
+                >
+                  Предыдущие черновики
+                </button>
+                <span>Страница {draftPage + 1} из {Math.ceil(data.draft_total / 10)}</span>
+                <button
+                  type="button"
+                  disabled={busy || !!detail || !!editor || (draftPage + 1) * 10 >= data.draft_total}
+                  onClick={() => setDraftPage((v) => v + 1)}
+                >
+                  Следующие черновики
+                </button>
+              </div>
+            )}
             {detail && (
               <div className="configuration-comparison">
-                <p>
-                  Основа №{detail.base_version} · сейчас №
-                  {detail.current_version} · изменено узлов:{" "}
-                  {detail.nodes.length}
+                <p tabIndex={-1} ref={reviewSummary}>
+                  Основа №{detail.base_version} · активный выпуск №
+                  {detail.current_version} · изменений: {detail.nodes.length}
                 </p>
                 <label>
-                  Узел конфигурации
+                  <span id="configuration-node-label">Изменённый фрагмент</span>
                   <select
+                    aria-labelledby="configuration-node-label"
                     value={selected}
                     onChange={(e) => setSelected(e.target.value)}
                   >
                     {detail.nodes.map((n) => (
                       <option value={n.path} key={n.path}>
-                        {n.path.replace(/\.md$/, "")}
+                        {promptNames[n.path.replace(/^Инструкции\//, "").replace(/\.md$/, "")] ??
+                          n.path.replace(/\.md$/, "")}
                       </option>
                     ))}
                   </select>
                 </label>
                 {node ? (
-                  <div className="obsidian-compare">
+                  <div className={`obsidian-compare${detail.conflict ? "" : " obsidian-history-compare"}`}>
                     {[
-                      [
+                      ...(detail.conflict
+                        ? [[
                         `В основе черновика · №${detail.base_version}`,
                         node.before,
-                      ],
+                        ]]
+                        : []),
                       [
-                        `Сейчас в Заре · №${detail.current_version}`,
+                        `Активный выпуск №${detail.current_version}`,
                         node.current,
                       ],
-                      ["Предложено", node.proposed],
+                      ["Черновик", node.proposed],
                     ].map(([label, text]) => (
                       <div key={label}>
                         <p className="muted">{label}</p>
@@ -312,37 +545,28 @@ export function ConfigurationPanel({
                 ) : (
                   <p>Нет изменений</p>
                 )}
-                {detail.conflict || stale ? (
+                {(detail.conflict || stale || draftChanged) && (
                   <p className="notice error">
-                    Конфликт версий. После создания черновика конфигурация
-                    изменилась. Обнови сравнение; автоматического объединения
-                    нет. Сохрани нужный черновик отдельно, отклони его и обнови
-                    синхронизацию
-                  </p>
-                ) : (
-                  <p className="muted">
-                    Проверка структуры пройдена · hash{" "}
-                    {detail.hash.slice(0, 12)}. При активации версия и файлы
-                    будут проверены повторно
+                    {draftChanged
+                      ? "Черновик изменился. Обнови сравнение перед активацией."
+                      : "Активный выпуск изменился. Черновик доступен для просмотра. Нужные правки можно перенести в новый черновик."}
                   </p>
                 )}
                 {detail.origin === "rollback" && (
                   <p>
-                    Откат создаст новый выпуск с выбранной конфигурацией.
+                    Откат создаст новый выпуск с промптами и настройками выбранной версии.
                     Отменённые задания и удалённые данные не восстанавливаются
                   </p>
                 )}
                 <p className="muted">
-                  Будут применены все изменения выпуска. Новые операции
-                  используют новую конфигурацию, начатые сохраняют свой снимок.
-                  Режим инициативы отдельных групп и права доступа здесь не
-                  меняются
+                  Новые операции используют активированный выпуск, начатые
+                  продолжаются с прежней конфигурацией.
                 </p>
                 <label className="configuration-confirm">
                   <input
                     type="checkbox"
                     checked={confirmed}
-                    disabled={busy || detail.conflict || stale || dirty}
+                    disabled={busy || detail.conflict || stale || draftChanged || dirty}
                     onChange={(e) => setConfirmed(e.target.checked)}
                   />
                   Я просмотрел изменения этого выпуска
@@ -356,6 +580,8 @@ export function ConfigurationPanel({
                       dirty ||
                       detail.conflict ||
                       stale ||
+                      draftChanged ||
+                      (detail.origin === "obsidian" && !data.configured) ||
                       !confirmed ||
                       detail.state !== "pending"
                     }
@@ -374,7 +600,17 @@ export function ConfigurationPanel({
                   >
                     Отклонить черновик
                   </button>
+                  {detail.origin === "prompt_editor" && detail.state === "pending" && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void openPrompt(detail.id)}
+                    >
+                      {detail.conflict || stale ? "Открыть текст черновика" : "Вернуться к редактированию"}
+                    </button>
+                  )}
                   <button
+                    className="quiet"
                     type="button"
                     disabled={busy}
                     onClick={() => {
@@ -385,6 +621,7 @@ export function ConfigurationPanel({
                     Закрыть сравнение
                   </button>
                   <button
+                    className="quiet"
                     type="button"
                     disabled={busy}
                     onClick={() => void open(detail.id)}
@@ -406,7 +643,7 @@ export function ConfigurationPanel({
                 {r.version !== data.current.version && (
                   <button
                     type="button"
-                    disabled={busy || dirty}
+                    disabled={busy || dirty || !!editor}
                     onClick={() => void rollback(r.version)}
                   >
                     Подготовить откат к выпуску №{r.version}

@@ -162,6 +162,21 @@ class ConfigurationDecision(StrictModel):
     hash: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class PromptDraftUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expected_version: int = Field(ge=1)
+    fragments: dict[str, str]
+    draft_id: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
+    expected_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def draft_identity(self) -> "PromptDraftUpdate":
+        if (self.draft_id is None) != (self.expected_hash is None):
+            raise ValueError("Укажи идентификатор и хеш черновика вместе")
+        return self
+
+
 class ConfigurationRollback(StrictModel):
     version: int = Field(ge=1)
     expected_version: int = Field(ge=1)

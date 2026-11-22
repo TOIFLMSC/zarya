@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+import json
 import logging
 import sqlite3
 import time
@@ -43,6 +44,7 @@ from zarya.models import (
     ObsidianUndo,
     PilotPreferences,
     PilotReview,
+    PromptDraftUpdate,
     ReplayInput,
     SettingsSnapshot,
     SettingsUpdate,
@@ -52,7 +54,7 @@ from zarya.obsidian import ObsidianBridge
 from zarya.openai_adapter import ModelAdapter, OpenAIAdapter, SpeechAdapter
 from zarya.operations import Operations
 from zarya.photos import PhotoEngine
-from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
+from zarya.prompts import DEFAULT_PROMPTS, MAX_BYTES, PromptBundle, _unique
 from zarya.research import ResearchEngine
 from zarya.research_fetch import Fetcher
 from zarya.security import Sessions, bootstrap_token, hash_password, verify_password
@@ -60,6 +62,7 @@ from zarya.telegram_runtime import TelegramRuntime, Transport
 from zarya.telegram_store import TelegramStore
 
 COOKIE = "zarya_session"
+PROMPT_EDITOR_PATH = "/api/configuration/prompts"
 logger = logging.getLogger(__name__)
 
 
@@ -81,10 +84,16 @@ class LocalBoundary(BaseHTTPMiddleware):
             if request.headers.get("content-type", "").split(";")[0] != "application/json":
                 return JSONResponse({"detail": "Ожидается JSON"}, status_code=415)
             body = bytearray()
+            # JSON may encode a Unicode character as an escaped UTF-16 pair.
+            limit = (
+                MAX_BYTES * 3 + 4096
+                if request.method == "POST" and request.url.path == PROMPT_EDITOR_PATH
+                else 32768
+            )
             async for part in request.stream():
-                body.extend(part)
-                if len(body) > 32768:
+                if len(body) + len(part) > limit:
                     return JSONResponse({"detail": "Запрос слишком большой"}, status_code=413)
+                body.extend(part)
             request._body = bytes(body)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -349,8 +358,38 @@ def create_app(
         return await db.settings()
 
     @app.get("/api/configuration", dependencies=[Depends(authenticated)])
-    async def configuration_status(page: int = Query(default=0, ge=0, le=10000)) -> dict[str, Any]:
-        return await configuration_bridge.listing(page)
+    async def configuration_status(
+        page: int = Query(default=0, ge=0, le=10000),
+        draft_page: int = Query(default=0, ge=0, le=10000),
+    ) -> dict[str, Any]:
+        return await configuration_bridge.listing(page, draft_page)
+
+    @app.get(PROMPT_EDITOR_PATH, dependencies=[Depends(authenticated)])
+    async def configuration_prompts(
+        draft_id: str | None = Query(default=None, pattern=r"^[a-f0-9-]{36}$"),
+    ) -> dict[str, Any]:
+        try:
+            return await configuration_bridge.prompt_editor(draft_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from None
+
+    @app.post(PROMPT_EDITOR_PATH, dependencies=[Depends(authenticated)])
+    async def configuration_save_prompts(
+        request: Request, body: PromptDraftUpdate
+    ) -> dict[str, str]:
+        try:
+            json.loads(await request.body(), object_pairs_hook=_unique)
+        except ValueError:
+            raise HTTPException(422, "Ожидается JSON без повторяющихся ключей") from None
+        try:
+            draft_id, draft_hash = await configuration_bridge.save_prompt_draft(body)
+            return {"id": draft_id, "hash": draft_hash}
+        except ConflictError:
+            raise HTTPException(
+                409, "Активный выпуск или черновик изменился. Твой текст остался в редакторе"
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
 
     @app.get("/api/configuration/drafts/{draft_id}", dependencies=[Depends(authenticated)])
     async def configuration_details(draft_id: str) -> dict[str, Any]:
