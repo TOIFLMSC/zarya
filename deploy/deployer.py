@@ -293,7 +293,8 @@ def prune_local(state):
             shutil.rmtree(folder)
         sync(folder.parent)
         save(state, "idle", retired_run=None)
-    keep = {state["live"], state.get("old"), state.get("previous_release")}
+    installed = {state["live"], state.get("old"), state.get("previous_release")}
+    keep = installed.copy()
     releases = ROOT / "releases"
     # An old rollback journal cannot identify the previous healthy environment.
     # Pin only the directories present before our first staging attempt.
@@ -303,14 +304,19 @@ def prune_local(state):
             save(state, "idle", legacy_releases=legacy)
         keep.update(state["legacy_releases"])
     for folder in releases.iterdir():
-        if (
-            folder.name not in keep
-            and RELEASE_NAME.fullmatch(folder.name)
-            and not folder.is_symlink()
-            and folder.is_dir()
-            and folder.resolve() == folder
-        ):
+        if not RELEASE_NAME.fullmatch(folder.name) or not folder.is_dir():
+            continue
+        if folder.is_symlink() or folder.resolve() != folder:
+            continue
+        if folder.name not in keep:
             shutil.rmtree(folder)
+        elif folder.name in installed:
+            # Rollback runs the installed venv and serves bundle/web.
+            bundle = folder / "bundle"
+            if bundle.resolve() == bundle:
+                for wheel in bundle.glob("zarya-*.whl"):
+                    if wheel.is_file() and not wheel.is_symlink():
+                        wheel.unlink(missing_ok=True)
 
 
 def cycle():

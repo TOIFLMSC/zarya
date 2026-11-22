@@ -245,6 +245,54 @@ def test_idle_poll_bounds_successful_deploys_across_upgrade_and_failure(
     }
 
 
+def test_idle_poll_removes_only_install_wheels_from_retained_releases(
+    modules, tmp_path, monkeypatch
+):
+    cd, _, _ = modules
+    monkeypatch.setattr(cd, "ROOT", tmp_path)
+    monkeypatch.setattr(cd, "sync", lambda _: None)
+    monkeypatch.setattr(cd, "active", lambda: True)
+    old, live = "a" * 40 + "-old", "b" * 40 + "-live"
+    for release in (old, live):
+        executable, env = cd.runtime(release)
+        executable.parent.mkdir(parents=True)
+        executable.touch()
+        web = Path(env["ZARYA_WEB_DIR"])
+        web.mkdir(parents=True)
+        (web / "index.html").touch()
+        (web.parent / "zarya-0.1.0-py3-none-any.whl").touch()
+        (web.parent / "other-0.1.0-py3-none-any.whl").touch()
+        (web.parent / "SHA256SUMS").touch()
+
+    class GitHub:
+        def tip(self):
+            return live[:40]
+
+    monkeypatch.setattr(cd, "configured", GitHub)
+    cd.save({}, "idle", live=live, old=old, previous_release=old)
+    with monkeypatch.context() as patch:
+        original_unlink = Path.unlink
+
+        def interrupt(wheel, *args, **kwargs):
+            if wheel.match("zarya-*.whl") and wheel.parent.parent.name == live:
+                raise InterruptedError
+            original_unlink(wheel, *args, **kwargs)
+
+        patch.setattr(Path, "unlink", interrupt)
+        with pytest.raises(InterruptedError):
+            cd.cycle()
+        assert cd.load()["phase"] == "idle"
+    cd.cycle()
+    cd.cycle()
+    for release in (old, live):
+        executable, env = cd.runtime(release)
+        web = Path(env["ZARYA_WEB_DIR"])
+        assert not list(web.parent.glob("zarya-*.whl"))
+        assert (web.parent / "other-0.1.0-py3-none-any.whl").is_file()
+        assert executable.is_file() and (web / "index.html").is_file()
+        assert (web.parent / "SHA256SUMS").is_file()
+
+
 def test_upgrade_after_legacy_rollback_keeps_unidentified_previous(modules, tmp_path, monkeypatch):
     cd, _, _ = modules
     monkeypatch.setattr(cd, "ROOT", tmp_path)
