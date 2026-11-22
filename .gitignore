@@ -35,6 +35,7 @@ test-results/
 !/docs/disk-backup.md
 !/docs/codegraph.md
 !/docs/memory-retrieval.md
+!/docs/task-state.md
 
 # Defense in depth: runtime exports must never be committed from other folders.
 *.sqlite

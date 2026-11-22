@@ -45,6 +45,7 @@ DOCS = {
     "disk-backup.md",
     "codegraph.md",
     "memory-retrieval.md",
+    "task-state.md",
 }
 PULL_CD_FILES = {
     "VERSION",

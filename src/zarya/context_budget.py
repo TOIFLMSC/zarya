@@ -140,6 +140,7 @@ def inspect(request: dict[str, Any], *, expected_images: int = 0) -> dict[str, A
                     "current_message": "current_message",
                     "current_messages": "current_messages",
                     "topic_context": "topic_context",
+                    "task_state": "task_state",
                     "memory": "memory",
                     "selected_material": "material",
                     "research": "research",

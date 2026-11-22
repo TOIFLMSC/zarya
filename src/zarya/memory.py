@@ -68,14 +68,17 @@ def extraction_schema() -> dict[str, Any]:
 class MemoryEngine:
     def __init__(self, store: TelegramStore, adapter: ModelAdapter | None, data_dir: Path):
         from zarya.participant_summaries import SummaryEngine
+        from zarya.task_state import TaskStateEngine
 
         self.store, self.db, self.adapter, self.data_dir = store, store.db, adapter, data_dir
         self.summaries = SummaryEngine(store, adapter)
+        self.task_states = TaskStateEngine(store, adapter)
         self.last_cleanup = 0.0
         self.semantic_index = LocalIndex(self.db)
 
     async def recover(self, bot: str) -> None:
         await self.summaries.recover(bot)
+        await self.task_states.recover(bot)
         async with self.store.gate, self.db.transaction() as conn:
             await conn.execute(
                 "UPDATE model_calls SET state='unknown',error_code='interrupted',finished_at=? "
@@ -1085,6 +1088,9 @@ class MemoryEngine:
                 "UPDATE events SET payload='{}' WHERE bot_id=? AND received_at<?",
                 (bot, cutoff_stamp),
             )
+            from zarya.task_state import expire as expire_tasks
+
+            await expire_tasks(conn, bot, cutoff)
             from zarya.research_logic import purge as purge_research
             from zarya.source_material import purge as purge_material
 

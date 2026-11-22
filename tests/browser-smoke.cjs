@@ -201,6 +201,11 @@ async function openSettingsSection(page, title) {
         text: "Встречу перенесли на 20:00", forwarded: false, received_at: 1800000000,
       },
     ];
+    body.snapshot.task_state = {
+      fields: [
+        { kind: "constraint", message_id: 1002, quote: "Документов для поездки нет" },
+      ],
+    };
     await route.fulfill({ response, json: body });
   });
   await page
@@ -216,6 +221,12 @@ async function openSettingsSection(page, title) {
   await page.getByText(/Текущее сообщение входит в предел/).waitFor();
   await page.getByText("Хронология топика", { exact: true }).click();
   await page.getByText("Встречу перенесли на 20:00", { exact: true }).waitFor();
+  const taskState = page.locator("details").filter({
+    has: page.locator("summary").filter({ hasText: /^Состояние задачи$/ }),
+  }).last();
+  await taskState.locator("summary").click();
+  await taskState.getByText("Ограничение · сообщение 1002", { exact: true }).waitFor();
+  await taskState.getByText("Документов для поездки нет", { exact: true }).waitFor();
   const budgetSummary = page.getByText(/^Вместимость контекста ·/);
   await budgetSummary.click();
   await page.getByText("Состав входа", { exact: true }).click();

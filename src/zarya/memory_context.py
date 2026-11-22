@@ -235,6 +235,11 @@ async def valid_snapshot(
             return await valid_snapshot(conn, bot, snapshot, depth=depth, read=read)
     if depth > 8 or snapshot.get("invalidated"):
         return False
+    if snapshot.get("task_state"):
+        from zarya.task_state import validate_snapshot as task_valid
+
+        if not await task_valid(conn, bot, snapshot):
+            return False
     from zarya.participant_provenance import valid as participant_valid
 
     if not await participant_valid(conn, bot, snapshot, depth=depth, read=read):
