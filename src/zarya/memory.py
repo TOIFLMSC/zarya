@@ -10,6 +10,7 @@ from typing import Any, Literal
 import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from zarya import message_batches
 from zarya.database import ConflictError
 from zarya.memory_context import (
     dependencies,
@@ -18,7 +19,7 @@ from zarya.memory_context import (
     valid_dependencies,
     valid_snapshot,
 )
-from zarya.memory_e5 import LocalIndex, Ranking, query_text
+from zarya.memory_e5 import LocalIndex, Ranking, query_identity
 from zarya.memory_logic import (
     RETENTION,
     SHAREABLE,
@@ -596,10 +597,10 @@ class MemoryEngine:
             self.semantic_index.deactivate()
             return None, None
         self.semantic_index.schedule(bot)
-        job = await self.db.one(pending_sql, (bot,))
+        job = await self.db.one(pending_sql, (bot, time.time()))
         if job is None:
             return None, None
-        _, payload_json, grant, update_json, *_ = job
+        job_id, payload_json, grant, update_json, *_ = job
         payload = json.loads(payload_json)
         access = await self.db.one(
             "SELECT 1 FROM telegram_access WHERE bot_id=? AND scope=? AND subject_id=? "
@@ -611,8 +612,12 @@ class MemoryEngine:
             return None, None
         update = json.loads(update_json)
         message = update.get("message") or update.get("edited_message") or {}
-        query = query_text(message)
-        return (snapshot.version, job, query), await self.semantic_index.rank(bot, query)
+        async with self.db.read_lock:
+            members = await message_batches.current_members(
+                self.db.reader, job_id, bot, payload["chat_id"], grant
+            )
+        identity = query_identity(message, members)
+        return (snapshot.version, job, identity), await self.semantic_index.rank(bot, identity[0])
 
     async def context(
         self,

@@ -312,8 +312,16 @@ export function DialoguePanel({
                         сообщение {detail.snapshot.incoming.message_id}
                       </p>
                       <p className="dialogue-text">
-                        {detail.snapshot.incoming.text}
+                        {detail.snapshot.current_messages
+                          ? `${detail.snapshot.current_messages.length} сообщений в серии`
+                          : detail.snapshot.incoming.text}
                       </p>
+                      {detail.snapshot.current_messages?.map((m) => (
+                        <div className="context-message" key={m.event_id}>
+                          <small>Сообщение {m.message_id}</small>
+                          <p className="dialogue-text">{m.text}</p>
+                        </div>
+                      ))}
                     </section>
                     <section>
                       <h3>02 · Контекст</h3>
@@ -640,6 +648,9 @@ export function DialoguePanel({
                             {detail.error === "unknown_source"
                               ? "Служебное уведомление"
                               : `Часть ${part.index + 1}`} ·{" "}
+                            {detail.snapshot.current_messages && part.reply_id
+                              ? `ответ на ${part.reply_id} · `
+                              : ""}
                             {states[part.state] ?? part.state}
                             {part.error ? ` · ${part.error}` : ""}
                           </small>

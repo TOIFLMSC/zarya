@@ -841,6 +841,7 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                     summary={`${draft.dialogue_enabled ? "Включены" : "Выключены"} · ${modelName(draft.model)} · ${effortName(draft.reasoning)} глубина`}
                     changed={sectionChanged(
                       "dialogue_enabled",
+                      "message_batch_chat_id",
                       "model",
                       "reasoning",
                       "max_output_tokens",
@@ -871,6 +872,21 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                           </option>
                           <option value="off">Выключены</option>
                         </select>
+                      </label>
+                      <label>
+                        Серии сообщений · ID тестовой группы
+                        <input
+                          type="text"
+                          pattern="-[1-9][0-9]{0,15}"
+                          value={draft.message_batch_chat_id}
+                          onChange={(e) => change("message_batch_chat_id", e.target.value.trim())}
+                        />
+                        <small>
+                          Пустое поле выключает пилот. В одной разрешённой
+                          группе Заря собирает до пяти коротких текстовых
+                          реплик одного автора в той же теме. Поиск, реплаи и
+                          медиа обрабатываются по отдельности.
+                        </small>
                       </label>
                       <label>
                         Модель

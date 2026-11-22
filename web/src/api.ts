@@ -16,6 +16,7 @@ export type Settings = {
   memory_retrieval: "legacy" | "shadow" | "graph" | "e5";
   participant_context_messages: number;
   topic_context_chat_id: string;
+  message_batch_chat_id: string;
   participant_summaries_enabled: boolean;
   participant_summary_prompt: string;
   research_enabled: boolean;
@@ -209,6 +210,7 @@ export type DialogDetail = DialogItem & {
       forwarded: boolean;
       received_at: number;
     }[];
+    current_messages?: { message_id: number; event_id: number; text: string }[];
     participant_context?: {
       algorithm: string;
       limit: number;
@@ -279,6 +281,7 @@ export type DialogDetail = DialogItem & {
     error: string | null;
   } | null;
   parts: {
+    reply_id?: number | null;
     index: number;
     state: string;
     text: string;

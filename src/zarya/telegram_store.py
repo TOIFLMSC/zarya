@@ -8,7 +8,7 @@ from typing import Any
 
 import aiosqlite
 
-from zarya import timings
+from zarya import message_batches, timings
 from zarya.avatar_logic import AVATAR_WAIT
 from zarya.avatar_logic import purge as purge_avatars
 from zarya.avatar_logic import valid as avatar_valid
@@ -421,9 +421,14 @@ class TelegramStore:
                     settings = Settings.model_validate_json(settings_row[0])
                     trigger = direct_trigger(message, bot_id, username, settings.display_name)
                     edited = "edited_message" in update
+                    batch_member = (
+                        await message_batches.member(conn, bot_id, subject, access[1], message)
+                        if edited
+                        else None
+                    )
                     replacement = (
                         await pending_edit(conn, bot_id, subject, access[1], message)
-                        if edited
+                        if edited and not batch_member
                         else None
                     )
                     if edited:
@@ -442,6 +447,17 @@ class TelegramStore:
                         "access_version=excluded.access_version",
                         (bot_id, subject, message["message_id"], event_id, access[1]),
                     )
+                    kept_batch_edit = False
+                    if batch_member and batch_member[2]:
+                        leader = batch_member[0]
+                        kept_batch_edit = message_batches.eligible(message, settings)
+                        # Move the pending member before memory erases the old event.
+                        if kept_batch_edit:
+                            await message_batches.replace(
+                                conn, leader, message["message_id"], event_id
+                            )
+                        else:
+                            await message_batches.remove(conn, leader, message["message_id"])
                     sender_id = str(sender.get("id", ""))
                     thread_id = topic_id(message)
                     await admit_participant(
@@ -500,7 +516,7 @@ class TelegramStore:
                             "UPDATE jobs SET state='cancelled' WHERE id=?", (replacement[0],)
                         )
                     # Started dialogue calls are never repeated after an edit.
-                    if edited or (
+                    if (edited and not batch_member) or (
                         not album_job
                         and new_photo_job
                         and trigger in {"private", "name", "mention", "reply", "continuation"}
@@ -509,7 +525,12 @@ class TelegramStore:
                             "UPDATE jobs SET state='cancelled' WHERE id IN (SELECT job_id FROM "
                             "dialogue_runs WHERE bot_id=? AND chat_id=? AND sender_id=? "
                             "AND COALESCE(thread_id,0)=? "
-                            + ("AND message_id=? " if edited else "")
+                            + (
+                                "AND message_id=? "
+                                if edited
+                                else "AND NOT EXISTS (SELECT 1 FROM text_batches b "
+                                "WHERE b.job_id=dialogue_runs.job_id) "
+                            )
                             + ") AND state IN ('pending','running')",
                             (bot_id, subject, sender_id, thread_id or 0)
                             + ((message["message_id"],) if edited else ()),
@@ -518,7 +539,12 @@ class TelegramStore:
                             "UPDATE outbox SET state='cancelled' WHERE state='pending' AND job_id "
                             "IN (SELECT job_id FROM dialogue_runs WHERE bot_id=? AND chat_id=? "
                             "AND sender_id=? AND COALESCE(thread_id,0)=? "
-                            + ("AND message_id=? " if edited else "")
+                            + (
+                                "AND message_id=? "
+                                if edited
+                                else "AND NOT EXISTS (SELECT 1 FROM text_batches b "
+                                "WHERE b.job_id=dialogue_runs.job_id) "
+                            )
                             + ")",
                             (bot_id, subject, sender_id, thread_id or 0)
                             + ((message["message_id"],) if edited else ()),
@@ -555,6 +581,14 @@ class TelegramStore:
                     }
                     if service_text is not None:
                         payload["service_text"] = service_text
+                    if batch_member:
+                        _, old_trigger, open_batch = batch_member
+                        if not open_batch or kept_batch_edit or not message.get("text"):
+                            continue
+                        payload["trigger"] = (
+                            old_trigger if old_trigger in message_batches.DIRECT else "continuation"
+                        )
+                        payload["keep_addressed"] = True
                     if batch:
                         payload["photo_batch_id"] = batch
                         if album_job:
@@ -570,6 +604,19 @@ class TelegramStore:
                             continue
                         if not new_photo_job:
                             continue
+                    if (
+                        not batch
+                        and not edited
+                        and scope == "group"
+                        and subject == settings.message_batch_chat_id
+                        and settings.dialogue_enabled
+                        and not payload["service_reply"]
+                        and message_batches.eligible(message, settings)
+                        and await message_batches.collect(
+                            conn, bot_id, payload, access[1], event_id, message["date"]
+                        )
+                    ):
+                        continue
                     job_cursor = await conn.execute(
                         "INSERT INTO "
                         "jobs(kind,event_id,state,payload,created_at,access_version) "
@@ -669,9 +716,11 @@ class TelegramStore:
                 (item_id,),
             )
             local_quote = False
+            batch_reply = False
             if memory_run:
                 snapshot = json.loads(memory_run[0])
                 local_quote = bool(snapshot.get("verbatim_quote"))
+                batch_reply = bool(snapshot.get("current_messages"))
                 if snapshot.get("behavior"):
                     from zarya.behavior import valid
 
@@ -786,7 +835,7 @@ class TelegramStore:
                 (bot_id, chat_id, time.time()),
             )
             outgoing = json.loads(document)
-            if part_index > 0:
+            if part_index > 0 and not batch_reply:
                 outgoing["reply_id"] = None
             measured = {"delivery_check_ms": timings.elapsed(check_start)}
             wait = self.clock.since(datetime.fromisoformat(created_at).timestamp(), claim_at)

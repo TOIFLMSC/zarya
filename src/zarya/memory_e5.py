@@ -26,8 +26,16 @@ Ref = tuple[str, int, int, str]
 Ranking = tuple[Ref, ...]
 
 
-def query_text(message: dict[str, Any]) -> str:
-    return str(message.get("text") or message.get("caption") or "")[:4000]
+def query_identity(
+    message: dict[str, Any], members: list[dict[str, Any]]
+) -> tuple[tuple[str, ...], tuple[tuple[int, int], ...]]:
+    if len(members) > 1:
+        return (
+            tuple(m["text"][:4000] for m in members),
+            tuple((m["message_id"], m["event_id"]) for m in members),
+        )
+    text = str(message.get("text") or message.get("caption") or "")[:4000]
+    return (text,), ()
 
 
 def digest(path: Path) -> str:
@@ -123,8 +131,8 @@ class LocalIndex:
             self.next_refresh = time() + 5
             self.worker = asyncio.create_task(self.refresh(bot), name="memory-e5-index")
 
-    async def rank(self, bot: str, query: str) -> Ranking | None:
-        if not query.strip():
+    async def rank(self, bot: str, queries: tuple[str, ...]) -> Ranking | None:
+        if not any(text.strip() for text in queries):
             return None
         current, encoder = self.index, self.encoder
         if current is None or current[0] != bot or encoder is None:
@@ -133,14 +141,16 @@ class LocalIndex:
         if not refs:
             return ()
         try:
-            return await asyncio.to_thread(self.order, encoder, refs, matrix, query[:4000])
+            return await asyncio.to_thread(self.order, encoder, refs, matrix, queries)
         except Exception:
             logger.warning("Local E5 query failed.")
             return None
 
     @staticmethod
-    def order(encoder: Encoder, refs: Ranking, matrix: Any, text: str) -> Ranking:
-        scores = matrix @ encoder.encode(["query: " + text])[0]
+    def order(encoder: Encoder, refs: Ranking, matrix: Any, queries: tuple[str, ...]) -> Ranking:
+        encoded = encoder.encode(["query: " + text for text in queries])
+        # Score every current question within its own token budget.
+        scores = matrix @ encoded[0] if len(queries) == 1 else (matrix @ encoded.T).max(axis=1)
         return tuple(refs[i] for i in encoder.np.argsort(-scores, kind="stable"))
 
     async def refresh(self, bot: str) -> None:

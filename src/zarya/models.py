@@ -29,6 +29,7 @@ class Settings(StrictModel):
     memory_retrieval: Literal["legacy", "shadow", "graph", "e5"] = "shadow"
     participant_context_messages: int = Field(default=20, ge=1, le=100, strict=True)
     topic_context_chat_id: str = Field(default="", pattern=r"^(|-[1-9][0-9]{0,15})$")
+    message_batch_chat_id: str = Field(default="", pattern=r"^(|-[1-9][0-9]{0,15})$")
     participant_summaries_enabled: bool = True
     participant_summary_prompt: str = Field(
         default=(
