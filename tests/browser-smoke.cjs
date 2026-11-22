@@ -204,6 +204,7 @@ async function openSettingsSection(page, title) {
     body.snapshot.task_state = {
       fields: [
         { kind: "constraint", message_id: 1002, quote: "Документов для поездки нет" },
+        { kind: "status", message_id: 1003, quote: "Гостиницу забронировали" },
       ],
     };
     await route.fulfill({ response, json: body });
@@ -227,6 +228,8 @@ async function openSettingsSection(page, title) {
   await taskState.locator("summary").click();
   await taskState.getByText("Ограничение · сообщение 1002", { exact: true }).waitFor();
   await taskState.getByText("Документов для поездки нет", { exact: true }).waitFor();
+  await taskState.getByText("Текущий статус · сообщение 1003", { exact: true }).waitFor();
+  await taskState.getByText("Гостиницу забронировали", { exact: true }).waitFor();
   const budgetSummary = page.getByText(/^Вместимость контекста ·/);
   await budgetSummary.click();
   await page.getByText("Состав входа", { exact: true }).click();

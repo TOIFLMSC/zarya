@@ -417,3 +417,32 @@ async def test_start_in_reply_to_an_untracked_message_and_resume_via_username(tm
         data = json.loads(model.calls[-1]["input"])["task_state"]
         assert data["for_message_ids"] == [4]
         assert data["fields"][0]["quote"] == GOAL
+
+
+async def test_confirmed_status_survives_after_the_correction_leaves_recent_context(tmp_path):
+    async with store_at(tmp_path) as store:
+        await pilot(store)
+        await ingest(store, post(2, ANCHOR), post(3, NO_PAPERS, reply=2))
+        model = FakeModel(extraction(("goal", 2, GOAL), ("constraint", 3, NO_PAPERS)))
+        worker = TaskStateEngine(store, model)
+        await background(worker)
+
+        found = "Документы нашли, комплект на руках."
+        await ingest(store, post(4, "Заря, поправка. " + found, reply=3))
+        model.result = extraction(("goal", 2, GOAL), ("status", 4, found))
+        await background(worker)
+
+        await ingest(store, post(5, "Маршрут ещё обсуждаем.", reply=2))
+        saved = await background(worker)
+        assert any(f["kind"] == "status" and f["quote"] == found for f in saved["previous"])
+        await ingest(store, *(post(mid, "Буфер") for mid in range(6, 16)), post(16, REPLY))
+        dialogue_model = FakeModel(ModelResult(text="План тот же, документы на руках."))
+        await drain(DialogueEngine(store, dialogue_model))
+        request = json.loads(dialogue_model.calls[-1]["input"])
+        assert all(m.get("message_id") not in {2, 3, 4} for m in request["recent_chat"])
+        assert [
+            (f["kind"], f["message_id"], f["quote"]) for f in request["task_state"]["fields"]
+        ] == [
+            ("goal", 2, GOAL),
+            ("status", 4, found),
+        ]

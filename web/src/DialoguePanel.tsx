@@ -46,6 +46,7 @@ const retrievalReasons: Record<string, string> = {
 const taskFields: Record<string, string> = {
   goal: "Цель",
   constraint: "Ограничение",
+  status: "Текущий статус",
   decision: "Решение",
   attempt: "Опробованный шаг",
   question: "Открытый вопрос",
