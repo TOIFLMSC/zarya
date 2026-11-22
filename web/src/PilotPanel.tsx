@@ -332,7 +332,7 @@ export function PilotPanel({
                     : row.label || "Не определено"}
                 </strong>
                 <span>
-                  {row.calls} вызовов · {money(row.known_cost_usd)} · без
+                  Вызовов: {row.calls} · {money(row.known_cost_usd)} · без
                   оценки: {row.unknown_cost_calls} · среднее:{" "}
                   {duration(row.avg_latency_ms)}
                 </span>
@@ -513,7 +513,7 @@ export function PilotPanel({
             )}
           </section>
           <section className="card">
-            <h2>Приёмка пилота</h2>
+            <h2>Проверки качества</h2>
             <p className="muted">
               Общие оценки владельца, независимо от фильтра чатов. Отметь чат,
               модель и пример без копирования личной переписки. Для сравнения
@@ -600,17 +600,16 @@ export function PilotPanel({
           <section className="card">
             <h2>Резервная копия</h2>
             <p>
-              Копирование выполняется после полного завершения процесса Зари.
-              Проверка восстановления создаёт отдельную копию в карантине и не
-              запускает бота.
+              На VPS копиями управляет системная служба резервирования.
+              Проверка восстановления создаёт отдельную копию в карантине.
             </p>
             <details>
-              <summary>Команды локальной проверки</summary>
-              <pre className="research-text">{`.venv/Scripts/python.exe -m zarya.backup backup data backups/pilot-01\n.venv/Scripts/python.exe -m zarya.backup verify backups/pilot-01\n.venv/Scripts/python.exe -m zarya.backup restore backups/pilot-01 restore-checks/pilot-01`}</pre>
+              <summary>Ручная проверка восстановления</summary>
+              <pre className="research-text">{`uv run --frozen python -m zarya.backup backup data backups/pilot-01\nuv run --frozen python -m zarya.backup verify backups/pilot-01\nuv run --frozen python -m zarya.backup restore backups/pilot-01 restore-checks/pilot-01`}</pre>
               <p>
-                Каталоги назначения должны быть новыми. Ключи API не копируются.
+                Команды для остановленной отдельной установки. Каталоги назначения должны быть новыми. Ключи API не копируются.
                 Внутри остаются приватные данные и хеш пароля администратора.
-                Инструкция: docs/operations.md.
+                Ручная проверка описана в docs/operations.md, серверное резервирование — в docs/disk-backup.md.
               </p>
             </details>
           </section>

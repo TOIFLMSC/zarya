@@ -210,8 +210,8 @@ export function ConfigurationPanel({
       {data && (
         <>
           <p>
-            <strong>Активный выпуск №{data.current.version}</strong> · настройки
-            v{data.current.version} · {date(data.current.created_at)}
+            <strong>Активный выпуск №{data.current.version}</strong> ·{" "}
+            {date(data.current.created_at)}
           </p>
           <details>
             <summary>Технические сведения</summary>
@@ -223,8 +223,7 @@ export function ConfigurationPanel({
             </p>
           ) : (
             <p className="muted">
-              Мост конфигурации не настроен. Подключи локальный
-              obsidian.local.json
+              Папка Obsidian для конфигурации не подключена на стороне Зари.
             </p>
           )}
           {data.last_scan && (

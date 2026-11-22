@@ -301,6 +301,7 @@ export function MemoryPanel({
           <p className="muted">Chat ID: {profile.chat_id}</p>
           <p>
             <a
+              className="memory-export-link"
               href={`/api/memory/chats/${encodeURIComponent(profile.chat_id)}/graph/vault`}
             >
               Скачать граф для Obsidian (.zip)
