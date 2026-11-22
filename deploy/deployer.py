@@ -23,6 +23,7 @@ LEGACY = Path("/opt/zarya")
 TOOLS = Path(__file__).resolve().parent
 UNIT = "zarya.service"
 HEALTH = "http://127.0.0.1:8787/healthz"
+RELEASE_NAME = re.compile(r"[0-9a-f]{40}-[a-zA-Z0-9_-]+")
 
 
 def sync(path):
@@ -69,7 +70,7 @@ def runtime(release):
             ZARYA_RELEASE_REVISION="legacy",
         )
         return LEGACY / ".venv/bin/python", env
-    if not re.fullmatch(r"[0-9a-f]{40}-[a-zA-Z0-9_-]+", release):
+    if not RELEASE_NAME.fullmatch(release):
         raise ValueError("invalid installed release")
     directory = ROOT / "releases" / release
     env.pop("PYTHONPATH", None)
@@ -197,8 +198,17 @@ def rollback(state):
 
 def finish(state):
     if healthy(state["live"]):
-        (ROOT / "runs" / state["run"] / "candidate.sqlite3").unlink(missing_ok=True)
-        save(state, "idle", rejected=None)
+        run = ROOT / "runs" / state["run"]
+        for name in ("candidate.sqlite3", "candidate.sqlite3-shm", "candidate.sqlite3-wal"):
+            (run / name).unlink(missing_ok=True)
+        save(
+            state,
+            "idle",
+            rejected=None,
+            previous_release=state["old"],
+            successful_run=state["run"],
+            retired_run=state.get("successful_run"),
+        )
         return
     try:
         save(state, "blocked")
@@ -208,6 +218,10 @@ def finish(state):
 
 
 def deploy(state, target, run):
+    # Older journals only identify a successful run while its target is still live.
+    if state["live"] and state.get("target") == state["live"][:40] and not state.get("rejected"):
+        state.setdefault("successful_run", state.get("run"))
+        state.setdefault("previous_release", state.get("old"))
     save(state, "stopping", old=state["live"], target=target[:40], run=run.name)
     try:
         systemctl("stop")
@@ -261,6 +275,38 @@ def in_flight():
         )
 
 
+def prune_local(state):
+    retired = state.get("retired_run")
+    if retired:
+        if not RELEASE_NAME.fullmatch(retired) or retired in {
+            state.get("run"),
+            state.get("successful_run"),
+        }:
+            raise ValueError("invalid retired deployment run")
+        folder = ROOT / "runs" / retired
+        if folder.is_symlink():
+            raise ValueError("unexpected retired run symlink")
+        if folder.exists():
+            if folder.resolve() != folder or not folder.is_dir():
+                raise ValueError("invalid retired run directory")
+            shutil.rmtree(folder)
+        sync(folder.parent)
+        save(state, "idle", retired_run=None)
+    keep = {state["live"], state.get("old"), state.get("previous_release")}
+    # An old journal after a failed attempt cannot identify the prior healthy release.
+    if state["live"] and "previous_release" not in state and state.get("old") == state["live"]:
+        return
+    for folder in (ROOT / "releases").iterdir():
+        if (
+            folder.name not in keep
+            and RELEASE_NAME.fullmatch(folder.name)
+            and not folder.is_symlink()
+            and folder.is_dir()
+            and folder.resolve() == folder
+        ):
+            shutil.rmtree(folder)
+
+
 def cycle():
     state = load()
     phase = state["phase"]
@@ -277,18 +323,11 @@ def cycle():
         if phase == "blocked" and active():
             systemctl("stop")
         raise RuntimeError("deployment held; inspect state and journal")
-    if not active() or state.get("disk_retry_at", 0) > time.time():
+    if not active():
         return
-    # Retain both sides of the last deployment; age out only expendable code/venvs.
-    for folder in (ROOT / "releases").iterdir():
-        if (
-            folder.name not in {state["live"], state.get("old")}
-            and re.fullmatch(r"[a-f0-9]{40}-[a-zA-Z0-9_-]+", folder.name)
-            and not folder.is_symlink()
-            and folder.is_dir()
-            and time.time() - folder.stat().st_mtime > 86400
-        ):
-            shutil.rmtree(folder)
+    prune_local(state)
+    if state.get("disk_retry_at", 0) > time.time():
+        return
     github = configured()
     sha = github.tip()
     if sha in {(state["live"] or "")[:40], state.get("rejected")}:
