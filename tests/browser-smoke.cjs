@@ -1129,11 +1129,82 @@ async function openSettingsSection(page, title) {
     await page.getByLabel("Как к тебе обращаться").inputValue(),
     "После сохранения",
   );
+  const prompts = page.locator(".configuration-panel");
+  const promptText = prompts.getByRole("textbox", { name: /^Текст промпта/ });
+  const promptSelect = prompts.getByLabel("Фрагмент", { exact: true });
+  const readPrompts = async () => (await context.request.get(`${origin}/api/configuration/prompts`)).json();
+  const originalPackage = await readPrompts();
+  const testIdentity = "  Синтетическая роль для браузерной проверки\n" + "д".repeat(160);
+  const testMemory = "\nСинтетическая инструкция памяти.\n ";
+  await prompts.getByRole("button", { name: "Редактировать промпты" }).click();
+  await promptText.fill(testIdentity);
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await prompts.getByRole("button", { name: "Закрыть редактор" }).click();
+  assert.equal(await promptText.inputValue(), testIdentity);
+  await promptSelect.selectOption("memory.extract");
+  await promptText.fill(testMemory);
+  await promptSelect.selectOption("dialogue.identity");
+  assert.equal(await promptText.inputValue(), testIdentity);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await prompts.locator(".prompt-editor").screenshot({ path: path.join(output, "prompt-editor-mobile.png") });
+  await prompts.getByRole("button", { name: "Сохранить черновик" }).click();
+  await prompts.getByText(/^Черновик сохранён/).waitFor();
+  assert.deepEqual(await readPrompts(), originalPackage);
+  await page.reload();
+  await navigate(page, "Настройки");
+  await prompts.getByRole("button", { name: "Продолжить черновик" }).click();
+  assert.equal(await promptText.inputValue(), testIdentity);
+  await promptSelect.selectOption("memory.extract");
+  assert.equal(await promptText.inputValue(), testMemory);
+  await prompts.locator(".prompt-editor").getByRole("button", { name: "Сравнить изменения" }).click();
+  const comparison = prompts.locator(".configuration-comparison:not(.prompt-editor)");
+  const changedFragment = comparison.getByLabel("Изменённый фрагмент");
+  await changedFragment.selectOption("Инструкции/dialogue.identity.md");
+  assert.deepEqual(
+    await comparison.locator(".configuration-text").allTextContents(),
+    [originalPackage.fragments["dialogue.identity"], testIdentity],
+  );
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await comparison.screenshot({ path: path.join(output, "prompt-compare-mobile.png") });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await comparison.screenshot({ path: path.join(output, "prompt-compare-desktop.png") });
+  const activate = comparison.getByRole("button", { name: "Активировать выпуск", exact: true });
+  assert.equal(await activate.isEnabled(), false);
+  await comparison.getByRole("checkbox").check();
+  await activate.click();
+  await prompts.getByText(`Выпуск №${originalPackage.version + 1} активирован`).waitFor();
+  const activePackage = await readPrompts();
+  assert.equal(activePackage.version, originalPackage.version + 1);
+  assert.equal(activePackage.fragments["dialogue.identity"], testIdentity);
+  assert.equal(activePackage.fragments["memory.extract"], testMemory);
+  await prompts.getByText(/^История выпусков/).click();
+  await prompts.getByRole("button", { name: `Подготовить откат к выпуску №${originalPackage.version}` }).click();
+  await comparison.getByRole("checkbox").check();
+  await comparison.getByRole("button", { name: "Активировать откат" }).click();
+  await prompts.getByText(`Выпуск №${originalPackage.version + 2} активирован`).waitFor();
+  assert.deepEqual(await readPrompts(), { ...originalPackage, version: originalPackage.version + 2 });
+
+  await prompts.getByRole("button", { name: "Редактировать промпты" }).click();
+  await promptText.fill("Черновик на старой основе");
+  await prompts.getByRole("button", { name: "Сохранить черновик" }).click();
+  await prompts.getByText(/^Черновик сохранён/).waitFor();
+  const session = await (await context.request.get(`${origin}/api/session`)).json();
+  const settings = await (await context.request.get(`${origin}/api/settings`)).json();
+  const updated = await context.request.put(`${origin}/api/settings`, {
+    headers: { Origin: origin, "X-CSRF-Token": session.csrf },
+    data: { expected_version: settings.version, settings: { ...settings.settings, owner_name: "Новый выпуск" } },
+  });
+  assert.equal(updated.ok(), true);
+  await prompts.locator(".prompt-editor").getByRole("button", { name: "Сравнить изменения" }).click();
+  await comparison.getByText(/^Активный выпуск изменился/).waitFor();
+  assert.equal(await activate.isEnabled(), false);
+  assert.equal(await comparison.locator(".configuration-text").count(), 3);
+  assert.equal(await comparison.getByText("Черновик на старой основе").isVisible(), true);
   await page.getByRole("button", { name: "Выйти ↗" }).click();
   await page.getByRole("heading", { name: "Вход в панель" }).waitFor();
   assert.deepEqual(errors, []);
   console.log(
-    "Browser smoke passed: setup, access, dialogue/replay, settings/conflict, photos, research, media, memory, behavior/mood/reset/reaction/shadow/chance/polling/draft/stop/conflict/mobile360, pilot/filters/review/draft/threshold/mobile360, restart/login/logout. Telegram and OpenAI adapters are synthetic; zero external calls.",
+    "Browser smoke passed: setup, access, dialogue/replay, settings/conflict, photos, research, media, memory, behavior/mood/reset/reaction/shadow/chance/polling/draft/stop/conflict/mobile360, pilot/filters/review/draft/threshold/mobile360, restart/login/logout, prompt editor/draft/activation/rollback/conflict/mobile360. Telegram and OpenAI adapters are synthetic; zero external calls.",
   );
 })()
   .catch((error) => {

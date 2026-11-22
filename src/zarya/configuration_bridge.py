@@ -11,7 +11,7 @@ from uuid import uuid4
 from zarya import obsidian_fs as fs
 from zarya.configuration import canonical, digest, document, validate
 from zarya.database import ConflictError
-from zarya.models import Settings, without_retired_settings
+from zarya.models import PromptDraftUpdate, Settings, without_retired_settings
 from zarya.prompts import DEFAULT_PROMPTS, MAX_BYTES, _unique
 from zarya.telegram_store import TelegramStore, row
 
@@ -154,7 +154,7 @@ class ConfigurationBridge:
             + "\n".join(links)
             + "\n\nМеняй только блоки в управляемых заметках. JSON настроек сохран"
             "яет все поля и типы. "
-            "Через две проверки открой Web UI → Настройки → Конфигурация · Obsidian, "
+            "Через две проверки открой Web UI → Настройки → Промпты Зари, "
             "просмотри изменения и активируй выпуск. До этого Заря использует прежнюю версию. "
             "Откат создаёт новый выпуск и не восстанавливает отменённые задания.\n\n"
             "Ключи, доступ к чатам, настроение и режим инициативы отдельных гр"
@@ -364,12 +364,20 @@ class ConfigurationBridge:
                     )
             self.last_scan = stamp()
 
-    async def listing(self, page: int = 0) -> dict[str, Any]:
+    async def listing(self, page: int = 0, draft_page: int = 0) -> dict[str, Any]:
         active = await self.current()
         drafts = await self.db.all(
-            "SELECT id,base_version,document,hash,origin,created_at FROM confi"
-            "guration_drafts WHERE state='pending' ORDER BY created_at DESC LI"
-            "MIT 10"
+            "SELECT id,base_version,hash,origin,created_at FROM configuration_drafts "
+            "WHERE state='pending' ORDER BY created_at DESC,id DESC LIMIT 10 OFFSET ?",
+            (draft_page * 10,),
+        )
+        draft_total = await self.db.one(
+            "SELECT count(*) FROM configuration_drafts WHERE state='pending'"
+        )
+        prompt_draft = await self.db.one(
+            "SELECT id FROM configuration_drafts WHERE origin='prompt_editor' AND state='pending' "
+            "AND base_version=? ORDER BY created_at DESC,id DESC LIMIT 1",
+            (active["version"],),
         )
         history = await self.db.all(
             "SELECT version,hash,created_at,origin FROM configuration_releases"
@@ -384,13 +392,15 @@ class ConfigurationBridge:
             "scanning": self.lock.locked(),
             "last_scan": self.last_scan,
             "current": {k: v for k, v in active.items() if k != "document"},
+            "draft_total": draft_total[0],
+            "prompt_draft_id": prompt_draft[0] if prompt_draft else None,
             "drafts": [
                 {
                     "id": d[0],
                     "base_version": d[1],
-                    "hash": d[3],
-                    "origin": d[4],
-                    "created_at": d[5],
+                    "hash": d[2],
+                    "origin": d[3],
+                    "created_at": d[4],
                     "conflict": d[1] != active["version"],
                 }
                 for d in drafts
@@ -406,6 +416,74 @@ class ConfigurationBridge:
             )[0],
             "page": page,
         }
+
+    async def prompt_editor(self, draft_id: str | None) -> dict[str, Any]:
+        if draft_id is None:
+            active = await self.current()
+            return {
+                "version": active["version"],
+                "fragments": active["document"]["prompts"]["fragments"],
+            }
+        draft = await self.db.one(
+            "SELECT base_version,document,hash FROM configuration_drafts "
+            "WHERE id=? AND origin='prompt_editor' AND state='pending'",
+            (draft_id,),
+        )
+        if not draft:
+            raise ValueError("Черновик редактора не найден")
+        return {
+            "version": draft[0],
+            "fragments": json.loads(draft[1])["prompts"]["fragments"],
+            "hash": draft[2],
+        }
+
+    async def save_prompt_draft(self, changes: PromptDraftUpdate) -> tuple[str, str]:
+        async with self.lock, self.store.gate, self.db.transaction() as c:
+            active = await row(
+                c,
+                "SELECT r.version,r.settings_json,r.prompts_json FROM configuration_releases r "
+                "JOIN settings s ON s.version=r.version",
+                (),
+            )
+            if not active or active[0] != changes.expected_version:
+                raise ConflictError
+            prompt_doc = {"schema_version": 1, "fragments": changes.fragments}
+            doc = {"settings": json.loads(active[1]), "prompts": prompt_doc}
+            body = canonical(doc)
+            validate(body)
+            if prompt_doc == json.loads(active[2]):
+                raise ValueError("В промптах нет изменений для сохранения")
+            draft_hash = digest(doc)
+            if changes.draft_id is not None:
+                existing = await row(
+                    c,
+                    "SELECT hash FROM configuration_drafts WHERE id=? AND base_version=? "
+                    "AND origin='prompt_editor' AND state='pending'",
+                    (changes.draft_id, active[0]),
+                )
+                if not existing or existing[0] not in {changes.expected_hash, draft_hash}:
+                    raise ConflictError
+                if existing[0] != draft_hash:
+                    await c.execute(
+                        "UPDATE configuration_drafts SET document=?,hash=? WHERE id=?",
+                        (body, draft_hash, changes.draft_id),
+                    )
+                return changes.draft_id, draft_hash
+            existing = await row(
+                c,
+                "SELECT id FROM configuration_drafts WHERE base_version=? AND hash=? "
+                "AND origin='prompt_editor' AND state='pending' ORDER BY created_at DESC LIMIT 1",
+                (active[0], draft_hash),
+            )
+            if existing:
+                return str(existing[0]), draft_hash
+            draft_id = str(uuid4())
+            await c.execute(
+                "INSERT INTO configuration_drafts VALUES "
+                "(?,?,?,?,?,'prompt_editor','pending',?,NULL)",
+                (draft_id, active[0], body, draft_hash, "{}", stamp()),
+            )
+            return draft_id, draft_hash
 
     async def details(self, draft_id: str) -> dict[str, Any]:
         d = await self.db.one(

@@ -341,6 +341,163 @@ def test_strict_validation_does_not_echo_private_text():
     assert "42" not in str(exc.value)
 
 
+async def test_prompt_editor_draft_conflicts_activation_and_rollback_without_obsidian(tmp_path):
+    path = "/api/configuration/prompts"
+    key = "dialogue.identity"
+    async with running(tmp_path) as (app, client):
+        assert (await client.get(path)).status_code == 401
+        await setup(client, tmp_path)
+        original = (await client.get(path)).json()
+        original_settings = (await client.get("/api/settings")).json()
+        assert original["version"] == original_settings["version"] == 1
+        assert (await client.get("/api/configuration")).json()["configured"] is False
+        text = "  \n" + "🙂" * 30000 + "\n "
+        fragments = {**original["fragments"], key: text}
+        edit = {"expected_version": 1, "fragments": fragments}
+        response = await client.post(path, json=edit, headers={"X-CSRF-Token": "invalid"})
+        assert response.status_code == 403
+        response = await client.post(
+            path, content=json.dumps(edit), headers={"Content-Type": "application/json"}
+        )
+        assert response.status_code == 200, response.text
+        draft = response.json()
+        assert (await client.post(path, json=edit)).json() == draft
+        assert (await client.get(path)).json() == original
+        assert (await client.get(path, params={"draft_id": draft["id"]})).json() == {
+            "version": 1,
+            "hash": draft["hash"],
+            "fragments": fragments,
+        }
+        assert (await app.state.db.settings()).version == 1
+        assert (await app.state.telegram_store.prompts_for(1)).text(key) == original["fragments"][
+            key
+        ]
+
+        draft_route = "/api/configuration/drafts/" + draft["id"]
+        review = (await client.get(draft_route)).json()
+        assert review["nodes"] == [
+            {
+                "path": f"Инструкции/{key}.md",
+                "before": original["fragments"][key],
+                "current": original["fragments"][key],
+                "proposed": text,
+            }
+        ]
+        edit.update(draft_id=draft["id"], expected_hash=draft["hash"])
+        new_text = "  \nОбновлённый синтетический фрагмент\n "
+        edit["fragments"] = {**fragments, key: new_text, "memory.extract": "  Два\n "}
+        response = await client.post(path, json=edit)
+        assert response.status_code == 200, response.text
+        updated = response.json()
+        assert updated["id"] == draft["id"] and updated["hash"] != draft["hash"]
+        assert (await client.post(path, json=edit)).json() == updated
+        assert (await client.post(path, json={**edit, "fragments": fragments})).status_code == 409
+        apply = {"action": "apply", "expected_version": 1, "hash": draft["hash"]}
+        assert (await client.post(draft_route, json=apply)).status_code == 409
+        apply["hash"] = updated["hash"]
+        assert (await client.post(draft_route, json=apply)).json() == {"version": 2}
+        assert (await client.post(draft_route, json=apply)).json() == {"version": 2}
+        assert (await client.get(path)).json() == {"version": 2, "fragments": edit["fragments"]}
+        assert (await client.get("/api/settings")).json()["settings"] == original_settings[
+            "settings"
+        ]
+        assert (await client.get("/api/configuration")).json()["current"][
+            "origin"
+        ] == "prompt_editor"
+        assert (await client.get(path, params={"draft_id": draft["id"]})).status_code == 404
+        assert (await client.post(path, json=edit)).status_code == 409
+
+        changed_settings = {**original_settings["settings"], "display_name": "Заря для теста"}
+        updated_settings = await client.put(
+            "/api/settings", json={"expected_version": 2, "settings": changed_settings}
+        )
+        assert updated_settings.json()["version"] == 3
+        response = await client.post(
+            "/api/configuration/rollback",
+            json={"version": 1, "expected_version": 3},
+        )
+        rollback_route = "/api/configuration/drafts/" + response.json()["id"]
+        rollback = (await client.get(rollback_route)).json()
+        assert rollback["origin"] == "rollback"
+        assert {n["path"] for n in rollback["nodes"]} == {
+            "Характер.md",
+            f"Инструкции/{key}.md",
+            "Инструкции/memory.extract.md",
+        }
+        assert (
+            await client.post(
+                rollback_route,
+                json={"action": "apply", "expected_version": 3, "hash": rollback["hash"]},
+            )
+        ).json() == {"version": 4}
+        assert (await client.get(path)).json() == {**original, "version": 4}
+        assert (await client.get("/api/settings")).json()["settings"] == original_settings[
+            "settings"
+        ]
+
+
+async def test_prompt_editor_rejects_invalid_bundle_and_stale_base(tmp_path):
+    path = "/api/configuration/prompts"
+    async with running(tmp_path) as (app, client):
+        await setup(client, tmp_path)
+        original = (await client.get(path)).json()
+        fragments = dict(original["fragments"])
+        fragments["unexpected.fragment"] = "КОНФИДЕНЦИАЛЬНЫЙ_ТЕКСТ"
+        response = await client.post(path, json={"expected_version": 1, "fragments": fragments})
+        assert response.status_code == 422
+        assert "КОНФИДЕНЦИАЛЬНЫЙ_ТЕКСТ" not in response.text
+        fragments.pop("unexpected.fragment")
+        fragments["memory.extract"] = "x" * 32769
+        assert (
+            await client.post(path, json={"expected_version": 1, "fragments": fragments})
+        ).status_code == 422
+        duplicate = json.dumps({"expected_version": 1, "fragments": original["fragments"]})
+        duplicate = duplicate[:-2] + ', "memory.extract": "Дубликат"}}'
+        response = await client.post(
+            path, content=duplicate.encode(), headers={"Content-Type": "application/json"}
+        )
+        assert response.status_code == 422 and "повторяющихся" in response.json()["detail"]
+        assert (
+            await client.post("/api/configuration/rollback", json={"pad": "x" * 32768})
+        ).status_code == 413
+        assert (await client.post(path, json={"pad": "x" * 400000})).status_code == 413
+        fragments["memory.extract"] = "Первая правка"
+        draft = (
+            await client.post(path, json={"expected_version": 1, "fragments": fragments})
+        ).json()
+        await app.state.db.update_settings(1, Settings(persona="Более новый выпуск"))
+        comparison = (await client.get("/api/configuration/drafts/" + draft["id"])).json()
+        assert comparison["conflict"] and comparison["current_version"] == 2
+        assert (await client.get(path, params={"draft_id": draft["id"]})).json()[
+            "fragments"
+        ] == fragments
+        assert (
+            await client.post(path, json={"expected_version": 1, "fragments": fragments})
+        ).status_code == 409
+        assert (
+            await client.post(
+                "/api/configuration/drafts/" + draft["id"],
+                json={"action": "apply", "expected_version": 2, "hash": draft["hash"]},
+            )
+        ).status_code == 409
+        assert (await client.get(path)).json()["fragments"] == original["fragments"]
+        current_draft = (
+            await client.post(path, json={"expected_version": 2, "fragments": fragments})
+        ).json()
+        for _ in range(10):
+            assert (
+                await client.post(
+                    "/api/configuration/rollback", json={"version": 1, "expected_version": 2}
+                )
+            ).status_code == 200
+        listing = (await client.get("/api/configuration")).json()
+        assert listing["draft_total"] == 12
+        assert listing["prompt_draft_id"] == current_draft["id"]
+        assert all(d["origin"] == "rollback" for d in listing["drafts"])
+        page2 = (await client.get("/api/configuration?draft_page=1")).json()
+        assert [d["id"] for d in page2["drafts"]] == [current_draft["id"], draft["id"]]
+
+
 async def test_large_utf8_package_roundtrips_without_ascii_expansion(tmp_path):
     async with store_at(tmp_path) as store:
         fragments = {k: "" for k in DEFAULT_PROMPTS.fragments}

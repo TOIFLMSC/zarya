@@ -1645,6 +1645,33 @@ summary:focus-visible {
   min-width: 0;
   margin-top: 16px;
 }
+.prompt-editor {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+.prompt-editor h3,
+.prompt-editor .obsidian-heading .muted {
+  margin: 0;
+}
+.prompt-editor label {
+  min-width: 0;
+}
+.prompt-editor textarea {
+  width: 100%;
+  max-width: 100%;
+  resize: vertical;
+  font: inherit;
+  line-height: 1.5;
+}
+.prompt-key {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
 .configuration-confirm {
   display: flex;
   align-items: center;
