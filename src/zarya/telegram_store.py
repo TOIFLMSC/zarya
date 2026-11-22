@@ -279,6 +279,20 @@ class TelegramStore:
             (bot_id, scope, subject, title[:256], username, stamp()),
         )
 
+    async def set_message_batches(
+        self, bot: str, chat: str, grant: int, expected: bool, enabled: bool
+    ) -> None:
+        async with self.gate, self.db.transaction() as conn:
+            changed = await conn.execute(
+                "UPDATE telegram_access SET message_batches_enabled=? "
+                "WHERE bot_id=? AND subject_id=? AND scope='group' AND version=? "
+                "AND state='approved' AND member_state NOT IN ('left','kicked','migrated') "
+                "AND message_batches_enabled=?",
+                (int(enabled), bot, chat, grant, int(expected)),
+            )
+            if changed.rowcount != 1:
+                raise ConflictError
+
     async def _migration(
         self, conn: aiosqlite.Connection, bot_id: str, old_id: str, new_id: str, title: str
     ) -> None:
@@ -286,6 +300,13 @@ class TelegramStore:
             "INSERT OR IGNORE INTO telegram_migrations VALUES (?,?,?)", (bot_id, old_id, new_id)
         )
         await self._discover(conn, bot_id, "group", new_id, title, None)
+        await conn.execute(
+            "UPDATE telegram_access SET message_batches_enabled=0 "
+            "WHERE bot_id=? AND scope='group' AND subject_id=? AND EXISTS ("
+            "SELECT 1 FROM telegram_access WHERE bot_id=? AND scope='group' "
+            "AND subject_id=? AND message_batches_enabled=0)",
+            (bot_id, new_id, bot_id, old_id),
+        )
         # Explicit reapproval avoids merging contradictory scopes or old topic/reply IDs.
         for subject in (old_id, new_id):
             await self._cancel(conn, bot_id, subject)
@@ -396,7 +417,8 @@ class TelegramStore:
                     continue
                 access = await row(
                     conn,
-                    "SELECT state,version,member_state FROM telegram_access WHERE bot_id=? "
+                    "SELECT state,version,member_state,message_batches_enabled "
+                    "FROM telegram_access WHERE bot_id=? "
                     "AND scope=? AND subject_id=?",
                     (bot_id, scope, subject),
                 )
@@ -608,7 +630,7 @@ class TelegramStore:
                         not batch
                         and not edited
                         and scope == "group"
-                        and subject == settings.message_batch_chat_id
+                        and access[3]
                         and settings.dialogue_enabled
                         and not payload["service_reply"]
                         and message_batches.eligible(message, settings)
@@ -1086,7 +1108,8 @@ class TelegramStore:
             "SELECT COUNT(*) FROM telegram_access WHERE bot_id=? AND scope=?", (bot_id, scope)
         )
         values = await self.db.all(
-            "SELECT subject_id,title,username,state,version,updated_at,member_state FROM "
+            "SELECT subject_id,title,username,state,version,updated_at,member_state,"
+            "message_batches_enabled FROM "
             "telegram_access "
             "WHERE bot_id=? AND scope=? ORDER BY updated_at DESC,subject_id LIMIT 20 OFFSET ?",
             (bot_id, scope, page * 20),
@@ -1103,8 +1126,9 @@ class TelegramStore:
                             "version",
                             "updated_at",
                             "member_state",
+                            "message_batches_enabled",
                         ),
-                        item,
+                        (*item[:-1], bool(item[-1]) if scope == "group" else None),
                         strict=True,
                     )
                 )

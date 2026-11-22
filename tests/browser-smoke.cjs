@@ -141,6 +141,11 @@ async function openSettingsSection(page, title) {
   await page.getByText("Тестовая группа друзей", { exact: true }).waitFor();
   await page.getByRole("button", { name: /^Разрешить:/ }).click();
   await page.getByText("Разрешён", { exact: true }).waitFor();
+  const batches = page.getByRole("checkbox", { name: /^Серии сообщений в группе/ });
+  assert.equal(await batches.isChecked(), true);
+  await batches.click();
+  await page.getByText("Серии в этой группе выключены.", { exact: true }).waitFor();
+  await page.getByRole("checkbox", { name: /^Серии сообщений в группе/, checked: false }).waitFor();
   await page.setViewportSize({ width: 360, height: 800 });
   await page.screenshot({
     path: path.join(output, "telegram-mobile.png"),
@@ -686,11 +691,6 @@ async function openSettingsSection(page, title) {
   await navigate(page, "Настройки");
   await openSettingsSection(page, "Близкий человек");
   await openSettingsSection(page, "Память");
-  await openSettingsSection(page, "Модель и диалог");
-  const batches = page.getByLabel(/^Серии сообщений · ID тестовой группы/);
-  assert.equal(await batches.inputValue(), "");
-  await batches.fill("-1004321");
-  assert.equal(await batches.evaluate((input) => input.checkValidity()), true);
   assert.equal(await page.getByLabel("Подбор долговременной памяти").inputValue(), "shadow");
   const depth = page.getByLabel(/^Последних человеческих сообщений/);
   assert.equal(await depth.inputValue(), "20");
@@ -712,9 +712,6 @@ async function openSettingsSection(page, title) {
   await page.reload();
   await navigate(page, "Настройки");
   await openSettingsSection(page, "Память");
-  await openSettingsSection(page, "Модель и диалог");
-  assert.equal(await batches.inputValue(), "-1004321");
-  await batches.fill("");
   assert.equal(await depth.inputValue(), "7");
   assert.equal(await topicPilot.inputValue(), "-1001234");
   assert.equal(await page.getByLabel(/^Персональные сводки сообщений/).inputValue(), "off");

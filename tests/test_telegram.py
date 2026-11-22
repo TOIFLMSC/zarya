@@ -92,7 +92,7 @@ async def store_at(path):
         await db.close()
 
 
-async def approve(store, scope="private", subject="42", bot="999"):
+async def approve(store, scope="private", subject="42", bot="999", *, message_batches=False):
     version = (
         await store.db.one(
             "SELECT version FROM telegram_access WHERE bot_id=? AND scope=? AND subject_id=?",
@@ -100,6 +100,15 @@ async def approve(store, scope="private", subject="42", bot="999"):
         )
     )[0]
     await store.decide(bot, scope, subject, "approved", version)
+    if scope == "group" and not message_batches:
+        # Fixtures for single-message routes keep that route explicit.
+        policy = await store.db.one(
+            "SELECT message_batches_enabled FROM telegram_access "
+            "WHERE bot_id=? AND scope='group' AND subject_id=?",
+            (bot, subject),
+        )
+        if policy[0]:
+            await store.set_message_batches(bot, subject, version + 1, True, False)
 
 
 async def queued(store):

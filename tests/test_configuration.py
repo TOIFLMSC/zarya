@@ -18,6 +18,42 @@ from zarya.models import Settings
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
 
 
+async def test_configuration_from_single_group_batch_pilot_remains_readable(tmp_path):
+    from zarya.configuration import canonical, digest
+
+    async with bridge_at(tmp_path) as (store, bridge):
+        old = (await bridge.current())["document"]
+        old["settings"]["message_batch_chat_id"] = "-999"
+        raw = canonical(old["settings"])
+        async with store.db.transaction() as conn:
+            await conn.execute("UPDATE settings SET document=?", (raw,))
+            await conn.execute("UPDATE settings_versions SET document=? WHERE version=1", (raw,))
+            await conn.execute(
+                "UPDATE configuration_releases SET settings_json=?,hash=? WHERE version=1",
+                (raw, digest(old)),
+            )
+        snapshot = await store.db.settings()
+        assert "message_batch_chat_id" not in snapshot.settings.model_dump()
+        await store.ingest("999", "zarya_test", [event(1, -100)])
+        await store.decide("999", "group", "-100", "approved", 1)
+        await store.ingest("999", "zarya_test", [event(2, -100, "Заря, без поиска назови число")])
+        assert await store.db.all("SELECT chat_id FROM text_batches") == [("-100",)]
+        await store.set_message_batches("999", "-100", 2, True, False)
+        await store.db.update_settings(
+            1, snapshot.settings.model_copy(update={"display_name": "Тест"})
+        )
+        rollback = await bridge.rollback(1, 2)
+        detail = await bridge.details(rollback)
+        assert await bridge.decide(rollback, "apply", 2, detail["hash"]) == 3
+        assert (await store.db.settings()).settings.display_name == "Заря"
+        assert (await store.peers("999", "group", 0))["items"][0][
+            "message_batches_enabled"
+        ] is False
+        assert (
+            await store.db.one("SELECT settings_json FROM configuration_releases WHERE version=1")
+        )[0] == raw
+
+
 async def test_pre_g6_release_owned_notes_upgrade_edit_and_rollback(tmp_path):
     from zarya.configuration import canonical, digest
     from zarya.obsidian_fs import digest as file_digest
@@ -29,7 +65,6 @@ async def test_pre_g6_release_owned_notes_upgrade_edit_and_rollback(tmp_path):
         old["settings"].pop("participant_summaries_enabled")
         old["settings"].pop("participant_summary_prompt")
         old["settings"].pop("topic_context_chat_id")
-        old["settings"].pop("message_batch_chat_id")
         raw = canonical(old["settings"])
         # Recreate a release and an owned note from before the new setting existed.
         f = await store.db.one(
@@ -41,7 +76,6 @@ async def test_pre_g6_release_owned_notes_upgrade_edit_and_rollback(tmp_path):
         body.pop("participant_summaries_enabled")
         body.pop("participant_summary_prompt")
         body.pop("topic_context_chat_id")
-        body.pop("message_batch_chat_id")
         body = json.dumps(body, ensure_ascii=False, indent=2)
         note = (f[0] + body + f[1]).encode()
         (bridge.root / "Модели и лимиты.md").write_bytes(note)
@@ -65,7 +99,6 @@ async def test_pre_g6_release_owned_notes_upgrade_edit_and_rollback(tmp_path):
         assert json.loads(refreshed[0])["memory_retrieval"] == "shadow"
         assert json.loads(refreshed[0])["participant_context_messages"] == 20
         assert json.loads(refreshed[0])["topic_context_chat_id"] == ""
-        assert json.loads(refreshed[0])["message_batch_chat_id"] == ""
         assert json.loads(refreshed[0])["participant_summaries_enabled"] is True
         assert (
             json.loads(refreshed[0])["participant_summary_prompt"]

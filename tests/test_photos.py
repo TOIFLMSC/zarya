@@ -82,9 +82,9 @@ class VisionModel:
         pass
 
 
-async def ready(s, chat=42):
+async def ready(s, chat=42, *, message_batches=False):
     await s.ingest("999", "zarya_test", [event(1, chat=chat)])
-    await approve(s, "private" if chat > 0 else "group", str(chat))
+    await approve(s, "private" if chat > 0 else "group", str(chat), message_batches=message_batches)
 
 
 async def analyze(engine, transport):
