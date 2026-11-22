@@ -15,7 +15,7 @@ from zarya.research_logic import urls, wants_search
 from zarya.response_links import message_requests_sources
 from zarya.source_material import accepted, one
 
-QUIET = 1.0
+QUIET = 2.0
 MAX_WAIT = 3.0
 MAX_MEMBERS = 5
 DIRECT = {"name", "mention", "reply", "continuation"}

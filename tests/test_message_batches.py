@@ -7,6 +7,7 @@ from test_dialogue import FakeModel, drain
 from test_photos import ready
 from test_telegram import event, store_at
 
+from zarya import dialogue as dialogue_module
 from zarya import message_batches
 from zarya.dialogue import DialogueEngine
 from zarya.openai_adapter import ModelResult
@@ -190,6 +191,62 @@ async def test_collects_clarification_and_edits_only_its_revision_before_restart
         await drain(DialogueEngine(store, model))
         body = json.loads(model.calls[-1]["input"])
         assert [m["message_id"] for m in body["selected_material"]["messages"]] == [2, 3]
+
+
+@pytest.mark.parametrize("telegram_seconds", [1, 2])
+async def test_clarification_after_1_2_seconds_makes_one_call_at_three_second_cap(
+    tmp_path, monkeypatch, telegram_seconds
+):
+    opened_at = time.time()
+    now = [opened_at]
+    clock = SimpleNamespace(time=lambda: now[0], monotonic=time.monotonic)
+    monkeypatch.setattr(message_batches, "time", clock)
+    monkeypatch.setattr(dialogue_module, "time", clock)
+    async with store_at(tmp_path) as store:
+        await pilot(store, research=True)
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [text(2, "Заря, без поиска придумай три названия для кофейни", date=100)],
+        )
+        (initial_deadline,) = await store.db.one("SELECT ready_at FROM text_batches")
+        now[0] = opened_at + 1.2
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                text(
+                    3,
+                    "Уточнение без поиска: только одно название из двух слов",
+                    date=100 + telegram_seconds,
+                )
+            ],
+        )
+        assert await store.db.all("SELECT COUNT(*) FROM text_batch_members GROUP BY job_id") == [
+            (2,)
+        ]
+        assert initial_deadline == pytest.approx(opened_at + 2, abs=0.000001)
+        (ready_at,) = await store.db.one("SELECT ready_at FROM text_batches")
+        assert ready_at == pytest.approx(opened_at + 3, abs=0.000001)
+        model = FakeModel(actions((3, [2, 3], "Тёплый угол")))
+        engine = DialogueEngine(store, model)
+        now[0] = opened_at + 2.999
+        await drain(engine)
+        assert not model.calls
+        now[0] = opened_at + 3
+        await drain(engine)
+        assert len(model.calls) == 1
+        (calls,) = await store.db.one("SELECT COUNT(*) FROM model_calls WHERE operation='dialogue'")
+        assert calls == 1
+        payload = json.loads(model.calls[0]["input"])
+        assert [m["message_id"] for m in payload["current_messages"]] == [2, 3]
+        (outgoing,) = await store.db.one("SELECT payload FROM outbox")
+        answer = json.loads(outgoing)
+        assert (answer["text"], answer["reply_id"], answer["covers"]) == (
+            "Тёплый угол",
+            3,
+            [2, 3],
+        )
 
 
 async def test_deadlines_and_scope_do_not_merge_two_authors_topics_or_late_members(
