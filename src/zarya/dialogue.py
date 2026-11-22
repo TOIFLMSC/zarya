@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from zarya import behavior, context_budget, timings
+from zarya import behavior, context_budget, timings, verbatim_quote
 from zarya.avatar_logic import AVATAR_WAIT
 from zarya.avatar_logic import valid as avatar_valid
 from zarya.chat_style import chat_dashes
@@ -118,14 +118,16 @@ class DialogueEngine:
                 return {"skip": True}
             settings_row = await row(conn, "SELECT version,document FROM settings WHERE id=1", ())
             settings = Settings.model_validate_json(settings_row[1])
-            prompts = await self.store.prompts_for(settings_row[0], conn)
             trigger = payload.get("trigger", "legacy")
             sender_id = str(message.get("from", {}).get("id", ""))
             thread_id = topic_id(message)
+            quote = verbatim_quote.match(
+                message, settings.display_name, bot_id, payload.get("bot_username", "")
+            )
             should_answer = trigger in {"private", "name", "mention", "reply", "continuation"}
             if not settings.dialogue_enabled:
                 trigger, should_answer = "disabled", False
-            elif self.adapter is None:
+            elif self.adapter is None and not quote:
                 trigger, should_answer = "not_configured", False
             if time.time() - datetime.fromisoformat(created_at).timestamp() > 600:
                 trigger, should_answer = "expired", False
@@ -151,6 +153,23 @@ class DialogueEngine:
             )
             if newer and should_answer:
                 trigger, should_answer = "superseded", False
+            if quote and should_answer and not payload.get("service_reply"):
+                measured["live_text"] = 1
+                measured["claim_ms"] = timings.elapsed(claim_start)
+                return await verbatim_quote.enqueue(
+                    conn,
+                    bot=bot_id,
+                    payload=payload,
+                    grant=access_version,
+                    event=source[0],
+                    job=job_id,
+                    message=message,
+                    trigger=trigger,
+                    settings_version=settings_row[0],
+                    measured=measured,
+                    include_links=bool(quote.group("links")),
+                )
+            prompts = await self.store.prompts_for(settings_row[0], conn)
             behavior_state = None
             if (should_answer or trigger == "ambient") and not payload.get("service_reply"):
                 behavior_state = (
@@ -1325,6 +1344,10 @@ class DialogueEngine:
         original = await self.details(run_id)
         if not original:
             raise ValueError("Операция не найдена")
+        if original["snapshot"].get("verbatim_quote"):
+            raise ValueError(
+                "Дословная цитата копируется напрямую. Для проверки отправь новый реплай."
+            )
         if mode == "paid" and self.adapter is None:
             raise ValueError("Ключ OpenAI не настроен")
         if (

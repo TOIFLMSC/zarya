@@ -19,7 +19,7 @@ from aiogram.exceptions import (
     TelegramServerError,
     TelegramUnauthorizedError,
 )
-from aiogram.types import ReactionTypeEmoji, ReplyParameters
+from aiogram.types import MessageEntity, ReactionTypeEmoji, ReplyParameters
 
 from zarya.avatars import AvatarEngine
 from zarya.dialogue import DialogueEngine
@@ -38,7 +38,13 @@ class Transport(Protocol):
     async def identity(self) -> dict[str, Any]: ...
     async def updates(self, offset: int | None) -> list[dict[str, Any]]: ...
     async def send(
-        self, chat_id: str, text: str, thread_id: int | None, reply_id: int | None = None
+        self,
+        chat_id: str,
+        text: str,
+        thread_id: int | None,
+        reply_id: int | None = None,
+        *,
+        entities: list[dict[str, Any]] | None = None,
     ) -> int: ...
     async def typing(self, chat_id: str, thread_id: int | None) -> bool: ...
     async def react(self, chat_id: str, message_id: int, emoji: str) -> bool: ...
@@ -87,11 +93,20 @@ class AiogramTransport:
         ]
 
     async def send(
-        self, chat_id: str, text: str, thread_id: int | None, reply_id: int | None = None
+        self,
+        chat_id: str,
+        text: str,
+        thread_id: int | None,
+        reply_id: int | None = None,
+        *,
+        entities: list[dict[str, Any]] | None = None,
     ) -> int:
         result = await self.bot.send_message(
             chat_id=int(chat_id),
             text=text,
+            entities=[MessageEntity.model_validate(entity) for entity in entities]
+            if entities
+            else None,
             message_thread_id=thread_id,
             request_timeout=10,
             reply_parameters=ReplyParameters(message_id=reply_id) if reply_id else None,
@@ -498,6 +513,14 @@ class TelegramRuntime:
                             await record("failed", "reaction_unavailable")
                             return
                         message_id = None
+                    elif item.get("entities"):
+                        message_id = await self.transport.send(
+                            item["chat_id"],
+                            item["text"],
+                            item.get("thread_id"),
+                            item.get("reply_id"),
+                            entities=item["entities"],
+                        )
                     elif item.get("reply_id"):
                         message_id = await self.transport.send(
                             item["chat_id"], item["text"], item.get("thread_id"), item["reply_id"]

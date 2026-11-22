@@ -27,6 +27,12 @@ NEGATIVE = re.compile(
     r"(?:sources|links|references|citations|urls)\b",
     re.IGNORECASE,
 )
+URL_TARGET = re.compile(
+    r"(?:https?://|www\.|t\.me/)[^\s<>]+|"
+    r"(?<![\w@])(?:[a-zа-я0-9][a-zа-я0-9-]*\.)+"
+    r"(?:com|org|net|ru|io|dev|ai|co|uk|me|info|edu|gov|рф)\b(?:/[^\s<>]*)?",
+    re.IGNORECASE,
+)
 
 
 def wants_sources(question: str) -> bool:
@@ -95,14 +101,7 @@ def without_links(text: str) -> str:
                 break
         return suffix
 
-    text = re.sub(
-        r"(?:https?://|www\.|t\.me/)[^\s<>]+|"
-        r"(?<![\w@])(?:[a-zа-я0-9][a-zа-я0-9-]*\.)+"
-        r"(?:com|org|net|ru|io|dev|ai|co|uk|me|info|edu|gov|рф)\b(?:/[^\s<>]*)?",
-        remove_url,
-        text,
-        flags=re.IGNORECASE,
-    )
+    text = URL_TARGET.sub(remove_url, text)
     text = re.sub(r"\(\s*\)|\[\s*\]|<\s*>", "", text)
     text = re.sub(r"(?<=\S)[ \t]{2,}", " ", text)
     text = re.sub(r" +([.,!?;:])", r"\1", text)
@@ -120,14 +119,18 @@ def source_policy(show: bool, prompts: PromptBundle = DEFAULT_PROMPTS) -> str:
         "Технический сбой поиска не доказывает отсутствие источника. "
     )
     if show:
-        return research_status + prompts.text("links.requested") + (
-            "Для research используй маркеры [S<id>] с точным полем id источника: "
-            "например, id=33 означает [S33], даже если источник первый в списке. "
-            "Выбирай id из analysis.claims.source_ids и research.sources с доступным url; "
-            "не цитируй unavailable и не перенумеровывай источники. "
-            "Приложение само подставит URL вместо маркера; не переписывай URL вручную. "
-            "Если найденный первоисточник содержит нужное разъяснение в разделе или FAQ, "
-            "дай ссылку на страницу и назови раздел; отдельный документ не обязателен. "
-            "Недоступность исходной новости не отменяет подтверждённый первоисточник. "
+        return (
+            research_status
+            + prompts.text("links.requested")
+            + (
+                "Для research используй маркеры [S<id>] с точным полем id источника: "
+                "например, id=33 означает [S33], даже если источник первый в списке. "
+                "Выбирай id из analysis.claims.source_ids и research.sources с доступным url; "
+                "не цитируй unavailable и не перенумеровывай источники. "
+                "Приложение само подставит URL вместо маркера; не переписывай URL вручную. "
+                "Если найденный первоисточник содержит нужное разъяснение в разделе или FAQ, "
+                "дай ссылку на страницу и назови раздел; отдельный документ не обязателен. "
+                "Недоступность исходной новости не отменяет подтверждённый первоисточник. "
+            )
         )
     return research_status + prompts.text("links.not_requested")

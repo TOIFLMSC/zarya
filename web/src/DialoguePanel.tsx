@@ -84,6 +84,7 @@ export function DialoguePanel({
   const [paid, setPaid] = useState(false);
   const [test, setTest] = useState<DialogDetail | null>(null);
   const sequence = useRef(0);
+  const localQuote = detail?.snapshot.verbatim_quote;
   function fail(e: unknown, target = setError) {
     if (e instanceof ApiError && e.status === 401) onUnauthorized();
     target(e instanceof Error ? e.message : "Не удалось загрузить журнал");
@@ -305,7 +306,7 @@ export function DialoguePanel({
                     <section>
                       <h3>01 · Вход и триггер</h3>
                       <p>
-                        {triggers[detail.trigger] ?? detail.trigger}.
+                        {localQuote ? "Дословная цитата из реплая" : (triggers[detail.trigger] ?? detail.trigger)}.
                         Отправитель {detail.snapshot.incoming.sender_id} ·
                         сообщение {detail.snapshot.incoming.message_id}
                       </p>
@@ -644,19 +645,19 @@ export function DialoguePanel({
                     <section className="replay-area">
                       <h3>Тестовая область</h3>
                       <p>
-                        Отправка в Telegram и запись в рабочую память отключены.
-                        Новый платный запрос использует текущие настройки и
-                        сохранённый контекст.
+                        {localQuote
+                          ? "Цитата копируется напрямую. Для проверки отправьте новый реплай в Telegram."
+                          : "Отправка в Telegram и запись в рабочую память отключены. Новый платный запрос использует текущие настройки и сохранённый контекст."}
                       </p>
                       <div className="peer-actions">
                         <button
-                          disabled={busy || !detail.response}
+                          disabled={busy || !detail.response || localQuote}
                           onClick={() => void replay("recorded")}
                         >
                           Проверить сохранённый ответ
                         </button>
                         <button
-                          disabled={busy || !list.configured || detail.snapshot.invalidated}
+                          disabled={busy || !list.configured || detail.snapshot.invalidated || localQuote}
                           onClick={() => void preparePaid()}
                           aria-expanded={paid}
                         >
@@ -775,7 +776,7 @@ function Metrics({ detail }: { detail: DialogDetail }) {
         <div>
           <dt>Оценка стоимости</dt>
           <dd>
-            {detail.mode === "recorded"
+            {detail.mode === "recorded" || detail.snapshot.verbatim_quote
               ? "$0 · без API"
               : money(call?.cost_usd)}
           </dd>

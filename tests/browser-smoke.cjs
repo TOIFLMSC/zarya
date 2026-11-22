@@ -341,6 +341,21 @@ async function openSettingsSection(page, title) {
   );
   await page.unroute("**/api/dialogues/replay");
   await page.setViewportSize({ width: 1440, height: 1000 });
+  await navigate(page, "Обзор");
+  await page.route(avatarDetailRoute, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.snapshot.verbatim_quote = true;
+    body.call = null;
+    await route.fulfill({ response, json: body });
+  });
+  await navigate(page, "Диалоги");
+  await page.locator(".dialog-item").first()
+    .getByRole("button", { name: "Подробности", exact: true }).click();
+  await page.getByText("Цитата копируется напрямую.", { exact: false }).waitFor();
+  await page.getByText("Без вызова модели", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Новый запрос к модели (платно)", exact: true }).isDisabled(), true);
+  await page.unroute(avatarDetailRoute);
   await navigate(page, "Медиа");
   await page.getByLabel("Тип материала", { exact: true }).selectOption("photo");
   await page.getByText("Готово", { exact: true }).first().waitFor();

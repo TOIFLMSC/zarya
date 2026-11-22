@@ -543,6 +543,7 @@ class TelegramStore:
                     # Retention handles history; neighbours must not evict personal windows.
                     payload = {
                         "scope": scope,
+                        "bot_username": username,
                         "chat_id": subject,
                         "service_reply": private_start or service_text is not None,
                         "thread_id": thread_id,
@@ -667,8 +668,10 @@ class TelegramStore:
                 "(SELECT job_id FROM outbox WHERE id=?)",
                 (item_id,),
             )
+            local_quote = False
             if memory_run:
                 snapshot = json.loads(memory_run[0])
+                local_quote = bool(snapshot.get("verbatim_quote"))
                 if snapshot.get("behavior"):
                     from zarya.behavior import valid
 
@@ -739,7 +742,8 @@ class TelegramStore:
             settings = await row(conn, "SELECT document FROM settings WHERE id=1", ())
             expired = time.time() - datetime.fromisoformat(created_at).timestamp() > 600
             if expired or (
-                linked and not Settings.model_validate_json(settings[0]).dialogue_enabled
+                (linked or local_quote)
+                and not Settings.model_validate_json(settings[0]).dialogue_enabled
             ):
                 await conn.execute(
                     "UPDATE outbox SET state='cancelled',error_code=? WHERE job_id="
@@ -842,7 +846,8 @@ class TelegramStore:
                 )
                 run = await row(
                     conn,
-                    "SELECT sender_id,thread_id,trigger FROM dialogue_runs "
+                    "SELECT sender_id,thread_id,trigger,state='completed' OR "
+                    "COALESCE(json_extract(snapshot,'$.verbatim_quote'),0)=0 FROM dialogue_runs "
                     "WHERE job_id=? AND mode='live'",
                     (item[3],),
                 )
@@ -863,7 +868,7 @@ class TelegramStore:
                             time.time(),
                         ),
                     )
-                    if run[2] in {"name", "mention", "reply"}:
+                    if run[3] and run[2] in {"name", "mention", "reply"}:
                         await conn.execute(
                             "INSERT OR REPLACE INTO active_dialogues VALUES (?,?,?,?,?,?)",
                             (item[0], item[1], run[1] or 0, run[0], time.time() + 90, 2),
