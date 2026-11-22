@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from zarya import behavior, context_budget, timings, verbatim_quote
+from zarya import behavior, context_budget, message_batches, timings, verbatim_quote
 from zarya.avatar_logic import AVATAR_WAIT
 from zarya.avatar_logic import valid as avatar_valid
 from zarya.chat_style import chat_dashes
@@ -70,9 +70,10 @@ class DialogueEngine:
             job = await row(
                 conn,
                 "SELECT j.id,j.payload,j.access_version,e.payload,j.created_at,e.received_at "
-                "FROM jobs j JOIN events e "
-                "ON e.id=j.event_id WHERE e.bot_id=? AND j.kind='telegram' AND "
-                "j.state='pending' AND "
+                "FROM jobs j JOIN events e ON e.id=j.event_id "
+                "LEFT JOIN text_batches b ON b.job_id=j.id "
+                "WHERE e.bot_id=? AND (b.job_id IS NULL OR b.ready_at<=?) "
+                "AND j.kind='telegram' AND j.state='pending' AND "
                 "NOT "
                 + PHOTO_WAIT
                 + "AND NOT "
@@ -89,7 +90,7 @@ class DialogueEngine:
                 "JOIN jobs busy ON busy.id=m.job_id JOIN events be ON be.id=busy.event_id "
                 "WHERE m.state='started' AND be.bot_id=e.bot_id AND be.chat_id=e.chat_id) "
                 "ORDER BY j.id LIMIT 1",
-                (bot_id,),
+                (bot_id, claimed_at),
             )
             if not job:
                 return None
@@ -138,6 +139,15 @@ class DialogueEngine:
                 (bot_id, chat_id, payload["message_id"]),
             )
             source = await row(conn, "SELECT event_id FROM jobs WHERE id=?", (job_id,))
+            batch = await message_batches.freeze(conn, job_id, bot_id, chat_id, access_version)
+            if batch is not None and (
+                not batch
+                or batch[0]["message_id"] != payload["message_id"]
+                or batch[0]["event_id"] != source[0]
+            ):
+                await conn.execute("UPDATE jobs SET state='cancelled' WHERE id=?", (job_id,))
+                return {"skip": True}
+            current_messages = batch if batch and len(batch) > 1 else []
             if current and current[0] != source[0]:
                 trigger, should_answer = "superseded", False
             newer = await row(
@@ -151,7 +161,7 @@ class DialogueEngine:
                 "LIMIT 1",
                 (bot_id, chat_id, job_id, sender_id, thread_id or 0),
             )
-            if newer and should_answer:
+            if newer and should_answer and batch is None and not payload.get("keep_addressed"):
                 trigger, should_answer = "superseded", False
             if quote and should_answer and not payload.get("service_reply"):
                 measured["live_text"] = 1
@@ -171,7 +181,9 @@ class DialogueEngine:
                 )
             prompts = await self.store.prompts_for(settings_row[0], conn)
             behavior_state = None
-            if (should_answer or trigger == "ambient") and not payload.get("service_reply"):
+            if (should_answer or trigger == "ambient") and not (
+                payload.get("service_reply") or current_messages
+            ):
                 behavior_state = (
                     await behavior.prepare(
                         conn,
@@ -209,7 +221,7 @@ class DialogueEngine:
                 should_answer
                 and trigger != "initiative"
                 and self.avatars
-                and not payload.get("service_reply")
+                and not (payload.get("service_reply") or current_messages)
             ):
                 avatar = await self.avatars.prepare(
                     conn,
@@ -241,7 +253,7 @@ class DialogueEngine:
                 and trigger != "initiative"
                 and self.media
                 and not avatar
-                and not payload.get("service_reply")
+                and not (payload.get("service_reply") or current_messages)
             ):
                 if await self.media.prepare(
                     conn,
@@ -261,6 +273,7 @@ class DialogueEngine:
                 and settings.photo_enabled
                 and self.photos
                 and not avatar
+                and not current_messages
             ):
                 await self.photos.prepare_sources(
                     conn, bot_id, chat_id, payload["scope"], access_version, target_ids, settings
@@ -293,14 +306,14 @@ class DialogueEngine:
                 )
                 if spoken and spoken[0]:
                     message = {**message, "text": spoken[0]}
-            show_sources = message_requests_sources(message)
+            show_sources = not current_messages and message_requests_sources(message)
             research_context = None
             if (
                 self.research
                 and not avatar
                 and should_answer
                 and trigger != "initiative"
-                and not payload.get("service_reply")
+                and not (payload.get("service_reply") or current_messages)
             ):
                 research_material = {
                     **material,
@@ -417,14 +430,15 @@ class DialogueEngine:
             retrieval: dict[str, Any] = {}
             if self.memory:
                 context_start = time.monotonic()
+                question = "\n".join(m["text"] for m in current_messages) or message_text(message)
                 memory_context, memory_epoch = await self.memory.context(
                     conn,
                     bot_id,
                     chat_id,
                     access_version,
                     [sender_id] + [str(item["sender_id"]) for item in context],
-                    query=message_text(message) + " " + str(reply.get("text", ""))[:4000],
-                    current_query=message_text(message),
+                    query=question + " " + str(reply.get("text", ""))[:4000],
+                    current_query=question,
                     recent=context,
                     event_id=source[0],
                     speaker=sender_id,
@@ -503,6 +517,12 @@ class DialogueEngine:
                 request["instructions"] += prompts.text("dialogue.avatar")
             if behavior_state:
                 behavior.configure(request, behavior_state, prompts)
+            if current_messages:
+                message_batches.configure(request, current_messages)
+                material["manifest"].extend(
+                    {"message_id": m["message_id"], "event_id": m["event_id"]}
+                    for m in current_messages
+                )
             request = context_budget.pack(request)
             budget = context_budget.inspect(request)
             budget.update(
@@ -520,6 +540,7 @@ class DialogueEngine:
                 "question_text": message_text(message),
                 "sources_requested": show_sources,
                 "context": context,
+                **({"current_messages": current_messages} if current_messages else {}),
                 **({"topic_context": topic_context} if topic_context else {}),
                 "participant_context": participant_coverage,
                 "context_refs": context_refs,
@@ -775,7 +796,8 @@ class DialogueEngine:
                     state = "cancelled"
             plan = work.get("behavior_plan")
             if allowed and result.state == "completed":
-                result.text = chat_dashes(display_text(result.text, work["snapshot"]))
+                if not work.get("batch_answers"):
+                    result.text = chat_dashes(display_text(result.text, work["snapshot"]))
                 if not result.text.strip() and (not plan or plan.action == "text"):
                     state, result.error = "invalid", "empty_after_link_filter"
                     allowed = False
@@ -796,6 +818,8 @@ class DialogueEngine:
                     ("done" if result.state == "completed" and allowed else state, work["job_id"]),
                 )
                 service_text = context_budget.SERVICES.get(work.get("service_error", ""))
+                if work.get("service_error") == "invalid_batch_reply":
+                    service_text = message_batches.INVALID_RESPONSE
                 if result.state == "invalid" and result.error == "unknown_source":
                     service_text = source_failure_text(
                         work["snapshot"].get("research") or {},
@@ -862,7 +886,20 @@ class DialogueEngine:
                         )
                     if plan and plan.action != "text":
                         return
-                    for index, part in enumerate(delivery_chunks(result.text, work["snapshot"])):
+                    if work.get("batch_answers"):
+                        pieces = [
+                            (target, covers, part)
+                            for target, covers, text in work["batch_answers"]
+                            for part in delivery_chunks(text, work["snapshot"])
+                        ]
+                    else:
+                        pieces = [
+                            (work["reply_id"] if index == 0 else None, [], part)
+                            for index, part in enumerate(
+                                delivery_chunks(result.text, work["snapshot"])
+                            )
+                        ]
+                    for index, (reply_to, covers, part) in enumerate(pieces):
                         await conn.execute(
                             "INSERT INTO outbox(job_id,bot_id,scope,chat_id,state,"
                             "payload,created_at,access_version,part_index,next_attempt) "
@@ -876,7 +913,8 @@ class DialogueEngine:
                                     {
                                         "text": part,
                                         "thread_id": work["thread_id"],
-                                        "reply_id": work["reply_id"] if index == 0 else None,
+                                        "reply_id": reply_to,
+                                        **({"covers": covers} if covers else {}),
                                     },
                                     ensure_ascii=False,
                                 ),
@@ -1133,6 +1171,21 @@ class DialogueEngine:
                 await self.save_budget(work, budget)
                 work["service_error"] = "context_overflow"
             post_start = time.monotonic()
+            if work["snapshot"].get("current_messages") and result.state == "completed":
+                try:
+                    parts = [
+                        (mid, covers, chat_dashes(display_text(text, work["snapshot"])))
+                        for mid, covers, text in message_batches.answers(
+                            result.text, work["snapshot"]["current_messages"]
+                        )
+                    ]
+                    if any(not text.strip() for _, _, text in parts):
+                        raise ValueError("empty batch answer")
+                    work["batch_answers"] = parts
+                    result.text = "\n\n".join(text for _, _, text in parts)
+                except ValueError:
+                    result.text, result.state, result.error = "", "invalid", "invalid_batch_reply"
+                    work["service_error"] = "invalid_batch_reply"
             if work["snapshot"].get("behavior") and result.state == "completed":
                 try:
                     plan = behavior.BehaviorPlan.model_validate_json(result.text)
@@ -1266,6 +1319,7 @@ class DialogueEngine:
                 "text": json.loads(p[2]).get("text", ""),
                 "action": json.loads(p[2]).get("action", "text"),
                 "emoji": json.loads(p[2]).get("emoji"),
+                "reply_id": json.loads(p[2]).get("reply_id"),
                 "message_id": p[3],
                 "error": p[4],
             }
@@ -1434,6 +1488,8 @@ class DialogueEngine:
         if mode == "paid":
             if saved.get("topic_context"):
                 saved["request"]["instructions"] += TOPIC_CONTEXT_POLICY
+            if saved.get("current_messages"):
+                message_batches.configure(saved["request"], saved["current_messages"])
             saved["request"] = context_budget.pack(saved["request"])
             saved["context_budget"] = context_budget.inspect(saved["request"])
             saved["context_budget"]["stage"] = "assembled"

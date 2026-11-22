@@ -311,6 +311,7 @@ class ConfigurationBridge:
                         "participant_summaries_enabled",
                         "participant_summary_prompt",
                         "topic_context_chat_id",
+                        "message_batch_chat_id",
                     ):
                         if key in keys:
                             value.setdefault(key, getattr(Settings(), key))

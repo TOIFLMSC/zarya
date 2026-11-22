@@ -193,7 +193,8 @@ async def resolve(
             continue
         sent = await one(
             conn,
-            "SELECT j.event_id,r.snapshot FROM outbox o JOIN jobs j ON j.id=o.job_id "
+            "SELECT j.event_id,r.snapshot,o.payload "
+            "FROM outbox o JOIN jobs j ON j.id=o.job_id "
             "JOIN dialogue_runs r ON r.job_id=j.id JOIN recent_messages recent ON "
             "recent.bot_id=o.bot_id AND recent.chat_id=o.chat_id "
             "AND recent.message_id=o.message_id "
@@ -210,6 +211,23 @@ async def resolve(
             conn, bot, chat, grant, snapshot.get("source_manifest", [])
         ):
             break
+        if snapshot.get("current_messages"):
+            delivery = json.loads(sent[2])
+            coverage = delivery.get("covers") or []
+            expected = {
+                member["message_id"]: member["event_id"] for member in snapshot["current_messages"]
+            }
+            if delivery.get("reply_id") not in coverage or not set(coverage) <= expected.keys():
+                break
+            for mid in coverage:
+                current = await accepted(conn, bot, chat, grant, mid)
+                if not current or current[0] != expected[mid]:
+                    result["messages"] = []
+                    result["unavailable"] = True
+                    return result
+                result["manifest"].append({"message_id": mid, "event_id": current[0]})
+                result["messages"].append(describe(current[1]))
+            return result
         root = await one(
             conn,
             "SELECT payload FROM events WHERE id=? AND bot_id=? AND chat_id=?",

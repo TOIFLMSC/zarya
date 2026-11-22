@@ -295,15 +295,20 @@ async def assistants(
         if boundary:
             condition = "AND m.received_at<=? "
             args += (boundary[0],)
+    source_mid = (
+        "CASE WHEN json_type(r.snapshot,'$.current_messages')='array' "
+        "THEN json_extract(o.payload,'$.reply_id') ELSE r.message_id END"
+    )
     async with conn.execute(
-        "SELECT r.id,r.snapshot,o.id,o.message_id,o.payload,m.received_at FROM outbox o "
+        f"SELECT r.id,r.snapshot,o.id,o.message_id,o.payload,m.received_at,{source_mid} "
+        "FROM outbox o "
         "JOIN dialogue_runs r ON r.job_id=o.job_id JOIN jobs j ON j.id=r.job_id "
         "JOIN research_messages source ON source.bot_id=r.bot_id AND source.chat_id=r.chat_id "
         "AND source.message_id=r.message_id AND source.event_id=j.event_id "
         "AND source.access_version=o.access_version JOIN recent_messages m "
         "ON m.bot_id=o.bot_id AND m.chat_id=o.chat_id AND m.message_id=o.message_id "
         "WHERE o.bot_id=? AND o.chat_id=? AND o.access_version=? AND o.state='sent' "
-        "AND r.mode='live' AND r.state='completed' AND r.message_id IN "
+        f"AND r.mode='live' AND r.state='completed' AND {source_mid} IN "
         "(SELECT value FROM json_each(?)) AND m.role='assistant' AND m.received_at>? "
         "AND json_extract(o.payload,'$.text')=m.text " + condition + "ORDER BY m.received_at,o.id",
         args,
@@ -322,7 +327,7 @@ async def assistants(
 
         candidates = [{"run_id": r[0], "outbox_id": r[2]} for r in rows]
         batch_valid = await valid_snapshot(conn, bot, proof(candidates), read=read)
-        for rid, raw, oid, mid, document, at in rows:
+        for rid, raw, oid, mid, document, at, in_reply_to in rows:
             if mid in seen:
                 continue
             snapshot = json.loads(raw)
@@ -347,7 +352,7 @@ async def assistants(
                     "text": text,
                     "thread_id": snapshot["incoming"].get("thread_id"),
                     "received_at": at,
-                    "in_reply_to": snapshot["incoming"]["message_id"],
+                    "in_reply_to": in_reply_to,
                 }
             )
     return items, refs

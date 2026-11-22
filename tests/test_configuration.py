@@ -29,6 +29,7 @@ async def test_pre_g6_release_owned_notes_upgrade_edit_and_rollback(tmp_path):
         old["settings"].pop("participant_summaries_enabled")
         old["settings"].pop("participant_summary_prompt")
         old["settings"].pop("topic_context_chat_id")
+        old["settings"].pop("message_batch_chat_id")
         raw = canonical(old["settings"])
         # Recreate a release and an owned note from before the new setting existed.
         f = await store.db.one(
@@ -40,6 +41,7 @@ async def test_pre_g6_release_owned_notes_upgrade_edit_and_rollback(tmp_path):
         body.pop("participant_summaries_enabled")
         body.pop("participant_summary_prompt")
         body.pop("topic_context_chat_id")
+        body.pop("message_batch_chat_id")
         body = json.dumps(body, ensure_ascii=False, indent=2)
         note = (f[0] + body + f[1]).encode()
         (bridge.root / "Модели и лимиты.md").write_bytes(note)
@@ -63,6 +65,7 @@ async def test_pre_g6_release_owned_notes_upgrade_edit_and_rollback(tmp_path):
         assert json.loads(refreshed[0])["memory_retrieval"] == "shadow"
         assert json.loads(refreshed[0])["participant_context_messages"] == 20
         assert json.loads(refreshed[0])["topic_context_chat_id"] == ""
+        assert json.loads(refreshed[0])["message_batch_chat_id"] == ""
         assert json.loads(refreshed[0])["participant_summaries_enabled"] is True
         assert (
             json.loads(refreshed[0])["participant_summary_prompt"]
