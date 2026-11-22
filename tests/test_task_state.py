@@ -33,6 +33,8 @@ def post(mid, text, *, topic=8, sender=42, reply=None, bot_reply=False, edited=N
             "message_id": reply,
             "from": {"id": 999 if bot_reply else 42, "is_bot": bot_reply},
         }
+    if text.startswith("@zarya_test"):
+        extra["entities"] = [{"type": "mention", "offset": 0, "length": len("@zarya_test")}]
     update = event(source_id, -100, text, **extra)
     if edited:
         update = {"update_id": mid, "edited_message": update["message"]}
@@ -336,6 +338,10 @@ async def test_budget_does_not_hide_a_contribution_or_truncate_a_long_correction
         assert len(model.calls) == 2
         async with store.db.transaction() as conn:
             assert await task_state.context(conn, BOT, CHAT, 2, 8, [8]) is None
+        await ingest(store, post(9, "Заря, давай составим план поездки в Казань.", edited=2))
+        assert (await worker.claim(BOT)) == {"skip": True}
+        assert await store.db.one("SELECT retired FROM task_states") == (0,)
+        assert await store.db.one("SELECT COUNT(*) FROM task_members") == (7,)
 
 
 async def test_reply_keeps_its_task_and_unrelated_dialogue_does_not_join(tmp_path):
@@ -390,6 +396,24 @@ async def test_task_reply_verbatim_quote_does_not_queue_a_model_call(tmp_path):
         await drain(dialogue)
         assert len(model.calls) == initial
         assert await worker.claim(BOT) is None
-        assert await store.db.one(
-            "SELECT response FROM dialogue_runs WHERE message_id=3"
-        ) == (ANCHOR,)
+        assert await store.db.one("SELECT response FROM dialogue_runs WHERE message_id=3") == (
+            ANCHOR,
+        )
+
+
+async def test_start_in_reply_to_an_untracked_message_and_resume_via_username(tmp_path):
+    async with store_at(tmp_path) as store:
+        await pilot(store)
+        await ingest(
+            store,
+            post(2, "Электрички ходят утром.", sender=43),
+            post(3, ANCHOR, reply=2),
+        )
+        worker = TaskStateEngine(store, FakeModel(extraction(("goal", 3, GOAL))))
+        await background(worker)
+        await ingest(store, post(4, "@zarya_test, продолжим?"))
+        model = FakeModel(ModelResult(text="Продолжим."))
+        await drain(DialogueEngine(store, model))
+        data = json.loads(model.calls[-1]["input"])["task_state"]
+        assert data["for_message_ids"] == [4]
+        assert data["fields"][0]["quote"] == GOAL

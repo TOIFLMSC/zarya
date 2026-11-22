@@ -544,7 +544,7 @@ class TelegramStore:
                         if not quote_request(message, settings.display_name, bot_id, username):
                             await observe_task(
                                 conn, bot_id, subject, access[1], event_id,
-                                message, settings, trigger, edited,
+                                message, settings, trigger, username, edited,
                             )
                     # Retire the old revision even when it never reached dialogue_runs.
                     if replacement:

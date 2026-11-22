@@ -159,6 +159,7 @@ async def observe(
     message: dict[str, Any],
     settings: Settings,
     trigger: str,
+    username: str,
     edited: bool,
 ) -> None:
     text = plain_text(message)
@@ -166,9 +167,13 @@ async def observe(
         return
     scope = (bot, chat, grant, topic_id(message) or 0)
     mid = message["message_id"]
+    if trigger == "mention" and username:
+        text = re.sub(
+            r"(?<!\w)@" + re.escape(username) + r"(?!\w)", "", text, count=1, flags=re.IGNORECASE
+        )
     spoken = re.sub(
         r"^@?" + re.escape(settings.display_name) + r"[\s,:!—-]+", "", text, flags=re.IGNORECASE
-    ).strip(" .?!")
+    ).strip(" .?!,:—-")
     resume = bool(RESUME.fullmatch(spoken))
     task = await assigned(conn, scope, [mid]) if edited else None
     if edited and task is None:
@@ -177,7 +182,10 @@ async def observe(
     if task is None:
         reply = explicit_reply(message)
         addressed = trigger in {"private", "name", "mention", "reply", "continuation"}
-        if addressed and (NEW_TASK.match(spoken) or (not reply and START.search(spoken))):
+        wants_new_task = addressed and bool(NEW_TASK.match(spoken))
+        if reply and not wants_new_task:
+            task = await reply_task(conn, scope, reply)
+        if task is None and addressed and (wants_new_task or START.search(spoken)):
             inserted = await conn.execute(
                 "INSERT OR IGNORE INTO task_states(bot_id,chat_id,access_version,thread_id,"
                 "anchor_id) VALUES (?,?,?,?,?) RETURNING id",
@@ -187,11 +195,9 @@ async def observe(
                 inserted_task = await inserted.fetchone()
             if inserted_task:
                 task = int(inserted_task[0])
-        elif reply:
-            task = await reply_task(conn, scope, reply)
-        elif addressed and resume:
+        elif task is None and not reply and addressed and resume:
             task = await unique_open(conn, scope, None)
-        elif addressed and UPDATE.match(spoken):
+        elif task is None and not reply and addressed and UPDATE.match(spoken):
             task = await unique_open(conn, scope, str(message["from"]["id"]))
     if task is None:
         return
@@ -384,8 +390,16 @@ class TaskStateEngine:
                 + CURRENT_MEMBERS
                 + " AND t.contributes=1 AND (t.event_id>? "
                 "OR t.message_id IN (SELECT value FROM json_each(?))) "
-                "ORDER BY t.event_id LIMIT ?",
-                (task, cutoff, cutoff, after, json.dumps(keep), MAX_RECENT + len(set(keep)) + 1),
+                "ORDER BY (t.message_id=?) DESC,t.event_id LIMIT ?",
+                (
+                    task,
+                    cutoff,
+                    cutoff,
+                    after,
+                    json.dumps(keep),
+                    anchor,
+                    MAX_RECENT + len(set(keep)) + 1,
+                ),
             ) as cursor:
                 rows = list(await cursor.fetchall())
             if not any(r[0] == anchor for r in rows):
@@ -394,9 +408,6 @@ class TaskStateEngine:
             if checkpoint and not await valid_sources(conn, bot, chat, grant, task, checkpoint):
                 await scrub(conn, "id=?", (task,))
                 return {"skip": True}
-            # Initial input starts with the anchor, even if its most recent revision
-            # arrived after other linked messages.
-            rows.sort(key=lambda r: (r[0] != anchor, r[1]))
             messages = [
                 {"message_id": mid, "sender_id": sender, "text": text}
                 for mid, event, _, sender, text in rows
