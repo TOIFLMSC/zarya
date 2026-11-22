@@ -138,6 +138,7 @@ def inspect(request: dict[str, Any], *, expected_images: int = 0) -> dict[str, A
             else:
                 kind = {
                     "current_message": "current_message",
+                    "topic_context": "topic_context",
                     "memory": "memory",
                     "selected_material": "material",
                     "research": "research",

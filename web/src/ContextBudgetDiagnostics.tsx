@@ -12,6 +12,7 @@ const states: Record<string, string> = {
 const categories: Record<string, string> = {
   instructions: "Инструкции",
   current_message: "Текущее сообщение",
+  topic_context: "Хронология топика",
   recent_originals: "Недавние реплики · оригиналы",
   recent_summaries: "Недавние реплики · сводки",
   assistant_replies: "Связанные ответы Зари",
@@ -158,7 +159,7 @@ export function ContextBudgetDiagnostics({
             <div className="context-message" key={kind}>
               <strong>{categories[kind] ?? kind}</strong>
               <p className="muted">
-                {kind.startsWith("recent_") || kind === "assistant_replies"
+                {kind.startsWith("recent_") || kind === "assistant_replies" || kind === "topic_context"
                   ? "Реплик"
                   : kind === "images"
                     ? "Изображений"

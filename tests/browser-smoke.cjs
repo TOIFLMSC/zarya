@@ -20,7 +20,7 @@ const errors = [];
 
 async function start(data) {
   server = spawn(
-    path.join(
+    process.env.ZARYA_PYTHON || path.join(
       root,
       ".venv",
       process.platform === "win32" ? "Scripts/python.exe" : "bin/python",
@@ -189,6 +189,12 @@ async function openSettingsSection(page, title) {
       episodes: [{ id: 9, reasons: ["related_episode"] }],
       conflicts: [3], reply_messages: [1000], chars: 640,
     };
+    body.snapshot.topic_context = [
+      {
+        message_id: 1001, event_id: 10, name: "Тестовый участник",
+        text: "Встречу перенесли на 20:00", forwarded: false, received_at: 1800000000,
+      },
+    ];
     await route.fulfill({ response, json: body });
   });
   await page
@@ -202,6 +208,8 @@ async function openSettingsSection(page, title) {
     .waitFor();
   await page.getByText("Состав персональных окон", { exact: true }).click();
   await page.getByText(/Текущее сообщение входит в предел/).waitFor();
+  await page.getByText("Хронология топика", { exact: true }).click();
+  await page.getByText("Встречу перенесли на 20:00", { exact: true }).waitFor();
   const budgetSummary = page.getByText(/^Вместимость контекста ·/);
   await budgetSummary.click();
   await page.getByText("Состав входа", { exact: true }).click();
@@ -671,6 +679,12 @@ async function openSettingsSection(page, title) {
     assert.equal(await depth.evaluate((input) => input.checkValidity()), false);
   }
   await depth.fill("7");
+  const topicPilot = page.getByLabel(/^Хронология топика · ID тестовой группы/);
+  assert.equal(await topicPilot.inputValue(), "");
+  await topicPilot.fill("100");
+  assert.equal(await topicPilot.evaluate((input) => input.checkValidity()), false);
+  await topicPilot.fill("-1001234");
+  assert.equal(await topicPilot.evaluate((input) => input.checkValidity()), true);
   await page.getByLabel(/^Персональные сводки сообщений/).selectOption("off");
   const depthSave = page.waitForResponse((response) => response.url().endsWith("/api/settings") && response.request().method() === "PUT");
   await page.getByRole("button", { name: "Сохранить настройки" }).click();
@@ -679,8 +693,10 @@ async function openSettingsSection(page, title) {
   await navigate(page, "Настройки");
   await openSettingsSection(page, "Память");
   assert.equal(await depth.inputValue(), "7");
+  assert.equal(await topicPilot.inputValue(), "-1001234");
   assert.equal(await page.getByLabel(/^Персональные сводки сообщений/).inputValue(), "off");
   await depth.fill("20");
+  await topicPilot.fill("");
   await page.getByLabel(/^Персональные сводки сообщений/).selectOption("on");
   const depthRestore = page.waitForResponse((response) => response.url().endsWith("/api/settings") && response.request().method() === "PUT");
   await page.getByRole("button", { name: "Сохранить настройки" }).click();

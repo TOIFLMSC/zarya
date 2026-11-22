@@ -989,6 +989,7 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                       "memory_model",
                       "memory_retrieval",
                       "participant_context_messages",
+                      "topic_context_chat_id",
                       "participant_summaries_enabled",
                       "participant_summary_prompt",
                     )}
@@ -1022,6 +1023,21 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                           От 1 до 100, в каждом чате отдельно. Текущее сообщение
                           входит в предел; связанные ответы Зари учитываются
                           отдельно. Работает и при выключенной фоновой памяти.
+                        </small>
+                      </label>
+                      <label>
+                        Хронология топика · ID тестовой группы
+                        <input
+                          type="text"
+                          pattern="-[1-9][0-9]{0,15}"
+                          value={draft.topic_context_chat_id}
+                          onChange={(e) => change("topic_context_chat_id", e.target.value.trim())}
+                        />
+                        <small>
+                          Оставьте пустым, чтобы выключить пилот. В разрешённой
+                          тестовой группе Заря учитывает до восьми реплик
+                          текущего топика за сутки, в том числе без реплая.
+                          Фоновая память для этого не нужна.
                         </small>
                       </label>
                       <label>

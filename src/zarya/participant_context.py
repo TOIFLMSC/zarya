@@ -12,6 +12,16 @@ from zarya.models import Settings
 from zarya.source_material import accepted, describe, one
 
 RETENTION = 90 * 86400
+TOPIC_AGE = 24 * 3600
+TOPIC_MESSAGES = 8
+TOPIC_CHARS = 2500
+UPDATE_MESSAGE = (
+    "COALESCE(json_extract(e.payload,'$.edited_message'),json_extract(e.payload,'$.message'))"
+)
+FORUM_TOPIC = (
+    f"json_extract({UPDATE_MESSAGE},'$.chat.is_forum')=1 "
+    f"AND COALESCE(json_extract({UPDATE_MESSAGE},'$.message_thread_id'),0)=? "
+)
 CONTENT = (
     "photo",
     "voice",
@@ -27,16 +37,20 @@ CONTENT = (
     "poll",
     "dice",
 )
-ROWS = (
+CURRENT_ROWS = (
     "FROM participant_messages p JOIN research_messages m ON m.bot_id=p.bot_id "
     "AND m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.event_id=p.event_id "
     "AND m.access_version=p.access_version JOIN events e ON e.id=p.event_id "
     "AND e.bot_id=p.bot_id AND e.chat_id=p.chat_id JOIN telegram_access a ON a.bot_id=p.bot_id "
     "AND a.subject_id=p.chat_id AND a.version=p.access_version AND a.state='approved' "
-    "AND a.member_state NOT IN ('left','kicked','migrated') WHERE p.bot_id=? AND p.chat_id=? "
+    "AND a.member_state NOT IN ('left','kicked','migrated') "
+)
+SCOPE = (
+    "WHERE p.bot_id=? AND p.chat_id=? "
     "AND p.access_version=? AND p.received_at>? AND e.disposition='accepted' "
     "AND e.payload!='{}' AND CAST(strftime('%s',e.received_at) AS REAL)>? "
 )
+ROWS = CURRENT_ROWS + SCOPE
 
 
 async def valid_participant_sources(
@@ -134,6 +148,8 @@ async def window(
     limit: int,
     *,
     before: int | None = None,
+    thread: int | None = None,
+    exact_ids: set[int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, list[dict[str, Any]]]:
     cutoff = time.time() - RETENTION
     args: tuple[Any, ...] = (bot, chat, grant, cutoff, cutoff, sender)
@@ -141,6 +157,9 @@ async def window(
     if before is not None:
         condition += "AND p.message_id<? "
         args += (before,)
+    if thread is not None:
+        condition += f"AND (({FORUM_TOPIC}) OR p.message_id IN (SELECT value FROM json_each(?))) "
+        args += (thread, json.dumps(sorted(exact_ids or ())))
     count = (await one(conn, "SELECT COUNT(*) " + condition, args))[0]
     async with conn.execute(
         "SELECT p.message_id,p.event_id,p.received_at,e.payload "
@@ -183,6 +202,73 @@ async def window(
         result.append(item)
         refs.append({"message_id": mid, "event_id": event, "received_at": at})
     return result, refs, count, media
+
+
+async def topic_history(
+    conn: aiosqlite.Connection,
+    bot: str,
+    chat: str,
+    grant: int,
+    thread: int,
+    before: int,
+    excluded: set[int],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    # Use the recent index to constrain the time range, and ROWS to bind access
+    # and the current revision. The original timestamp keeps edits in place.
+    cutoff = time.time() - TOPIC_AGE
+    async with conn.execute(
+        "SELECT p.message_id,p.event_id,p.received_at,p.sender_id,e.payload "
+        + CURRENT_ROWS
+        + "JOIN recent_messages r ON r.bot_id=p.bot_id AND r.chat_id=p.chat_id "
+        "AND r.message_id=p.message_id AND r.event_id=p.event_id "
+        + SCOPE
+        + "AND r.received_at>? AND r.role='user' AND COALESCE(r.thread_id,0)=? AND p.message_id<? "
+        + f"AND {FORUM_TOPIC} AND TRIM(json_extract({UPDATE_MESSAGE},'$.text'))!='' "
+        + "AND p.message_id NOT IN (SELECT value FROM json_each(?)) "
+        + "ORDER BY p.message_id DESC LIMIT ?",
+        (
+            bot,
+            chat,
+            grant,
+            cutoff,
+            cutoff,
+            cutoff,
+            thread,
+            before,
+            thread,
+            json.dumps(sorted(excluded)),
+            TOPIC_MESSAGES,
+        ),
+    ) as cursor:
+        rows = await cursor.fetchall()
+    result: list[dict[str, Any]] = []
+    refs: list[dict[str, Any]] = []
+    remaining = TOPIC_CHARS
+    for mid, event, at, sender, raw in rows:
+        update = json.loads(raw)
+        message = update.get("edited_message") or update["message"]
+        text = message["text"].strip()
+        if not text:
+            continue
+        if len(text) > remaining:
+            text = text[: remaining - 1] + "…"
+        result.append(
+            dict(
+                message_id=mid,
+                event_id=event,
+                received_at=at,
+                sender_id=sender,
+                thread_id=thread or None,
+                name=str(message["from"].get("first_name") or "Участник")[:80],
+                forwarded=bool(message.get("forward_origin") or message.get("forward_date")),
+                text=text,
+            )
+        )
+        refs.append(dict(message_id=mid, event_id=event, received_at=at))
+        remaining -= len(text)
+        if remaining == 0:
+            break
+    return result[::-1], refs[::-1]
 
 
 async def assistants(
@@ -276,6 +362,7 @@ async def select(
     settings: Settings,
     *,
     enqueue_summaries: bool = False,
+    thread: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     sender, current = str(message.get("from", {}).get("id", "")), message["message_id"]
     own = await one(
@@ -331,6 +418,8 @@ async def select(
             person,
             limit - int(person == sender and included),
             before=current,
+            thread=thread,
+            exact_ids=visited,
         )
         bot_parts, bot_refs = await assistants(conn, bot, chat, grant, history, before=current)
         from zarya.participant_summaries import admit as admit_summaries

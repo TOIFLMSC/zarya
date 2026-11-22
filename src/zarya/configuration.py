@@ -30,6 +30,7 @@ def validate(raw: str) -> tuple[Settings, PromptBundle]:
         optional = {
             "memory_retrieval",
             "participant_context_messages",
+            "topic_context_chat_id",
             "participant_summaries_enabled",
             "participant_summary_prompt",
         }
