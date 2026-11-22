@@ -25,6 +25,7 @@ DOCS = {
     "operations.md",
     "codegraph.md",
     "memory-retrieval.md",
+    "task-state.md",
 }
 ROOTS = ("src/zarya", "tests", "web/src", "scripts")
 MAX_FILE = 1_048_576

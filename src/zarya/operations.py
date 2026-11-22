@@ -19,14 +19,17 @@ WITH calls AS (
  WHEN c.photo_batch_id IS NOT NULL THEN 'photo'
  WHEN c.memory_batch_id IS NOT NULL THEN 'memory'
  WHEN c.participant_summary_id IS NOT NULL THEN 'participant_summary'
+ WHEN c.task_state_id IS NOT NULL THEN 'task_state'
  WHEN c.media_run_id IS NOT NULL THEN CASE WHEN c.operation='asr' THEN 'asr' ELSE 'video' END
  WHEN d.mode='paid' THEN 'replay' WHEN d.id IS NOT NULL THEN 'dialogue' ELSE 'other' END task,
- COALESCE(d.bot_id,p.bot_id,m.bot_id,r.bot_id,v.bot_id,a.bot_id,s.bot_id,e.bot_id,'') bot_id,
- COALESCE(d.chat_id,p.chat_id,m.chat_id,r.chat_id,v.chat_id,a.chat_id,s.chat_id,e.chat_id,'')
+ COALESCE(d.bot_id,p.bot_id,m.bot_id,r.bot_id,v.bot_id,a.bot_id,s.bot_id,t.bot_id,e.bot_id,'')
+ bot_id,
+ COALESCE(d.chat_id,p.chat_id,m.chat_id,r.chat_id,v.chat_id,a.chat_id,s.chat_id,t.chat_id,e.chat_id,'')
  chat_id,
  CASE WHEN d.id IS NOT NULL THEN CASE WHEN d.chat_id LIKE '-%' THEN 'group' ELSE 'private' END
  ELSE COALESCE(p.scope,m.scope,r.scope,v.scope,a.scope,
  CASE WHEN s.id IS NOT NULL THEN CASE WHEN s.chat_id LIKE '-%' THEN 'group' ELSE 'private' END END,
+ CASE WHEN t.id IS NOT NULL THEN CASE WHEN t.chat_id LIKE '-%' THEN 'group' ELSE 'private' END END,
  'unknown') END scope,
  COALESCE(c.cost_usd,0)+COALESCE(c.search_cost_usd,0) known_cost_usd,
  CASE WHEN c.cost_usd IS NULL OR (c.research_run_id IS NOT NULL AND c.search_cost_usd IS NULL)
@@ -35,6 +38,7 @@ WITH calls AS (
  LEFT JOIN photo_batches p ON p.id=c.photo_batch_id
  LEFT JOIN memory_batches m ON m.id=c.memory_batch_id
  LEFT JOIN participant_summary_blocks s ON s.id=c.participant_summary_id
+ LEFT JOIN task_states t ON t.id=c.task_state_id
  LEFT JOIN research_runs r ON r.id=c.research_run_id
  LEFT JOIN media_runs v ON v.id=c.media_run_id
  LEFT JOIN avatar_runs a ON a.id=c.avatar_run_id
@@ -211,6 +215,16 @@ class Operations:
                     UNION ALL SELECT 'participant_summary',state,bot_id,chat_id,
                     CASE WHEN chat_id LIKE '-%' THEN 'group' ELSE 'private' END,created_at
                     FROM participant_summary_blocks
+                    UNION ALL SELECT 'task_state',
+                    CASE WHEN c.state='started' THEN 'started'
+                         WHEN t.attempted<t.revision THEN 'queued'
+                         WHEN c.state='unknown' THEN 'unknown' ELSE 'completed' END,
+                    t.bot_id,t.chat_id,
+                    CASE WHEN t.chat_id LIKE '-%' THEN 'group' ELSE 'private' END,
+                    CASE WHEN c.state='started' THEN c.created_at
+                         ELSE strftime('%Y-%m-%dT%H:%M:%fZ',t.ready_at,'unixepoch') END
+                    FROM task_states t LEFT JOIN model_calls c
+                    ON c.task_state_id=t.id AND c.task_revision=t.attempted WHERE t.retired=0
                     UNION ALL SELECT 'research',state,bot_id,chat_id,scope,created_at
                     FROM research_runs
                     UNION ALL SELECT 'media',state,bot_id,chat_id,scope,created_at

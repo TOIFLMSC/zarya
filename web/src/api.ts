@@ -201,6 +201,9 @@ export type DialogDetail = DialogItem & {
     invalidated?: boolean;
     verbatim_quote?: boolean;
     context_budget?: ContextBudget;
+    task_state?: {
+      fields: { kind: string; message_id: number; quote: string }[];
+    };
     topic_context?: {
       message_id: number;
       event_id: number;

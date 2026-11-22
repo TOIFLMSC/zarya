@@ -87,6 +87,9 @@ async def scrub(db: Database) -> None:
         )
         await purge_dialogues(c, "1=1", ())
         await purge_summaries(c, "1=1", ())
+        from zarya.task_state import scrub as scrub_tasks
+
+        await scrub_tasks(c, "retired=0", (), retire=True)
         await purge_media(c, "1=1", ())
         await purge_research(c, "1=1", ())
         await purge_avatars(c, "1=1", ())

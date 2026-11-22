@@ -298,6 +298,9 @@ async def suppress_sources(
         if not source:
             continue
         await conn.execute("UPDATE memory_sources SET valid=0,text='' WHERE id=?", (source_id,))
+        from zarya.task_state import invalidate_source
+
+        await invalidate_source(conn, source[1])
         from zarya.avatar_logic import purge as purge_avatars
         from zarya.media_logic import purge as purge_media
         from zarya.media_logic import purge_analysis
