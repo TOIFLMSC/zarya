@@ -24,6 +24,7 @@ from zarya.dialogue_logic import (
 )
 from zarya.media_logic import MEDIA_WAIT
 from zarya.media_logic import refs_valid as media_refs_valid
+from zarya.memory_e5 import query_text
 from zarya.memory_logic import empty_snapshot
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
@@ -40,6 +41,30 @@ if TYPE_CHECKING:
     from zarya.memory import MemoryEngine
     from zarya.photos import PhotoEngine
     from zarya.research import ResearchEngine
+
+
+PENDING_DIALOGUE = (
+    "SELECT j.id,j.payload,j.access_version,e.payload,j.created_at,e.received_at "
+    "FROM jobs j JOIN events e "
+    "ON e.id=j.event_id WHERE e.bot_id=? AND j.kind='telegram' AND "
+    "j.state='pending' AND "
+    "NOT "
+    + PHOTO_WAIT
+    + "AND NOT "
+    + RESEARCH_WAIT
+    + "AND NOT "
+    + MEDIA_WAIT
+    + "AND NOT "
+    + AVATAR_WAIT
+    + "AND "
+    "NOT EXISTS (SELECT 1 FROM jobs busy JOIN events be ON be.id=busy.event_id "
+    "WHERE busy.state='running' "
+    "AND be.bot_id=e.bot_id AND be.chat_id=e.chat_id) "
+    "AND NOT EXISTS (SELECT 1 FROM model_calls m "
+    "JOIN jobs busy ON busy.id=m.job_id JOIN events be ON be.id=busy.event_id "
+    "WHERE m.state='started' AND be.bot_id=e.bot_id AND be.chat_id=e.chat_id) "
+    "ORDER BY j.id LIMIT 1"
+)
 
 
 class DialogueEngine:
@@ -63,34 +88,15 @@ class DialogueEngine:
         }
 
     async def claim(self, bot_id: str) -> dict[str, Any] | None:
+        prepared_job = None
+        semantic = None
+        if self.memory:
+            prepared_job, semantic = await self.memory.prepare_search(bot_id, PENDING_DIALOGUE)
         async with self.store.gate, self.db.transaction() as conn:
             claimed_at = time.time()
             claim_start = time.monotonic()
             measured: dict[str, float] = {}
-            job = await row(
-                conn,
-                "SELECT j.id,j.payload,j.access_version,e.payload,j.created_at,e.received_at "
-                "FROM jobs j JOIN events e "
-                "ON e.id=j.event_id WHERE e.bot_id=? AND j.kind='telegram' AND "
-                "j.state='pending' AND "
-                "NOT "
-                + PHOTO_WAIT
-                + "AND NOT "
-                + RESEARCH_WAIT
-                + "AND NOT "
-                + MEDIA_WAIT
-                + "AND NOT "
-                + AVATAR_WAIT
-                + "AND "
-                "NOT EXISTS (SELECT 1 FROM jobs busy JOIN events be ON be.id=busy.event_id "
-                "WHERE busy.state='running' "
-                "AND be.bot_id=e.bot_id AND be.chat_id=e.chat_id) "
-                "AND NOT EXISTS (SELECT 1 FROM model_calls m "
-                "JOIN jobs busy ON busy.id=m.job_id JOIN events be ON be.id=busy.event_id "
-                "WHERE m.state='started' AND be.bot_id=e.bot_id AND be.chat_id=e.chat_id) "
-                "ORDER BY j.id LIMIT 1",
-                (bot_id,),
-            )
+            job = await row(conn, PENDING_DIALOGUE, (bot_id,))
             if not job:
                 return None
             job_id, payload_json, access_version, update_json, created_at, received_at = job
@@ -430,6 +436,11 @@ class DialogueEngine:
                     speaker=sender_id,
                     thread=thread_id,
                     diagnostics=retrieval,
+                    semantic=(
+                        semantic
+                        if prepared_job == (settings_row[0], job, query_text(message))
+                        else None
+                    ),
                 )
                 measured["context_ms"] = timings.elapsed(context_start)
             topic_context: list[dict[str, Any]] = []

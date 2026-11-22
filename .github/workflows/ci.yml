@@ -55,11 +55,24 @@ jobs:
       - name: Build and verify the release bundle
         run: |
           mkdir -p dist/release
+          uv run --no-sync python -m zarya.memory_e5
           uv build --wheel --out-dir "$RUNNER_TEMP/zarya-wheel"
           cp "$RUNNER_TEMP/zarya-wheel/"*.whl dist/release/
           uv export --locked --no-dev --no-emit-project --format requirements.txt -o dist/release/requirements.txt
           cp -r web/dist dist/release/web
           echo "$GITHUB_SHA" > dist/release/REVISION
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          path, = Path("dist/release").glob("*.whl")
+          with ZipFile(path) as wheel:
+              assert {
+                  "zarya/e5_assets/tokenizer.json",
+                  "zarya/e5_assets/model_quantized.onnx",
+                  "zarya/e5_license.txt",
+              } <= set(wheel.namelist())
+          assert sum(p.stat().st_size for p in path.parent.rglob("*") if p.is_file()) < 256 * 1024**2
+          PY
           cd dist/release
           # upload-artifact skips hidden paths. Every file in the manifest must ship.
           if [[ -n "$(find . -mindepth 1 -name '.*' -print -quit)" ]]; then

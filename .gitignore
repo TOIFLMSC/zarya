@@ -57,3 +57,4 @@ settings.local.json
 *-api-key.txt
 .coverage
 htmlcov/
+/src/zarya/e5_assets/

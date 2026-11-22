@@ -14,6 +14,7 @@ dependencies = [
   "openai>=3.26,<4",
   "pillow>=11,<13",
   "aiohttp>=3.13,<4",
+  "numpy==2.2.6", "onnxruntime==1.23.2", "tokenizers==0.22.1",
 ]
 
 [project.scripts]
@@ -24,6 +25,7 @@ dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "httpx>=0.28,<1", "ruff>=0.11,<1
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/zarya"]
+artifacts = ["src/zarya/e5_assets/*.json", "src/zarya/e5_assets/*.onnx"]
 
 [tool.ruff]
 target-version = "py312"
