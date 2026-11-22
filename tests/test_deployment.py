@@ -99,7 +99,10 @@ def test_busy_model_call_defers_cutover(modules, tmp_path, monkeypatch):
     assert cd.in_flight()
 
 
-def test_preupload_failures_do_not_accumulate_local_snapshots(modules, tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_rollback", [False, True])
+def test_preupload_failures_do_not_accumulate_local_files(
+    modules, tmp_path, monkeypatch, legacy_rollback
+):
     cd, _, _ = modules
     monkeypatch.setattr(cd, "ROOT", tmp_path)
     monkeypatch.setattr(cd, "sync", lambda _: None)
@@ -126,15 +129,25 @@ def test_preupload_failures_do_not_accumulate_local_snapshots(modules, tmp_path,
     monkeypatch.setattr(cd, "python", capture)
     monkeypatch.setattr(cd.disk_backup, "publish", deny_write)
     state = {}
-    cd.save(state, "idle", live=None)
+    releases = tmp_path / "releases"
+    releases.mkdir()
+    keep = {"b" * 40 + "-older", "c" * 40 + "-live"} if legacy_rollback else set()
+    for name in keep:
+        (releases / name).mkdir()
+    live = "c" * 40 + "-live" if legacy_rollback else None
+    cd.save(state, "idle", live=live, old=live, rejected="d" * 40)
+    cd.prune_local(state)
     for attempt in range(3):
         target = "a" * 40 + f"-{attempt}"
+        (releases / target).mkdir()
         run = tmp_path / "runs" / target
         run.mkdir(parents=True)
         with pytest.raises(RuntimeError, match="storage quota"):
             cd.deploy(state, target, run)
         state = cd.load()
         assert running and state["phase"] == "idle" and state["disk_retry_at"] > 0
+        cd.cycle()
+        assert {folder.name for folder in releases.iterdir()} == keep
     assert not list((tmp_path / "runs").iterdir())
 
 
@@ -235,13 +248,24 @@ def test_idle_poll_bounds_successful_deploys_across_upgrade_and_failure(
 def test_upgrade_after_legacy_rollback_keeps_unidentified_previous(modules, tmp_path, monkeypatch):
     cd, _, _ = modules
     monkeypatch.setattr(cd, "ROOT", tmp_path)
+    monkeypatch.setattr(cd, "sync", lambda _: None)
     old = tmp_path / "releases" / ("a" * 40 + "-env")
     old.mkdir(parents=True)
     os.utime(old, (946684800, 946684800))
     live = "b" * 40 + "-env"
     (old.parent / live).mkdir()
-    cd.prune_local(dict(live=live, old=live, rejected="c" * 40))
+    state = dict(live=live, old=live, rejected="c" * 40)
+    cd.prune_local(state)
     assert old.is_dir()
+    target = "d" * 40 + "-env"
+    (old.parent / target).mkdir()
+    run = tmp_path / "runs" / ("d" * 40 + "-copy")
+    run.mkdir(parents=True)
+    cd.save(state, "admitted", live=target, old=live, run=run.name)
+    monkeypatch.setattr(cd, "healthy", lambda _: True)
+    cd.finish(state)
+    cd.prune_local(cd.load())
+    assert {p.name for p in old.parent.iterdir()} == {live, target}
 
 
 def test_retired_run_cleanup_retries_after_interruption(modules, tmp_path, monkeypatch):

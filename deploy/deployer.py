@@ -206,6 +206,7 @@ def finish(state):
             "idle",
             rejected=None,
             previous_release=state["old"],
+            legacy_releases=[],
             successful_run=state["run"],
             retired_run=state.get("successful_run"),
         )
@@ -293,10 +294,15 @@ def prune_local(state):
         sync(folder.parent)
         save(state, "idle", retired_run=None)
     keep = {state["live"], state.get("old"), state.get("previous_release")}
-    # An old journal after a failed attempt cannot identify the prior healthy release.
+    releases = ROOT / "releases"
+    # An old rollback journal cannot identify the previous healthy environment.
+    # Pin only the directories present before our first staging attempt.
     if state["live"] and "previous_release" not in state and state.get("old") == state["live"]:
-        return
-    for folder in (ROOT / "releases").iterdir():
+        if "legacy_releases" not in state:
+            legacy = sorted(p.name for p in releases.iterdir() if RELEASE_NAME.fullmatch(p.name))
+            save(state, "idle", legacy_releases=legacy)
+        keep.update(state["legacy_releases"])
+    for folder in releases.iterdir():
         if (
             folder.name not in keep
             and RELEASE_NAME.fullmatch(folder.name)
