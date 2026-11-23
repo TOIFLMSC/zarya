@@ -34,10 +34,27 @@ jobs:
           uv sync --locked
           npm install --global pnpm@11.19.0
           pnpm --dir web install --frozen-lockfile
+      - name: Install and verify FFmpeg for media tests
+        timeout-minutes: 4
+        run: |
           if ! command -v ffmpeg || ! command -v ffprobe; then
-            sudo apt-get update
-            sudo apt-get install -y ffmpeg
+            ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+            sudo sed -i -E \
+              -e 's|https?://azure[.]archive[.]ubuntu[.]com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+              -e 's|http://security[.]ubuntu[.]com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
+              "$ubuntu_sources"
+            apt_options=(
+              -o "Dir::Etc::SourceList=$ubuntu_sources"
+              -o Dir::Etc::SourceParts=/dev/null
+              -o Acquire::Retries=1
+              -o Acquire::http::Timeout=15
+              -o Acquire::https::Timeout=15
+            )
+            sudo apt-get "${apt_options[@]}" update --error-on=any
+            sudo apt-get "${apt_options[@]}" install -y --no-install-recommends ffmpeg
           fi
+          ffmpeg -version
+          ffprobe -version
       - name: Check publication, Python and frontend
         run: |
           uv run --no-sync python scripts/check-publication.py
