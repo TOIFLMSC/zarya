@@ -1,3 +1,4 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -38,7 +39,12 @@ async def test_blocked_article_multihop_primary_source_reaches_requested_reply(t
         )
         model.generate = AsyncMock(
             return_value=ModelResult(
-                text=json.dumps(analysis()),
+                text=json.dumps(
+                    {
+                        **analysis(),
+                        "source_lookup": {"kind": "official_section", "url": URL, "heading": "FAQ"},
+                    }
+                ),
                 search_actions=[
                     action(url="https://example.org/news"),
                     {
@@ -53,7 +59,7 @@ async def test_blocked_article_multihop_primary_source_reaches_requested_reply(t
         )
         await research.execute(work)
         request = model.generate.call_args.args[0]
-        assert request["max_tool_calls"] == 6
+        assert request["max_tool_calls"] == 4
         assert request["model"] == work["model"] and request["max_output_tokens"] == 3000
         assert "Не повторяй одинаковое неудачное открытие" in request["instructions"]
         assert "Цель исследования задаёт текущий question" in request["instructions"]
@@ -61,6 +67,7 @@ async def test_blocked_article_multihop_primary_source_reaches_requested_reply(t
         assert set(json.loads(request["input"])) == {"question", "provided_material", "sources"}
         detail = await research.details(work["id"], "999")
         assert detail["state"] == "completed"
+        assert detail["result"]["source_lookup"]["kind"] == "official_section"
         identifier = detail["result"]["claims"][0]["source_ids"][0]
         model.generate.return_value = ModelResult(text=f"Разъяснение в FAQ [S{identifier}]")
         reply = await run_one(dialogue)
@@ -127,3 +134,164 @@ async def test_unused_unfinished_action_does_not_discard_verified_claim(tmp_path
         detail = await research.details(work["id"], "999")
         assert detail["state"] == "completed"
         assert "https://unfinished.example/" not in {s.get("url") for s in detail["sources"]}
+
+
+async def test_official_lookup_second_pass_is_isolated_and_reply_includes_verified_faq(tmp_path):
+    async with store_at(tmp_path) as store:
+        article = "https://tass.ru/ekonomika/28215863"
+        faq = "https://www.cbr.ru/develop/cryptocurrency/"
+        dialogue, research, model, fetch, work = await research_ready(
+            store, "Найди ссылку на разъяснение из " + article + "?private=LOCAL_SENTINEL"
+        )
+        fetch.fetch = AsyncMock(
+            return_value={
+                "requested_url": article + "?private=LOCAL_SENTINEL",
+                "url": None,
+                "text": "",
+                "coverage": "unavailable",
+                "error": "http_403",
+            }
+        )
+        first = {
+            "summary": "Пока найдена только главная страница регулятора.",
+            "claims": [],
+            "source_lookup": {"kind": "document", "url": "https://www.cbr.ru/"},
+        }
+        second = {
+            "summary": "Банк России объяснил условия P2P в FAQ.",
+            "claims": [
+                {
+                    "text": "Вопрос 10 описывает условия P2P.",
+                    "kind": "fact",
+                    "verdict": "supported",
+                    "urls": [faq],
+                }
+            ],
+            "source_lookup": {"kind": "official_section", "url": faq, "heading": "Вопрос 10"},
+        }
+        model.generate = AsyncMock(
+            side_effect=[
+                ModelResult(
+                    text=json.dumps(first), search_actions=[action(url="https://www.cbr.ru/")]
+                ),
+                ModelResult(
+                    text=json.dumps(second),
+                    search_actions=[
+                        action(url=faq),
+                        {"type": "open_page", "status": "completed", "url": faq},
+                    ],
+                ),
+                ModelResult(text="У Банка России условия P2P объяснены в вопросе 10 FAQ."),
+            ]
+        )
+        await research.execute(work)
+        main, retry = [c.args[0] for c in model.generate.await_args_list]
+        assert main["max_tool_calls"] + retry["max_tool_calls"] == 6
+        assert json.loads(retry["input"]) == {
+            "reason": "source_unconfirmed",
+            "public_urls": [article],
+        }
+        assert "previous_response_id" not in retry and "LOCAL_SENTINEL" not in retry["input"]
+        saved = await research.details(work["id"], "999")
+        assert [c["phase"] for c in saved["calls"]] == ["research_initial", "research_gap"]
+        assert [c["search_cost_usd"] for c in saved["calls"]] == [0.01, 0.01]
+        assert saved["result"]["source_lookup"]["heading"] == "Вопрос 10"
+        assert saved["result"]["followup"] == "completed"
+        response = await run_one(dialogue)
+        detail = await dialogue.details(response["run_id"])
+        assert detail["response"].endswith("Официальный раздел - " + faq)
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+async def test_mini_research_keeps_evidence_and_uses_a_detailed_answer(tmp_path, unknown):
+    async with store_at(tmp_path) as store:
+        dialogue, research, model, _, work = await research_ready(
+            store, "Заря, сделай мини-ресерч и сравни условия двух программ."
+        )
+        first = {**analysis(), "needs_followup": True}
+        second_url = "https://example.org/program-b/conditions"
+        second = {
+            "summary": "Проверены условия второй программы.",
+            "claims": [
+                {
+                    "text": "Вторая программа действует до декабря.",
+                    "kind": "fact",
+                    "verdict": "supported",
+                    "urls": [second_url],
+                }
+            ],
+        }
+        result = (
+            ModelResult(state="unknown", error="connection_uncertain")
+            if unknown
+            else ModelResult(text=json.dumps(second), search_actions=[action(url=second_url)])
+        )
+        model.generate = AsyncMock(
+            side_effect=[
+                ModelResult(text=json.dumps(first), search_actions=[action()]),
+                result,
+                ModelResult(text="Сравнение условий."),
+            ]
+        )
+        await research.execute(work)
+        await research.recover("999")
+        assert await research.claim("999") is None
+        saved = await research.details(work["id"], "999")
+        assert saved["state"] == "completed"
+        assert saved["result"]["followup"] == ("incomplete" if unknown else "completed")
+        assert "source_lookup" not in saved["result"]
+        assert len(saved["result"]["claims"]) == (1 if unknown else 2)
+        assert len(saved["calls"]) == 2
+        response = await run_one(dialogue)
+        assert response["snapshot"]["answer_mode"] == "detailed"
+        assert response["request"]["text"]["verbosity"] == "medium"
+        assert "сопоставь источники" in response["request"]["instructions"]
+
+
+@pytest.mark.parametrize("interruption", ["restart", "revoke"])
+async def test_inflight_second_pass_cannot_retry_or_restore_erased_evidence(tmp_path, interruption):
+    async with store_at(tmp_path) as store:
+        _, research, model, _, work = await research_ready(
+            store, "Заря, сделай мини-ресерч и сравни условия."
+        )
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        first = ModelResult(
+            text=json.dumps({**analysis(), "needs_followup": True}), search_actions=[action()]
+        )
+        new_url = "https://example.org/second"
+
+        async def generate(request):
+            if "question" in json.loads(request["input"]):
+                return first
+            entered.set()
+            await release.wait()
+            return ModelResult(
+                text=json.dumps({**analysis(), "summary": "LATE_EVIDENCE", "claims": []}),
+                search_actions=[action(url=new_url)],
+            )
+
+        model.generate = AsyncMock(side_effect=generate)
+        worker = asyncio.create_task(research.execute(work))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            if interruption == "restart":
+                await research.recover("999")
+            else:
+                await store.decide("999", "private", "42", "revoked", 2)
+        finally:
+            release.set()
+            await worker
+        await research.recover("999")
+        assert await research.claim("999") is None
+        assert model.generate.await_count == 2
+        saved = await research.details(work["id"], "999")
+        assert "LATE_EVIDENCE" not in json.dumps(saved["result"])
+        assert new_url not in {source.get("url") for source in saved["sources"]}
+        if interruption == "restart":
+            assert saved["state"] == "completed"
+            assert saved["result"]["followup"] == "incomplete"
+            assert saved["calls"][1]["state"] == "unknown"
+        else:
+            assert saved["state"] == "cancelled"
+            assert not saved["result"]

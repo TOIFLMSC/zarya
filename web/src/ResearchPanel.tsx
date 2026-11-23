@@ -182,7 +182,8 @@ export function ResearchPanel({
           <p className="muted">
             До {list.max_tool_calls} действий на одно исследование. Поиск,
             открытие страницы и поиск внутри неё расходуют общий лимит.
-            Автоматического повторного запроса к модели нет.
+            Если не хватает подтверждения, возможна одна дополнительная
+            проверка в том же лимите.
             Поиск ориентируется на текущий вопрос; прежний материал служит
             контекстом и проверяется по мере необходимости для ответа.
           </p>
@@ -291,7 +292,26 @@ export function ResearchPanel({
               {detail.result && (
                 <>
                   <h3>Результат проверки</h3>
+                  {detail.result.source_lookup && (
+                    <p className="muted">
+                      {{
+                        document: "Найден точный документ",
+                        official_section: "Найден официальный раздел",
+                        unconfirmed: "Первоисточник не подтверждён",
+                      }[detail.result.source_lookup.kind]}
+                      {detail.result.source_lookup.heading
+                        ? ` · ${detail.result.source_lookup.heading}`
+                        : ""}
+                    </p>
+                  )}
                   <p className="research-text">{detail.result.summary}</p>
+                  {detail.result.followup === "incomplete" && (
+                    <p className="notice">Дополнительная проверка не завершилась.</p>
+                  )}
+                  {detail.result.followup_summary &&
+                    detail.result.followup_summary !== detail.result.summary && (
+                      <p className="research-text">{detail.result.followup_summary}</p>
+                    )}
                   <h3>Тезисы</h3>
                   {detail.result.claims.map((c, i) => (
                     <div className="research-source" key={i}>
@@ -454,31 +474,35 @@ export function ResearchPanel({
                     <small>{states[a.status ?? ""] ?? a.status}</small>
                   </div>
                 ))}
-                {detail.call ? (
-                  <>
+                {detail.call ? (detail.calls ?? [detail.call]).map((call, index) => (
+                  <div className="research-source" key={index}>
+                    <strong>
+                      {call.phase === "research_gap" ? "Дополнительная проверка" : "Первый поиск"}
+                      {" · "}{states[call.state] ?? call.state}
+                    </strong>
                     <p>
                       Токены:{" "}
-                      {detail.call.usage
-                        ? `${detail.call.usage.input_tokens} вход / ${detail.call.usage.output_tokens} выход`
+                      {call.usage
+                        ? `${call.usage.input_tokens} вход / ${call.usage.output_tokens} выход`
                         : "Неизвестно"}
                     </p>
                     <p>
                       Длительность:{" "}
-                      {detail.call.latency_ms == null
+                      {call.latency_ms == null
                         ? "Неизвестно"
-                        : `${detail.call.latency_ms} мс`}
+                        : `${call.latency_ms} мс`}
                     </p>
                     <p>
-                      Оценка модели: {money(detail.call.cost_usd)} · поиска:{" "}
-                      {money(detail.call.search_cost_usd)}
+                      Оценка модели: {money(call.cost_usd)} · поиска:{" "}
+                      {money(call.search_cost_usd)}
                     </p>
                     <p className="muted">
                       Это оценка по usage и наблюдаемым поисковым действиям, а
                       не подтверждённое списание. Финальный ответ учитывается
                       отдельно в «Диалогах».
                     </p>
-                  </>
-                ) : (
+                  </div>
+                )) : (
                   <p className="muted">
                     Платный поиск не выполнялся. Расход на ответ — в «Диалогах».
                   </p>
