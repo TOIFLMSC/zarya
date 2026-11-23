@@ -80,6 +80,8 @@ from zarya.research_logic import wants_search
         ("Дай ссылку на разъяснение ЦБ", True),
         ("Пришли ссылку на публикацию ведомства", True),
         ("Не ищи в интернете, дай ссылку на разъяснение ЦБ", False),
+        ("Я уже нашёл первоисточник", False),
+        ("У меня есть официальный документ", False),
     ],
 )
 def test_general_request_routing_has_no_subject_or_recency_whitelist(question, expected):

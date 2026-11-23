@@ -275,12 +275,18 @@ async def test_official_lookup_second_pass_is_isolated_and_reply_includes_verifi
         assert detail["response"].endswith("Официальный раздел - " + faq)
 
 
-@pytest.mark.parametrize("unknown", [False, True])
-async def test_mini_research_keeps_evidence_and_uses_a_detailed_answer(tmp_path, unknown):
+@pytest.mark.parametrize(
+    ("question", "unknown"),
+    [
+        ("Заря, сделай мини-ресерч и сравни условия двух программ.", False),
+        ("Заря, сделай мини-ресерч и сравни условия двух программ.", True),
+        ("Заря, проверь несколько источников об условиях программы.", False),
+    ],
+)
+async def test_mini_research_keeps_evidence_and_uses_a_detailed_answer(tmp_path, question, unknown):
     async with store_at(tmp_path) as store:
-        dialogue, research, model, _, work = await research_ready(
-            store, "Заря, сделай мини-ресерч и сравни условия двух программ."
-        )
+        dialogue, research, model, _, work = await research_ready(store, question)
+        assert work["profile"] == "study"
         first = {**analysis(), "needs_followup": True}
         second_url = "https://example.org/program-b/conditions"
         second = {

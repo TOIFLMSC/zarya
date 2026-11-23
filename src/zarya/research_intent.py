@@ -35,7 +35,8 @@ QUESTION = re.compile(
 )
 REQUEST = re.compile(
     r"\b(?:расскажи\w*|объясни\w*|поясни\w*|разбери\w*|разберись|подскажи\w*|"
-    r"помоги\w*|сравни\w*|оцени\w*|посоветуй\w*|подбери\w*|проанализируй\w*|"
+    r"помоги\w*|сравни\w*|сопоставь\w*|сверь\w*|оцени\w*|посоветуй\w*|"
+    r"подбери\w*|проанализируй\w*|"
     r"проверь\w*|провер[иь]\w*|найди\w*|поищи\w*|загугл\w*|узнай\w*|"
     r"исследуй\w*|рес[её]рч\w*|мини-исследовани\w*|"
     r"посмотри\w*|глянь\w*|гляни\w*|подтверди\w*|опровергни\w*|факт.?чек|"
@@ -54,13 +55,19 @@ OPT_OUT = re.compile(
 SOURCE_REQUEST = re.compile(
     r"\b(?:первоисточник\w*|исходн\w+\s+документ\w*|"
     r"официальн\w+\s+(?:разъяснен|публикац|источник|документ)\w*|"
-    r"в\s+каком\s+(?:документе|законе|постановлении)|"
-    r"(?:найди|дай|скинь|пришли|кинь)\w*\s+(?:(?:мне|пожалуйста|прямую)\s+)*ссылк\w+\s+на)\b",
+    r"в\s+каком\s+(?:документе|законе|постановлении))\b",
+    re.I,
+)
+DIRECT_SOURCE_REQUEST = re.compile(
+    r"\b(?:найди|дай|скинь|пришли|кинь)\w*\s+(?:(?:мне|пожалуйста|прямую)\s+)*"
+    r"(?:ссылк\w+\s+на|первоисточник\w*)\b",
     re.I,
 )
 DEEP = re.compile(
     r"\b(?:сравни\w*|исследуй\w*|рес[её]рч\w*|исследовани[еяю]|"
     r"(?:разбери|объясни|собери)\w*\s+(?:подробн\w*|по\s+пунктам)|"
+    r"(?:проверь|сверь|посмотри|собери|сопоставь)\s+"
+    r"(?:(?:ещ[её]|сразу|хотя\s+бы)\s+)?несколько\s+источник\w*|"
     r"(?:по|из)\s+(?:нескольким|нескольких)\s+источник\w*)\b",
     re.I,
 )
@@ -211,14 +218,18 @@ def search_kind(question: str) -> Kind:
     question = re.sub(r"https?://[^\s<>]+", " ", question)
     if OPT_OUT.search(question) or local_task(question):
         return "none"
-    if QUESTION.search(question) or REQUEST.search(question) or SOURCE_REQUEST.search(question):
+    if (
+        QUESTION.search(question)
+        or REQUEST.search(question)
+        or DIRECT_SOURCE_REQUEST.search(question)
+    ):
         return "request"
     return "none"
 
 
 def research_profile(speaker_question: str) -> str:
     speaker_question = re.sub(r"https?://[^\s<>]+", " ", speaker_question)
-    if SOURCE_REQUEST.search(speaker_question):
+    if DIRECT_SOURCE_REQUEST.search(speaker_question) or SOURCE_REQUEST.search(speaker_question):
         return "source"
     return "study" if DEEP.search(speaker_question) else "answer"
 
