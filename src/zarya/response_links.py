@@ -6,7 +6,7 @@ from typing import Any
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
 from zarya.research_intent import DIRECT_SOURCE_REQUEST
 
-NOUN = r"(?:первоисточник\w*|источник\w*|ссылк\w*|пруф\w*|линк\w*|url|адрес\w*)"
+NOUN = r"(?:первоисточник\w*|источник\w*|ссыл(?:к\w*|ок)|пруф\w*|линк\w*|url|адрес\w*)"
 POSITIVE = re.compile(
     rf"{DIRECT_SOURCE_REQUEST.pattern}|"
     rf"\b(?:скинь\w*|кинь\w*|пришли\w*|дай|дайте|отправь\w*|покажи\w*|приложи\w*|"
@@ -44,7 +44,7 @@ def wants_sources(question: str) -> bool:
     signals = [
         (m.start(), True)
         for m in POSITIVE.finditer(question)
-        if not any(n.start() <= m.start() < n.end() for n in negatives)
+        if not any(n.start() < m.end() and m.start() < n.end() for n in negatives)
     ]
     signals += [(m.start(), False) for m in negatives]
     if signals:
