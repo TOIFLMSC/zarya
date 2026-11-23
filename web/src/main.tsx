@@ -17,6 +17,7 @@ import { ResearchPanel } from "./ResearchPanel";
 import { MediaPanel } from "./MediaPanel";
 import { BehaviorPanel } from "./BehaviorPanel";
 import { PilotPanel } from "./PilotPanel";
+import { OverviewActivity } from "./OverviewActivity";
 import { SettingsSection, revealInvalidField } from "./SettingsSection";
 
 function Mark() {
@@ -480,6 +481,7 @@ function Panel({ session, onExit }: { session: Session; onExit: () => void }) {
                   <Portrait />
                 </div>
               </section>
+              <OverviewActivity onUnauthorized={onExit} />
               <div className="cards">
                 <section className="card">
                   <span className="card-label">ПРИЛОЖЕНИЕ</span>

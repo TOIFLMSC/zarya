@@ -82,6 +82,8 @@ class PhotoEngine:
         grant: int,
         message_ids: list[int],
         settings: Settings,
+        *,
+        job_id: int | None = None,
     ) -> None:
         """Admit retained legacy attachments only on an addressed source request."""
         for message_id in message_ids:
@@ -98,7 +100,7 @@ class PhotoEngine:
                 (bot, chat, message_id, source[0], grant),
             )
             if not existing:
-                await admit(
+                batch, _, _ = await admit(
                     conn,
                     bot,
                     chat,
@@ -110,6 +112,12 @@ class PhotoEngine:
                     False,
                     addressed_source=True,
                 )
+                if batch is not None and job_id is not None:
+                    await conn.execute(
+                        "UPDATE photo_batches SET request_job_id=? WHERE id=? "
+                        "AND request_job_id IS NULL AND leader_job_id IS NULL",
+                        (job_id, batch),
+                    )
 
     async def recover(self, bot: str) -> None:
         async with self.store.gate, self.db.transaction() as conn:

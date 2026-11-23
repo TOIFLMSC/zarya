@@ -274,11 +274,9 @@ class MediaEngine:
         async with self.store.gate, self.db.transaction() as conn:
             if not await valid(conn, run):
                 return ModelResult(state="cancelled", error="source_changed")
-            if not await current_dependency(conn, run):
-                return ModelResult(state="cancelled", error="stale_request")
-            if operation == "vision" and not await current_job(
-                conn, run, work["analysis_context"].get("job_id")
-            ):
+            pinned_job = work["analysis_context"].get("job_id") if operation == "vision" else None
+            dependency = await current_job(conn, run, pinned_job)
+            if not dependency:
                 return ModelResult(state="cancelled", error="stale_request")
             if operation == "vision":
                 saved = await row(
@@ -292,7 +290,8 @@ class MediaEngine:
             )
             await conn.execute(
                 "INSERT INTO model_calls(provider,model,state,created_at,media_run_id,"
-                "operation,settings_version,request_json) VALUES ('openai',?,'started',?,?,?,?,?)",
+                "operation,settings_version,request_json,request_job_id) "
+                "VALUES ('openai',?,'started',?,?,?,?,?,?)",
                 (
                     model,
                     stamp(),
@@ -300,6 +299,7 @@ class MediaEngine:
                     operation,
                     work["version"],
                     json.dumps(request, ensure_ascii=False),
+                    dependency[0],
                 ),
             )
         started = time.monotonic()
