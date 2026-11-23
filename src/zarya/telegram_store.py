@@ -14,7 +14,7 @@ from zarya.avatar_logic import purge as purge_avatars
 from zarya.avatar_logic import valid as avatar_valid
 from zarya.configuration import prompts_at
 from zarya.database import ConflictError, Database
-from zarya.dialogue_logic import direct_trigger, message_text, topic_id
+from zarya.dialogue_logic import direct_trigger, explicit_reply, message_text, topic_id
 from zarya.media_logic import MEDIA_WAIT
 from zarya.media_logic import refs_valid as media_refs_valid
 from zarya.memory_logic import (
@@ -30,8 +30,10 @@ from zarya.models import Settings
 from zarya.participant_context import admit as admit_participant
 from zarya.photo_logic import PHOTO_WAIT, admit, link_job
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
+from zarya.research_intent import expects_forwarded_quote, text_factcheck
 from zarya.research_logic import RESEARCH_WAIT
 from zarya.research_logic import revision as research_revision
+from zarya.source_material import FORWARD_QUESTION_WAIT, preceding_forward_question
 from zarya.source_material import valid as source_valid
 
 
@@ -514,8 +516,43 @@ class TelegramStore:
                         if not edited
                         else None
                     )
-                    batch, album_job, new_photo_job = await admit(
-                        conn, bot_id, subject, scope, access[1], event_id, message, settings, edited
+                    album = str(message.get("media_group_id") or "")
+                    now = time.time()
+                    can_pair_post = (
+                        scope == "private"
+                        and not edited
+                        and not private_start
+                        and service_text is None
+                        and settings.dialogue_enabled
+                    )
+                    album_leader = (
+                        await row(
+                            conn,
+                            "SELECT j.state FROM jobs j JOIN events e ON e.id=j.event_id "
+                            "WHERE e.bot_id=? AND e.chat_id=? AND j.access_version=? "
+                            "AND json_extract(j.payload,'$.sender_id')=? "
+                            "AND json_extract(j.payload,'$.thread_id') IS ? "
+                            "AND json_extract(j.payload,'$.post_album')=? LIMIT 1",
+                            (bot_id, subject, access[1], sender_id, thread_id, album),
+                        )
+                        if can_pair_post and album
+                        else None
+                    )
+                    album_tail = bool(album_leader and album_leader[0] == "pending")
+                    previous_question = (
+                        await preceding_forward_question(
+                            conn, bot_id, subject, access[1], message, now
+                        )
+                        if can_pair_post and not album_leader
+                        else None
+                    )
+                    batch, album_job, new_photo_job = (
+                        (None, None, not album_tail)
+                        if previous_question or album_tail
+                        else await admit(
+                            conn, bot_id, subject, scope, access[1], event_id, message,
+                            settings, edited,
+                        )
                     )
                     if trigger == "ambient" and not edited and not message.get("photo"):
                         active = await row(
@@ -555,6 +592,7 @@ class TelegramStore:
                     if (edited and not batch_member) or (
                         not album_job
                         and new_photo_job
+                        and not album_leader
                         and trigger in {"private", "name", "mention", "reply", "continuation"}
                     ):
                         await conn.execute(
@@ -602,6 +640,8 @@ class TelegramStore:
                             time.time(),
                         ),
                     )
+                    if album_leader:
+                        continue
                     # Retention handles history; neighbours must not evict personal windows.
                     payload = {
                         "scope": scope,
@@ -653,6 +693,18 @@ class TelegramStore:
                         )
                     ):
                         continue
+                    if previous_question:
+                        question_job, payload["post_question"] = previous_question
+                        if album:
+                            payload["post_album"] = album
+                        payload["post_text_first"] = True
+                        await conn.execute(
+                            "UPDATE jobs SET state='cancelled' WHERE id=?", (question_job,)
+                        )
+                    elif explicit_reply(message) and text_factcheck(message):
+                        payload["post_text_first"] = True
+                    elif can_pair_post and expects_forwarded_quote(message):
+                        payload["post_wait_until"] = now + FORWARD_QUESTION_WAIT
                     job_cursor = await conn.execute(
                         "INSERT INTO "
                         "jobs(kind,event_id,state,payload,created_at,access_version) "

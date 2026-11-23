@@ -15,6 +15,7 @@ PROCESSING_VERSION = "vision-v3-auto-high-jpeg2048-alpha-white"
 
 # Outer query aliases: jobs j, events e. Used by both dialogue and typing admission.
 PHOTO_WAIT = (
+    "(COALESCE(json_extract(j.payload,'$.post_text_first'),0)=0 AND "
     "EXISTS (SELECT 1 FROM photo_batches p WHERE p.bot_id=e.bot_id "
     "AND p.chat_id=e.chat_id AND p.access_version=j.access_version "
     "AND p.state IN ('queued','downloading','analyzing') AND (p.leader_job_id=j.id "
@@ -25,7 +26,7 @@ PHOTO_WAIT = (
     "WHERE b.bot_id=e.bot_id AND b.chat_id=e.chat_id AND b.access_version=j.access_version "
     "AND (i.message_id=COALESCE(json_extract(e.payload,'$.message.reply_to_message.message_id'),"
     "json_extract(e.payload,'$.edited_message.reply_to_message.message_id')) "
-    "OR i.message_id IN (SELECT value FROM json_each(j.payload,'$.source_message_ids')))))) "
+    "OR i.message_id IN (SELECT value FROM json_each(j.payload,'$.source_message_ids'))))))) "
 )
 
 

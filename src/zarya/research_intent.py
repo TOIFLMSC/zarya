@@ -76,6 +76,31 @@ DEEP = re.compile(
     r"(?:по|из)\s+(?:нескольким|нескольких)\s+источник\w*)\b",
     re.I,
 )
+VERIFY_TEXT = re.compile(
+    r"\b(?:правд\w*|правдив\w*|достовер\w*|подтверд\w*|провер[ияь]\w*|"
+    r"факт.?чек|действительно|реально|точно|фейк\w*)\b",
+    re.I,
+)
+TEXT_EVIDENCE = re.compile(
+    r"\b(?:цитат\w*|подпис[ьи]\w*|текст\w*)\b", re.I
+)
+MEDIA_EVIDENCE = re.compile(
+    r"\b(?:(?:на|в|из)\s+(?:видео|ролик\w*|аудио|кадр\w*)|"
+    r"по\s+(?:видео|звуку|аудио)|видеоряд\w*|слышн\w*|озвуч\w*|"
+    r"(?:посмотри|глянь|разбери|проанализируй|просмотри|прослушай|послушай)\w*\s+"
+    r"(?:(?:это|этот|этот\s+же)\s+)?(?:видео|ролик\w*|аудио|звук\w*|запис\w*))\b",
+    re.I,
+)
+POST_REFERENCE = re.compile(
+    r"\b(?:эт\w*\s+цитат\w*|(?:цитат\w*|текст\w*)\s+(?:из\s+)?"
+    r"(?:этого\s+)?(?:пост\w*|сообщени\w*|подпис[ьи]\w*))\b",
+    re.I,
+)
+MEDIA_POINTER = re.compile(
+    r"(?:подробнее|подробности|смотри(?:те)?|цитата|ответ|вс[её])?\s*"
+    r"(?:в|на)\s+(?:видео|ролике|аудио)[.!…\s]*",
+    re.I,
+)
 
 
 def speaker_text(message: dict[str, Any]) -> str:
@@ -100,6 +125,26 @@ def speaker_text(message: dict[str, Any]) -> str:
 
 def blocks_external(message: dict[str, Any]) -> bool:
     return bool(OPT_OUT.search(speaker_text(message)))
+
+
+def text_factcheck(message: dict[str, Any]) -> bool:
+    text = speaker_text(message)
+    return bool(
+        TEXT_EVIDENCE.search(text) and VERIFY_TEXT.search(text) and not MEDIA_EVIDENCE.search(text)
+    )
+
+
+def expects_forwarded_quote(message: dict[str, Any]) -> bool:
+    return bool(
+        message.get("text")
+        and text_factcheck(message)
+        and POST_REFERENCE.search(speaker_text(message))
+    )
+
+
+def usable_post_text(text: str) -> bool:
+    text = text.strip()
+    return bool(text and not MEDIA_POINTER.fullmatch(text))
 
 
 def subject(text: str) -> str | None:

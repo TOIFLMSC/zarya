@@ -29,12 +29,12 @@ from zarya.memory_logic import empty_snapshot
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
 from zarya.photo_logic import PHOTO_WAIT
-from zarya.research_intent import speaker_text
+from zarya.research_intent import speaker_text, text_factcheck, usable_post_text
 from zarya.research_logic import RESEARCH_WAIT, research_answer_text, source_failure_text
 from zarya.research_plan import answer_mode as research_answer_mode
 from zarya.research_plan import answer_policy as research_answer_policy
 from zarya.response_links import display_text, message_requests_sources, requested
-from zarya.source_material import resolve
+from zarya.source_material import accepted, resolve
 from zarya.source_material import valid as source_valid
 from zarya.telegram_store import TelegramStore, row, stamp
 
@@ -50,7 +50,7 @@ PENDING_DIALOGUE = (
     "SELECT j.id,j.payload,j.access_version,e.payload,j.created_at,e.received_at "
     "FROM jobs j JOIN events e ON e.id=j.event_id "
     "LEFT JOIN text_batches b ON b.job_id=j.id "
-    "WHERE e.bot_id=? AND (b.job_id IS NULL OR b.ready_at<=?) "
+    "WHERE e.bot_id=? AND COALESCE(b.ready_at,json_extract(j.payload,'$.post_wait_until'),0)<=? "
     "AND j.kind='telegram' AND j.state='pending' AND "
     "NOT "
     + PHOTO_WAIT
@@ -224,6 +224,26 @@ class DialogueEngine:
                 # Own spoken reply is a question about its reply-chain, not a new post.
                 material_message = {key: value for key, value in message.items() if key != "voice"}
             material = await resolve(conn, bot_id, chat_id, access_version, material_message)
+            paired = payload.get("post_question")
+            if paired:
+                accepted_question = await accepted(
+                    conn, bot_id, chat_id, access_version, paired["message_id"]
+                )
+                if not accepted_question or accepted_question[0] != paired["event_id"]:
+                    await conn.execute("UPDATE jobs SET state='cancelled' WHERE id=?", (job_id,))
+                    return {"skip": True}
+                material["manifest"].append(paired)
+                envelope = ("message_id", "chat", "date", "from", "message_thread_id")
+                message = {
+                    **{key: message[key] for key in envelope if key in message},
+                    "text": accepted_question[1]["text"],
+                    "entities": accepted_question[1].get("entities", []),
+                }
+            text_first = text_factcheck(message) and any(
+                usable_post_text(item["text"])
+                and (paired or item["message_id"] != message["message_id"])
+                for item in material["messages"]
+            )
             avatar = None
             avatar_context = None
             if (
@@ -253,6 +273,35 @@ class DialogueEngine:
                         "unavailable": False,
                     }
             target_ids = [payload["message_id"]] + [m["message_id"] for m in material["messages"]]
+            research_engine = (
+                self.research
+                if (
+                    not avatar
+                    and should_answer
+                    and trigger != "initiative"
+                    and not (payload.get("service_reply") or current_messages)
+                )
+                else None
+            )
+            research_context = None
+            if research_engine and text_first:
+                waiting, research_context = await research_engine.prepare(
+                    conn,
+                    job_id,
+                    bot_id,
+                    chat_id,
+                    payload["scope"],
+                    access_version,
+                    source[0],
+                    message,
+                    settings,
+                    settings_row[0],
+                    material,
+                    text_only=True,
+                )
+                if waiting:
+                    return {"skip": True}
+            payload.pop("post_text_first", None)
             payload["source_message_ids"] = target_ids
             await conn.execute(
                 "UPDATE jobs SET payload=? WHERE id=?", (json.dumps(payload), job_id)
@@ -316,14 +365,7 @@ class DialogueEngine:
                 if spoken and spoken[0]:
                     message = {**message, "text": spoken[0]}
             show_sources = not current_messages and message_requests_sources(message)
-            research_context = None
-            if (
-                self.research
-                and not avatar
-                and should_answer
-                and trigger != "initiative"
-                and not (payload.get("service_reply") or current_messages)
-            ):
+            if research_engine and not text_first:
                 research_material = {
                     **material,
                     "messages": [dict(m) for m in material["messages"]],
@@ -356,7 +398,7 @@ class DialogueEngine:
                             for m in research_material["messages"]
                             if m["message_id"] != message["message_id"]
                         ]
-                waiting, research_context = await self.research.prepare(
+                waiting, research_context = await research_engine.prepare(
                     conn,
                     job_id,
                     bot_id,
@@ -411,7 +453,7 @@ class DialogueEngine:
                     bot_id,
                     chat_id,
                     access_version,
-                    selected_material + [incoming]
+                    (selected_material if text_first else selected_material + [incoming])
                     if selected_material or material["unavailable"]
                     else context + [incoming],
                 )
@@ -425,7 +467,7 @@ class DialogueEngine:
                     bot_id,
                     chat_id,
                     access_version,
-                    selected_material + [incoming],
+                    selected_material if text_first else selected_material + [incoming],
                     question_id=payload["message_id"],
                     manifest=material["manifest"],
                 )
@@ -552,6 +594,12 @@ class DialogueEngine:
                         },
                     },
                     ensure_ascii=False,
+                )
+                request["instructions"] += (
+                    "\nСначала разбери текст выбранного поста и ответь на текущий вопрос. "
+                    "Затем учти, что показывают вложения. Для проверки написанной цитаты "
+                    "используй результаты поиска по тексту. Если ролик не относится к цитате "
+                    "или недоступен, дай результат проверки текста и обозначь границы вывода."
                 )
             if research_context:
                 request["instructions"] += research_answer_policy(research_context)

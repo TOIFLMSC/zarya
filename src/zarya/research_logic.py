@@ -207,27 +207,52 @@ async def revision(conn: aiosqlite.Connection, bot: str, chat: str, message: int
 def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = True) -> str:
     "Replace explicit source references; unknown refs fail instead of"
     "inventing citations."
-    mapping = {
-        str(s["id"]): s
-        for s in sources
-        if s.get("url") or (s.get("coverage") == "realtime_feed" and s.get("name") in API_FEEDS)
+    mapping = {str(source["id"]): source for source in sources}
+    readable = {
+        identifier: source
+        for identifier, source in mapping.items()
+        if not source.get("error")
+        and source.get("coverage") != "unavailable"
+        and (
+            source.get("url")
+            or (source.get("coverage") == "realtime_feed" and source.get("name") in API_FEEDS)
+        )
     }
 
+    def linked(match: re.Match[str], url: str) -> str:
+        before = match.string[: match.start()].rstrip(" \t")
+        if not before or before[-1] == "\n":
+            return url
+        return (" " if before[-1] in "-–—" else " - ") + url
+
     def replace(match: re.Match[str]) -> str:
-        source = mapping.get(match[1])
+        identifier = match[2] or match[3]
+        source = (readable if show_links else mapping).get(identifier)
         if not source:
             raise ValueError("unknown_source")
         if not show_links:
             return ""
-        return " (" + str(source.get("url") or source["name"]) + ") "
+        if source.get("url"):
+            return linked(match, str(source["url"]))
+        return match[1] + " (" + str(source["name"]) + ") "
 
-    text = re.sub(r"\[S(\d+)\]", replace, text)
+    text = re.sub(r"([ \t]*)(?:\([ \t]*\[S(\d+)\][ \t]*\)|\[S(\d+)\])", replace, text)
     if not show_links:
         from zarya.response_links import without_links
 
         return without_links(text)
     # Any URL supplied by the synthesis must already belong to the evidence manifest.
-    permitted = {str(s.get("url")) for s in sources}
+    permitted = {source["url"] for source in readable.values() if source.get("url")}
+    text = re.sub(
+        r"\[([^\]\n]+)\]\(<?(https?://[^\s<>]+)>?\)",
+        lambda match: f"{match[1]} - {match[2]}" if match[2] in permitted else match[0],
+        text,
+    )
+    text = re.sub(
+        r"(?<!\])[ \t]*\((https?://[^\s<>]+)\)",
+        lambda match: linked(match, match[1]) if match[1] in permitted else match[0],
+        text,
+    )
     for value in re.findall(r"https?://[^\s<>]+", text):
         if value not in permitted and trim_url(value) not in permitted:
             raise ValueError("unknown_source")
@@ -273,7 +298,7 @@ def source_failure_text(research: dict[str, Any], show_links: bool) -> str:
 def research_answer_text(text: str, research: dict[str, Any], show_links: bool) -> str:
     from zarya.research_plan import SOURCE_KINDS
 
-    sources = reply_sources(research)
+    sources = reply_sources(research) if show_links else research.get("sources", [])
     lookup = (research.get("analysis") or {}).get("source_lookup") or {}
     selected = next(
         (
@@ -289,14 +314,15 @@ def research_answer_text(text: str, research: dict[str, Any], show_links: bool) 
     url = public_url(selected["url"])
     if url not in answer:
         label = "Документ" if lookup["kind"] == "document" else "Официальный раздел"
-        answer = f"{answer}\n\n{label} — {url}".strip()
+        answer = f"{answer}\n\n{label} - {url}".strip()
     return answer
 
 
 def reply_sources(research: dict[str, Any]) -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = research.get("sources", [])
     analysis = research.get("analysis") or {}
-    if "source_lookup" not in analysis:
+    lookup = "source_lookup" in analysis
+    if not lookup and not analysis.get("discarded_claims"):
         return sources
     relevant = {
         identifier for claim in analysis.get("claims", []) if claim["verdict"] != "uncertain"
@@ -309,7 +335,8 @@ def reply_sources(research: dict[str, Any]) -> list[dict[str, Any]]:
         and not source.get("error")
         and source.get("coverage") != "unavailable"
         and (
-            source.get("coverage") == "realtime_feed"
+            not lookup
+            or source.get("coverage") == "realtime_feed"
             or (source.get("url") and urlsplit(source["url"]).path not in {"", "/"})
         )
     ]
