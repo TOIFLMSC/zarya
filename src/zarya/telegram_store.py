@@ -30,11 +30,12 @@ from zarya.models import Settings
 from zarya.participant_context import admit as admit_participant
 from zarya.photo_logic import PHOTO_WAIT, admit, link_job
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
-from zarya.research_intent import expects_forwarded_quote, text_factcheck
+from zarya.research_intent import expects_post_comment, text_factcheck
 from zarya.research_logic import RESEARCH_WAIT
 from zarya.research_logic import revision as research_revision
 from zarya.source_material import FORWARD_QUESTION_WAIT, preceding_forward_question
 from zarya.source_material import valid as source_valid
+from zarya.telegram_content import forwarded
 
 
 def stamp() -> str:
@@ -546,6 +547,14 @@ class TelegramStore:
                         if can_pair_post and not album_leader
                         else None
                     )
+                    if (
+                        not edited
+                        and not previous_question
+                        and trigger == "private"
+                        and forwarded(message)
+                    ):
+                        # A share without a question cannot supersede an unrelated request.
+                        trigger = "shared_post"
                     batch, album_job, new_photo_job = (
                         (None, None, not album_tail)
                         if previous_question or album_tail
@@ -703,7 +712,12 @@ class TelegramStore:
                         )
                     elif explicit_reply(message) and text_factcheck(message):
                         payload["post_text_first"] = True
-                    elif can_pair_post and expects_forwarded_quote(message):
+                    elif (
+                        can_pair_post
+                        and not explicit_reply(message)
+                        and isinstance(message.get("text"), str)
+                        and expects_post_comment(message)
+                    ):
                         payload["post_wait_until"] = now + FORWARD_QUESTION_WAIT
                     job_cursor = await conn.execute(
                         "INSERT INTO "
@@ -803,11 +817,13 @@ class TelegramStore:
                 "(SELECT job_id FROM outbox WHERE id=?)",
                 (item_id,),
             )
-            local_quote = False
+            local_answer = False
             batch_reply = False
             if memory_run:
                 snapshot = json.loads(memory_run[0])
-                local_quote = bool(snapshot.get("verbatim_quote"))
+                local_answer = bool(
+                    snapshot.get("verbatim_quote") or snapshot.get("post_unreadable")
+                )
                 batch_reply = bool(snapshot.get("current_messages"))
                 if snapshot.get("behavior"):
                     from zarya.behavior import valid
@@ -879,7 +895,7 @@ class TelegramStore:
             settings = await row(conn, "SELECT document FROM settings WHERE id=1", ())
             expired = time.time() - datetime.fromisoformat(created_at).timestamp() > 600
             if expired or (
-                (linked or local_quote)
+                (linked or local_answer)
                 and not Settings.model_validate_json(settings[0]).dialogue_enabled
             ):
                 await conn.execute(
@@ -1088,7 +1104,7 @@ class TelegramStore:
                 "OR (? AND j.state='pending' AND r.id IS NULL "
                 "AND json_extract(j.payload,'$.service_reply')=0 "
                 "AND json_extract(j.payload,'$.trigger') "
-                "IN ('private','name','mention','reply','continuation') AND "
+                "IN ('private','shared_post','name','mention','reply','continuation') AND "
                 + "((? AND "
                 + PHOTO_WAIT
                 + ") OR (? AND "

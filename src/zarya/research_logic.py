@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 import aiosqlite
 
 from zarya.research_intent import search_kind
+from zarya.telegram_content import content_text
 
 RESEARCH_WAIT = (
     "EXISTS (SELECT 1 FROM research_runs rr WHERE rr.job_id=j.id "
@@ -83,7 +84,13 @@ def public_address(value: str) -> bool:
 
 def urls(message: dict[str, Any]) -> list[str]:
     text = str(message.get("text") or message.get("caption") or "")
+    rich_only = not text.strip() and "rich_message" in message
+    if rich_only:
+        text = content_text(message)
     values = [trim_url(v) for v in re.findall(r"https?://[^\s<>]+", text)]
+    if rich_only:
+        # Rich-text link labels are visible text. Their hidden targets and offsets are not.
+        return list(dict.fromkeys(values))[:3]
     encoded = text.encode("utf-16-le")
     for entity in message.get("entities") or message.get("caption_entities") or []:
         if entity.get("type") == "text_link":

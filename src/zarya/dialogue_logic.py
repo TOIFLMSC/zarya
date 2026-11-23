@@ -6,10 +6,11 @@ from typing import Any
 
 from zarya.models import Settings
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
+from zarya.telegram_content import content_text, forwarded
 
 
 def message_text(message: dict[str, Any]) -> str:
-    text = str(message.get("text") or message.get("caption") or "")
+    text = content_text(message, 4000)
     media = [
         kind
         for kind in ("photo", "voice", "video", "video_note", "sticker", "animation")
@@ -23,7 +24,11 @@ def message_text(message: dict[str, Any]) -> str:
 def topic_id(message: dict[str, Any]) -> int | None:
     # Non-forum supergroup replies also carry a thread ID. It is not a forum topic.
     value = message.get("message_thread_id")
-    return int(value) if value is not None and message.get("chat", {}).get("is_forum") else None
+    chat = message.get("chat", {})
+    topic = chat.get("is_forum") or (
+        chat.get("type") == "private" and message.get("is_topic_message")
+    )
+    return int(value) if value is not None and topic else None
 
 
 def explicit_reply(message: dict[str, Any]) -> dict[str, Any]:
@@ -40,7 +45,7 @@ def direct_trigger(message: dict[str, Any], bot_id: str, username: str, name: st
     if message.get("from", {}).get("is_bot") or message.get("sender_chat"):
         return "bot_or_channel"
     if message.get("chat", {}).get("type") == "private":
-        return "private" if message_text(message) else "no_text"
+        return "private" if message_text(message) or forwarded(message) else "no_text"
     if message.get("forward_origin") or message.get("forward_date"):
         return "forwarded"
     reply = explicit_reply(message)
