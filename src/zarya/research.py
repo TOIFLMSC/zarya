@@ -150,13 +150,9 @@ class ResearchEngine:
         search = bool(news) or text_only or wants_search(speaker_question)
         if not selected_urls and not material and not search:
             return False, None
-        source_requests: list[dict[str, str | bool]] = [
-            {"requested_url": url} for url in selected_urls
+        source_requests = [
+            {"requested_url": url, "news_recheck": bool(news)} for url in selected_urls
         ]
-        if news:
-            source_requests = [
-                {"requested_url": url, "news_recheck": True} for url in selected_urls
-            ]
         cursor = await conn.execute(
             "INSERT INTO "
             "research_runs(job_id,bot_id,chat_id,scope,access_version,state,mode,qu"
@@ -306,6 +302,16 @@ class ResearchEngine:
             work["news_recheck"] = bool(work["sources"]) and all(
                 entry.get("news_recheck") is True for entry in work["sources"]
             )
+            # Jobs from before this flag was persisted cannot establish news provenance.
+            if work["question"] == RECHECK_QUESTION and any(
+                "news_recheck" not in entry for entry in work["sources"]
+            ):
+                await conn.execute(
+                    "UPDATE research_runs SET state='rejected',"
+                    "error_code='legacy_news_recheck',finished_at=? WHERE id=?",
+                    (stamp(), work["id"]),
+                )
+                return {"skip": True}
             work["epoch"] = await epoch(conn, bot)
             await conn.execute(
                 "UPDATE research_runs SET state='fetching' WHERE id=?", (work["id"],)

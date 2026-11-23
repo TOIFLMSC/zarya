@@ -131,6 +131,33 @@ async def test_implicit_news_search_needs_recent_public_reply_and_permission(tmp
         assert not model.calls
 
 
+async def test_queued_legacy_news_without_provenance_does_not_call_search(tmp_path):
+    async with store_at(tmp_path) as store:
+        dialogue, research, model, _ = await start_post(store, PUBLIC_POST, "metadata_only")
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(
+                    3,
+                    text=CORRECTION,
+                    reply_to_message={"message_id": 1000, "from": {"id": 999, "is_bot": True}},
+                )
+            ],
+        )
+        assert await dialogue.claim("999") == {"skip": True}
+        async with store.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE research_runs SET sources=? WHERE state='queued'",
+                (json.dumps([{"requested_url": PUBLIC_POST}]),),
+            )
+        assert await research.claim("999") == {"skip": True}
+        assert await store.db.one(
+            "SELECT state,error_code FROM research_runs WHERE state='rejected'"
+        ) == ("rejected", "legacy_news_recheck")
+        assert not model.calls
+
+
 async def test_origin_post_alone_does_not_confirm_the_event(tmp_path):
     async with store_at(tmp_path) as store:
         dialogue, research, model, _ = await start_post(store, PUBLIC_POST, "metadata_only")
