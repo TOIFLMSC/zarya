@@ -38,7 +38,7 @@ PARTIAL_METADATA_NOTICE = (
 
 
 def add_coverage_notice(answer: str, sources: list[dict[str, Any]]) -> str:
-    coverage = {s.get("coverage") for s in sources if s.get("x_post")}
+    coverage = {s.get("coverage") for s in sources if source_post_id(s)}
     if "metadata_only" in coverage:
         notice = PARTIAL_METADATA_NOTICE if len(coverage) > 1 else METADATA_NOTICE
         if notice not in answer:
@@ -57,6 +57,26 @@ def post_id(url: str) -> str | None:
 
 def post_url(identifier: str) -> str:
     return f"https://x.com/i/status/{identifier}"
+
+
+def source_post_id(source: dict[str, Any]) -> str | None:
+    info = source.get("x_post")
+    if isinstance(info, dict):
+        identifier = info.get("post_id")
+        if isinstance(identifier, str) and POST_ID.fullmatch(identifier):
+            return identifier
+    for key in ("url", "verified_url", "requested_url"):
+        url = source.get(key)
+        if isinstance(url, str) and (identifier := post_id(url)):
+            return identifier
+    return None
+
+
+def unavailable_post_ids(sources: list[dict[str, Any]]) -> set[str]:
+    return {
+        identifier for source in sources
+        if (identifier := source_post_id(source)) and source.get("coverage") == "unavailable"
+    }
 
 
 def restricted(raw: dict[str, Any]) -> bool:

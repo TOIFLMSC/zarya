@@ -246,15 +246,32 @@ def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = T
     if not show_links:
         return without_links(text)
     # Any URL supplied by the synthesis must already belong to the evidence manifest.
+    from zarya.x_post import post_id, post_url
+
     permitted = {str(source["url"]) for source in readable.values() if source.get("url")}
+    admitted_x = {identifier for target in permitted if (identifier := post_id(target))}
+
+    def admitted_post(value: str) -> str | None:
+        candidate = value if "://" in value else f"https://{value}"
+        identifier = post_id(candidate)
+        return post_url(identifier) if identifier and identifier in admitted_x else None
+
+    def inline_link(match: re.Match[str]) -> str:
+        target = admitted_post(match[2]) or (match[2] if match[2] in permitted else None)
+        return f"{match[1]} - {target}" if target else match[0]
+
+    def parenthesized_link(match: re.Match[str]) -> str:
+        target = admitted_post(match[1]) or (match[1] if match[1] in permitted else None)
+        return linked(match, target) if target else match[0]
+
     text = re.sub(
         r"\[([^\]\n]+)\]\(<?(https?://[^\s<>]+)>?\)",
-        lambda match: f"{match[1]} - {match[2]}" if match[2] in permitted else match[0],
+        inline_link,
         text,
     )
     text = re.sub(
         r"(?<!\])[ \t]*\((https?://[^\s<>]+)\)",
-        lambda match: linked(match, match[1]) if match[1] in permitted else match[0],
+        parenthesized_link,
         text,
     )
     known_links = {}
@@ -273,9 +290,10 @@ def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = T
         if not is_link_target(literal):
             return literal
         value = literal if literal in known_links else trim_url(literal)
-        if value not in known_links:
+        target = admitted_post(value) or known_links.get(value)
+        if target is None:
             raise ValueError("unknown_source")
-        return known_links[value] + literal[len(value) :]
+        return target + literal[len(value) :]
 
     return URL_TARGET.sub(verified_link, text).strip()
 

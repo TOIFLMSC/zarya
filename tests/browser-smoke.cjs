@@ -499,6 +499,14 @@ async function openSettingsSection(page, title) {
         error: null,
         x_post: { post_id: "1000000000000000004" },
       },
+      {
+        id: 80,
+        url: "https://x.com/i/status/1000000000000000005",
+        title: "Сохранённое превью X",
+        coverage: "metadata_only",
+        text: "Ранее сохранённое описание",
+        error: null,
+      },
     );
     await route.fulfill({ response, json: detail });
   });
@@ -510,6 +518,7 @@ async function openSettingsSection(page, title) {
   await page.getByText("Диагностика загрузки YouTube", { exact: true }).click();
   await page.getByText("Цитата загружена · Предыдущих сообщений: 2 · ветка неполная").waitFor();
   await page.getByText("По ссылке X доступны только заголовок или описание страницы.").waitFor();
+  await page.getByText("По ссылке доступны только заголовок или описание страницы.").waitFor();
   assert.equal(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,

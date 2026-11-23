@@ -187,9 +187,15 @@ async def fresh_news_sources(
 def public_search_sources(
     inputs: list[dict[str, Any]], fetched: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
+    from zarya.x_post import post_id, source_post_id, unavailable_post_ids
+
+    blocked = unavailable_post_ids(fetched)
     output = []
     for entry, source in zip(inputs, fetched, strict=True):
         anchor = entry["requested_url"]
+        if post_id(anchor) in blocked or source_post_id(source) in blocked:
+            output.append(source)
+            continue
         result_url = str(source.get("url") or "")
         result_anchor = social_post_url(result_url) or news_article_url(result_url) or result_url
         title = (
@@ -200,16 +206,26 @@ def public_search_sources(
 
 
 def news_followup_plan(
-    analysis: dict[str, Any], inputs: list[dict[str, Any]], actions: list[dict[str, Any]]
+    analysis: dict[str, Any], inputs: list[dict[str, Any]], actions: list[dict[str, Any]],
+    sources: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
+    from zarya.x_post import post_id, source_post_id, unavailable_post_ids
+
     if not analysis.get("needs_followup"):
         return None
-    observed = search_discovered_urls(actions)
+    blocked = unavailable_post_ids(sources)
+    observed = {url for url in search_discovered_urls(actions) if post_id(url) not in blocked}
     results = [{"url": url} for url in sorted(observed)]
     discovered = followup_input("study", analysis, results, observed)
-    anchors = [entry["requested_url"] for entry in inputs]
+    anchors = [
+        source["url"]
+        for source in public_search_sources(inputs, sources[:len(inputs)])
+        if source_post_id(source) not in blocked
+    ]
     if discovered:
         anchors.extend(social_post_url(url) or url for url in discovered["public_urls"])
+    if not anchors:
+        return None
     return {"reason": "evidence_gap", "public_urls": list(dict.fromkeys(anchors))[:3]}
 
 

@@ -8,7 +8,8 @@ from test_telegram import store_at
 
 from zarya.openai_adapter import ModelResult
 from zarya.research_fetch import SafeFetcher
-from zarya.research_logic import source_failure_text
+from zarya.research_logic import evidence_text, research_answer_text, source_failure_text
+from zarya.research_news import news_followup_plan, public_search_sources
 from zarya.research_plan import hosted_search_input
 from zarya.x_post import METADATA_NOTICE, XFetcher, parse_thread, post_id, post_url
 
@@ -124,6 +125,41 @@ def test_x_search_only_receives_admitted_alias_without_parameters():
     assert result["question"] == f"Найди {post_url(POST)} и [ссылка исключена]"
 
 
+def test_x_unavailable_id_is_excluded_from_search_and_news_followup():
+    public = "https://example.org/news"
+    entries = [{"requested_url": post_url(POST)}, {"requested_url": public}]
+    sources = [
+        {
+            "id": 1, "coverage": "unavailable", "error": "x_post_unavailable",
+            "requested_url": post_url(POST), "x_post": {"post_id": POST},
+        },
+        {"id": 2, "coverage": "partial_text", "url": public, "title": "Тестовая новость"},
+    ]
+    for manifest in (sources, public_search_sources(entries, sources)):
+        request = hosted_search_input(f"Проверь {URL} ({POST})", "", manifest)
+        assert POST not in json.dumps(request)
+        assert request["sources"][0]["url"] == public
+    actions = [{"type": "search", "status": "completed", "sources": [{"url": URL}]}]
+    followup = news_followup_plan({"needs_followup": True}, entries, actions, sources)
+    assert followup == {"reason": "evidence_gap", "public_urls": [public]}
+
+
+@pytest.mark.parametrize("requested", [URL, "https://example.org/redirect"])
+def test_x_legacy_preview_and_redirected_x_preview_are_disclosed(requested):
+    source = {"id": 1, "requested_url": requested, "url": URL, "coverage": "metadata_only"}
+    context = {"state": "completed", "sources": [source]}
+    assert METADATA_NOTICE in research_answer_text("Вот описание.", context, False)
+    assert METADATA_NOTICE in source_failure_text(context, False)
+
+
+@pytest.mark.parametrize("fmt", ["Пост - {}", "Пост ({})", "[Пост]({})"])
+def test_x_final_links_accept_alias_only_for_observed_post(fmt):
+    sources = [{"id": 1, "url": post_url(POST), "coverage": "x_post_text"}]
+    assert evidence_text(fmt.format(URL), sources) == f"Пост - {post_url(POST)}"
+    with pytest.raises(ValueError, match="unknown_source"):
+        evidence_text(fmt.format(URL.replace(POST, OTHER)), sources)
+
+
 async def test_x_research_supplies_text_quote_and_thread_to_dialogue(tmp_path, monkeypatch):
     get = AsyncMock(return_value=thread())
     monkeypatch.setattr(XFetcher, "get", get)
@@ -143,6 +179,35 @@ async def test_x_research_supplies_text_quote_and_thread_to_dialogue(tmp_path, m
         assert "Пост ниже" not in sources[0]["text"]
         assert "metadata_only" in request["instructions"]
     get.assert_awaited_once_with(POST)
+
+
+async def test_x_local_text_can_confirm_primary_source_without_extra_search(tmp_path, monkeypatch):
+    monkeypatch.setattr(XFetcher, "get", AsyncMock(return_value=thread()))
+    async with store_at(tmp_path) as store:
+        _, research, model, _, work = await research_ready(
+            store, f"Заря, найди ссылку на первоисточник из этого поста {URL}"
+        )
+        assert work["profile"] == "source"
+        research.fetcher = SafeFetcher()
+        model.generate = AsyncMock(return_value=ModelResult(
+            text=json.dumps({
+                "summary": "Найден первоисточник",
+                "claims": [{
+                    "text": "Найден исходный пост", "kind": "fact",
+                    "verdict": "supported", "urls": [URL],
+                }],
+                "source_lookup": {"kind": "document", "url": URL, "heading": "Исходный пост"},
+            }),
+            search_actions=[{
+                "type": "search", "status": "completed", "sources": [{"url": "https://example.org"}],
+            }],
+        ))
+        await research.execute(work)
+        async with store.db.transaction() as connection:
+            context = await research.context(connection, work["id"])
+        assert context["state"] == "completed"
+        assert context["analysis"]["source_lookup"]["source_id"] == 1
+        assert model.generate.await_count == 1
 
 
 async def test_x_metadata_limit_survives_dialogue_and_source_failure(tmp_path, monkeypatch):

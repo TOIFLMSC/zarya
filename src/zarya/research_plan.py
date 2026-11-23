@@ -64,7 +64,10 @@ def hosted_search_input(
     question: str, material: str, sources: list[dict[str, Any]]
 ) -> dict[str, Any]:
     """Carry only the links admitted by the bounded local fetch stage."""
-    from zarya.x_post import post_id, post_url
+    from zarya.x_post import post_id, post_url, source_post_id, unavailable_post_ids
+
+    blocked_x = unavailable_post_ids(sources)
+    sources = [source for source in sources if source_post_id(source) not in blocked_x]
 
     allowed = {}
     for source in sources:
@@ -105,7 +108,12 @@ def hosted_search_input(
 
     def scrub(value: Any) -> Any:
         if isinstance(value, str):
-            return ABSOLUTE_LINK.sub(replace, value)
+            cleaned = ABSOLUTE_LINK.sub(replace, value)
+            return re.sub(
+                r"(?<![0-9])[0-9]{2,20}(?![0-9])",
+                lambda match: "[пост недоступен]" if match[0] in blocked_x else match[0],
+                cleaned,
+            ) if blocked_x else cleaned
         if isinstance(value, dict):
             return {key: scrub(item) for key, item in value.items()}
         if isinstance(value, list):
@@ -130,9 +138,9 @@ def answer_mode(text: str, existing: str, context: dict[str, Any]) -> str:
 
 
 def answer_policy(context: dict[str, Any]) -> str:
-    from zarya.x_post import X_POLICY
+    from zarya.x_post import X_POLICY, source_post_id
 
-    x_policy = X_POLICY if any(s.get("x_post") for s in context.get("sources", [])) else ""
+    x_policy = X_POLICY if any(source_post_id(s) for s in context.get("sources", [])) else ""
     if context.get("mode") != "search":
         return x_policy
     markers = (
@@ -203,7 +211,7 @@ def source_lookup(
 def followup_input(
     profile: str, analysis: dict[str, Any], sources: list[dict[str, Any]], observed: set[str]
 ) -> dict[str, Any] | None:
-    from zarya.x_post import post_id, post_url
+    from zarya.x_post import post_id, post_url, unavailable_post_ids
 
     lookup = analysis.get("source_lookup") or {}
     if profile == "source" and lookup.get("kind") == "unconfirmed":
@@ -217,15 +225,20 @@ def followup_input(
         return None
     # Follow-up does not repeat question, post material, prior model text or raw query strings.
     # Only public, provider-observed URLs and known public article identifiers are usable.
+    blocked_x = unavailable_post_ids(sources)
     anchors = []
     for source in sources:
         value = source.get("url") or source.get("verified_url")
         if not isinstance(value, str):
             continue
-        if (identifier := post_id(value)) and (
-            source.get("coverage") == "x_post_text" or value in observed
-        ):
+        if identifier := post_id(value):
             canonical = post_url(identifier)
+            if identifier in blocked_x or not (
+                source.get("coverage") == "x_post_text"
+                or canonical in observed
+                or value in observed
+            ):
+                continue
             if canonical not in anchors:
                 anchors.append(canonical)
             if len(anchors) == 3:
