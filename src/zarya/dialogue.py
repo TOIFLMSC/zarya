@@ -239,7 +239,7 @@ class DialogueEngine:
                     "text": accepted_question[1]["text"],
                     "entities": accepted_question[1].get("entities", []),
                 }
-            text_only = text_factcheck(message) and any(
+            text_first = text_factcheck(message) and any(
                 usable_post_text(item["text"])
                 and (paired or item["message_id"] != message["message_id"])
                 for item in material["messages"]
@@ -273,6 +273,35 @@ class DialogueEngine:
                         "unavailable": False,
                     }
             target_ids = [payload["message_id"]] + [m["message_id"] for m in material["messages"]]
+            research_engine = (
+                self.research
+                if (
+                    not avatar
+                    and should_answer
+                    and trigger != "initiative"
+                    and not (payload.get("service_reply") or current_messages)
+                )
+                else None
+            )
+            research_context = None
+            if research_engine and text_first:
+                waiting, research_context = await research_engine.prepare(
+                    conn,
+                    job_id,
+                    bot_id,
+                    chat_id,
+                    payload["scope"],
+                    access_version,
+                    source[0],
+                    message,
+                    settings,
+                    settings_row[0],
+                    material,
+                    text_only=True,
+                )
+                if waiting:
+                    return {"skip": True}
+            payload.pop("post_text_first", None)
             payload["source_message_ids"] = target_ids
             await conn.execute(
                 "UPDATE jobs SET payload=? WHERE id=?", (json.dumps(payload), job_id)
@@ -282,7 +311,6 @@ class DialogueEngine:
                 and trigger != "initiative"
                 and self.media
                 and not avatar
-                and not text_only
                 and not (payload.get("service_reply") or current_messages)
             ):
                 if await self.media.prepare(
@@ -304,7 +332,6 @@ class DialogueEngine:
                 and self.photos
                 and not avatar
                 and not current_messages
-                and not text_only
             ):
                 await self.photos.prepare_sources(
                     conn, bot_id, chat_id, payload["scope"], access_version, target_ids, settings
@@ -338,23 +365,16 @@ class DialogueEngine:
                 if spoken and spoken[0]:
                     message = {**message, "text": spoken[0]}
             show_sources = not current_messages and message_requests_sources(message)
-            research_context = None
-            if (
-                self.research
-                and not avatar
-                and should_answer
-                and trigger != "initiative"
-                and not (payload.get("service_reply") or current_messages)
-            ):
+            if research_engine and not text_first:
                 research_material = {
                     **material,
                     "messages": [dict(m) for m in material["messages"]],
                 }
-                if self.photos and settings.photo_enabled and not text_only:
+                if self.photos and settings.photo_enabled:
                     await self.photos.enrich(
                         conn, bot_id, chat_id, access_version, research_material["messages"]
                     )
-                if self.media and settings.media_enabled and not text_only:
+                if self.media and settings.media_enabled:
                     await self.media.enrich(
                         conn,
                         bot_id,
@@ -378,7 +398,7 @@ class DialogueEngine:
                             for m in research_material["messages"]
                             if m["message_id"] != message["message_id"]
                         ]
-                waiting, research_context = await self.research.prepare(
+                waiting, research_context = await research_engine.prepare(
                     conn,
                     job_id,
                     bot_id,
@@ -390,7 +410,6 @@ class DialogueEngine:
                     settings,
                     settings_row[0],
                     research_material,
-                    text_only=text_only,
                 )
                 if waiting:
                     return {"skip": True}
@@ -428,10 +447,7 @@ class DialogueEngine:
             }
             photo_refs: list[dict[str, Any]] = []
             selected_material = [dict(m) for m in material["messages"]]
-            if text_only:
-                for item in selected_material:
-                    item["attachments"] = []
-            if self.photos and settings.photo_enabled and not avatar and not text_only:
+            if self.photos and settings.photo_enabled and not avatar:
                 await self.photos.enrich(
                     conn,
                     bot_id,
@@ -445,13 +461,13 @@ class DialogueEngine:
                     conn, bot_id, chat_id, access_version, target_ids
                 )
             media_refs = []
-            if self.media and settings.media_enabled and not text_only:
+            if self.media and settings.media_enabled:
                 media_refs = await self.media.enrich(
                     conn,
                     bot_id,
                     chat_id,
                     access_version,
-                    selected_material + [incoming],
+                    selected_material if text_first else selected_material + [incoming],
                     question_id=payload["message_id"],
                     manifest=material["manifest"],
                 )
@@ -581,8 +597,9 @@ class DialogueEngine:
                 )
                 request["instructions"] += (
                     "\nСначала разбери текст выбранного поста и ответь на текущий вопрос. "
-                    "Используй вложения, если они помогают ответить. Недоступность видео "
-                    "сама по себе не мешает проверить цитату, приведённую в тексте."
+                    "Затем учти, что показывают вложения. Для проверки написанной цитаты "
+                    "используй результаты поиска по тексту. Если ролик не относится к цитате "
+                    "или недоступен, дай результат проверки текста и обозначь границы вывода."
                 )
             if research_context:
                 request["instructions"] += research_answer_policy(research_context)

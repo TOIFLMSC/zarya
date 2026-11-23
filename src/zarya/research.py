@@ -16,7 +16,6 @@ from zarya.research_intent import blocks_external, research_profile, speaker_tex
 from zarya.research_logic import (
     API_FEEDS,
     SEARCH_TOOL_LIMIT,
-    public_url,
     search_policy,
     urls,
     wants_search,
@@ -601,7 +600,13 @@ class ResearchEngine:
                         or not isinstance(claim.get("urls"), list)
                     ):
                         raise ValueError("claim")
-                    references = [public_url(u) for u in claim["urls"]]
+                    if any(not isinstance(url, str) for url in claim["urls"]):
+                        raise ValueError("claim")
+                    try:
+                        references = [check_target(url) for url in claim["urls"]]
+                    except ValueError:
+                        discarded += 1
+                        continue
                     feed_refs = claim.get("feeds", [])
                     if not isinstance(feed_refs, list):
                         raise ValueError("unknown_feed")

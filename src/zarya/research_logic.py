@@ -210,7 +210,9 @@ def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = T
     mapping = {
         str(s["id"]): s
         for s in sources
-        if s.get("url") or (s.get("coverage") == "realtime_feed" and s.get("name") in API_FEEDS)
+        if not s.get("error") and s.get("coverage") != "unavailable" and (
+            s.get("url") or (s.get("coverage") == "realtime_feed" and s.get("name") in API_FEEDS)
+        )
     }
 
     def linked(match: re.Match[str], url: str) -> str:
@@ -235,7 +237,12 @@ def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = T
 
         return without_links(text)
     # Any URL supplied by the synthesis must already belong to the evidence manifest.
-    permitted = {str(s.get("url")) for s in sources}
+    permitted = {source["url"] for source in mapping.values() if source.get("url")}
+    text = re.sub(
+        r"\[([^\]\n]+)\]\(<?(https?://[^\s<>]+)>?\)",
+        lambda match: f"{match[1]} - {match[2]}" if match[2] in permitted else match[0],
+        text,
+    )
     text = re.sub(
         r"(?<!\])[ \t]*\((https?://[^\s<>]+)\)",
         lambda match: linked(match, match[1]) if match[1] in permitted else match[0],
@@ -309,7 +316,7 @@ def research_answer_text(text: str, research: dict[str, Any], show_links: bool) 
 def reply_sources(research: dict[str, Any]) -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = research.get("sources", [])
     analysis = research.get("analysis") or {}
-    if "source_lookup" not in analysis:
+    if "source_lookup" not in analysis and not analysis.get("discarded_claims"):
         return sources
     relevant = {
         identifier for claim in analysis.get("claims", []) if claim["verdict"] != "uncertain"
