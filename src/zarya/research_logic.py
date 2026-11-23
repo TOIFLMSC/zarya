@@ -213,21 +213,34 @@ def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = T
         if s.get("url") or (s.get("coverage") == "realtime_feed" and s.get("name") in API_FEEDS)
     }
 
+    def linked(match: re.Match[str], url: str) -> str:
+        before = match.string[: match.start()].rstrip(" \t")
+        if not before or before[-1] == "\n":
+            return url
+        return (" " if before[-1] in "-–—" else " - ") + url
+
     def replace(match: re.Match[str]) -> str:
-        source = mapping.get(match[1])
+        source = mapping.get(match[2] or match[3])
         if not source:
             raise ValueError("unknown_source")
         if not show_links:
             return ""
-        return " (" + str(source.get("url") or source["name"]) + ") "
+        if source.get("url"):
+            return linked(match, str(source["url"]))
+        return match[1] + " (" + str(source["name"]) + ") "
 
-    text = re.sub(r"\[S(\d+)\]", replace, text)
+    text = re.sub(r"([ \t]*)(?:\([ \t]*\[S(\d+)\][ \t]*\)|\[S(\d+)\])", replace, text)
     if not show_links:
         from zarya.response_links import without_links
 
         return without_links(text)
     # Any URL supplied by the synthesis must already belong to the evidence manifest.
     permitted = {str(s.get("url")) for s in sources}
+    text = re.sub(
+        r"(?<!\])[ \t]*\((https?://[^\s<>]+)\)",
+        lambda match: linked(match, match[1]) if match[1] in permitted else match[0],
+        text,
+    )
     for value in re.findall(r"https?://[^\s<>]+", text):
         if value not in permitted and trim_url(value) not in permitted:
             raise ValueError("unknown_source")
@@ -289,7 +302,7 @@ def research_answer_text(text: str, research: dict[str, Any], show_links: bool) 
     url = public_url(selected["url"])
     if url not in answer:
         label = "Документ" if lookup["kind"] == "document" else "Официальный раздел"
-        answer = f"{answer}\n\n{label} — {url}".strip()
+        answer = f"{answer}\n\n{label} - {url}".strip()
     return answer
 
 

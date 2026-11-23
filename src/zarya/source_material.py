@@ -6,14 +6,59 @@ from typing import Any
 
 import aiosqlite
 
-from zarya.dialogue_logic import explicit_reply
+from zarya.dialogue_logic import explicit_reply, topic_id
 from zarya.memory_read import MemoryRead
+from zarya.research_intent import usable_post_text
 from zarya.research_logic import urls
+
+FORWARD_QUESTION_WAIT = 2.0
 
 
 async def one(conn: aiosqlite.Connection, sql: str, args: tuple[Any, ...]) -> Any:
     async with conn.execute(sql, args) as cursor:
         return await cursor.fetchone()
+
+
+async def preceding_forward_question(
+    conn: aiosqlite.Connection,
+    bot: str,
+    chat: str,
+    grant: int,
+    message: dict[str, Any],
+    now: float,
+) -> tuple[int, dict[str, int]] | None:
+    """Bind only the immediately preceding, still-waiting private question."""
+    if not (
+        (message.get("forward_origin") or message.get("forward_date"))
+        and usable_post_text(str(message.get("text") or message.get("caption") or ""))
+        and type(message.get("date")) is int
+    ):
+        return None
+    previous = await one(
+        conn,
+        "SELECT m.message_id,m.event_id,m.sender_id,j.id, "
+        "json_extract(j.payload,'$.post_wait_until'),json_extract(e.payload,'$.message.date') "
+        "FROM recent_messages m LEFT JOIN jobs j ON j.event_id=m.event_id "
+        "AND j.kind='telegram' AND j.access_version=? AND j.state='pending' AND j.attempts=0 "
+        "LEFT JOIN events e ON e.id=m.event_id AND e.disposition='accepted' "
+        "WHERE m.bot_id=? AND m.chat_id=? AND m.role='user' "
+        "AND m.message_id<? AND m.thread_id IS ? "
+        "ORDER BY m.message_id DESC,j.id DESC LIMIT 1",
+        (grant, bot, chat, message["message_id"], topic_id(message)),
+    )
+    if not previous:
+        return None
+    mid, event, sender, job, ready_at, date = previous
+    if (
+        sender != str((message.get("from") or {}).get("id", ""))
+        or job is None
+        or not ready_at
+        or now > ready_at
+        or type(date) is not int
+        or not 0 <= message["date"] - date <= FORWARD_QUESTION_WAIT
+    ):
+        return None
+    return job, {"message_id": mid, "event_id": event}
 
 
 def visual_sizes(message: dict[str, Any]) -> list[dict[str, Any]]:

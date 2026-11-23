@@ -14,7 +14,7 @@ from zarya.avatar_logic import purge as purge_avatars
 from zarya.avatar_logic import valid as avatar_valid
 from zarya.configuration import prompts_at
 from zarya.database import ConflictError, Database
-from zarya.dialogue_logic import direct_trigger, message_text, topic_id
+from zarya.dialogue_logic import direct_trigger, explicit_reply, message_text, topic_id
 from zarya.media_logic import MEDIA_WAIT
 from zarya.media_logic import refs_valid as media_refs_valid
 from zarya.memory_logic import (
@@ -30,8 +30,10 @@ from zarya.models import Settings
 from zarya.participant_context import admit as admit_participant
 from zarya.photo_logic import PHOTO_WAIT, admit, link_job
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
+from zarya.research_intent import expects_forwarded_quote
 from zarya.research_logic import RESEARCH_WAIT
 from zarya.research_logic import revision as research_revision
+from zarya.source_material import FORWARD_QUESTION_WAIT, preceding_forward_question
 from zarya.source_material import valid as source_valid
 
 
@@ -653,6 +655,23 @@ class TelegramStore:
                         )
                     ):
                         continue
+                    if (
+                        scope == "private"
+                        and not edited
+                        and not payload["service_reply"]
+                        and settings.dialogue_enabled
+                    ):
+                        now = time.time()
+                        previous_question = await preceding_forward_question(
+                            conn, bot_id, subject, access[1], message, now
+                        )
+                        if previous_question:
+                            question_job, payload["post_question"] = previous_question
+                            await conn.execute(
+                                "UPDATE jobs SET state='cancelled' WHERE id=?", (question_job,)
+                            )
+                        elif not explicit_reply(message) and expects_forwarded_quote(message):
+                            payload["post_wait_until"] = now + FORWARD_QUESTION_WAIT
                     job_cursor = await conn.execute(
                         "INSERT INTO "
                         "jobs(kind,event_id,state,payload,created_at,access_version) "

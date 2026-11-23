@@ -57,6 +57,8 @@ class ResearchEngine:
         settings: Settings,
         version: int,
         selected: dict[str, Any] | None = None,
+        *,
+        text_only: bool = False,
     ) -> tuple[bool, dict[str, Any] | None]:
         existing = await row(conn, "SELECT id,state FROM research_runs WHERE job_id=?", (job,))
         if existing:
@@ -91,7 +93,7 @@ class ResearchEngine:
             parts = []
             for source in selected["messages"]:
                 text = source["text"]
-                for attachment in source["attachments"]:
+                for attachment in [] if text_only else source["attachments"]:
                     kind = {
                         "photo": "Фото",
                         "video": "Видео",
@@ -129,7 +131,7 @@ class ResearchEngine:
         elif market_question:
             question, material, selected_urls = market_question, "", []
         speaker_question = question if quote or market_question else speaker_text(message)
-        search = wants_search(speaker_question)
+        search = text_only or wants_search(speaker_question)
         if not selected_urls and not material and not search:
             return False, None
         cursor = await conn.execute(
@@ -587,6 +589,8 @@ class ResearchEngine:
                         )
                         next_id += 1
                         available.add(u)
+                accepted_claims = []
+                discarded = 0
                 for claim in analysis["claims"]:
                     if (
                         not isinstance(claim, dict)
@@ -599,15 +603,16 @@ class ResearchEngine:
                         raise ValueError("claim")
                     references = [public_url(u) for u in claim["urls"]]
                     feed_refs = claim.get("feeds", [])
-                    if not isinstance(feed_refs, list) or any(
+                    if not isinstance(feed_refs, list):
+                        raise ValueError("unknown_feed")
+                    if any(u not in available for u in references) or any(
                         not isinstance(name, str) or name not in feeds for name in feed_refs
                     ):
-                        raise ValueError("unknown_feed")
-                    if any(u not in available for u in references):
-                        raise ValueError("unknown_source")
+                        discarded += 1
+                        continue
                     if claim["verdict"] != "uncertain" and not references and not feed_refs:
                         raise ValueError("uncited_claim")
-                    claim["source_ids"] = list(
+                    source_ids = list(
                         dict.fromkeys(
                             [
                                 s["id"]
@@ -618,6 +623,10 @@ class ResearchEngine:
                             ]
                             + [feeds[name] for name in feed_refs]
                         )
+                    )
+                    accepted_claims.append(
+                        {key: claim[key] for key in ("text", "kind", "verdict")}
+                        | {"urls": references, "feeds": feed_refs, "source_ids": source_ids}
                     )
                 if len(analysis["summary"]) > 2500:
                     raise ValueError("output_limit")
@@ -632,6 +641,13 @@ class ResearchEngine:
                     for a in result.search_actions or []
                 ):
                     raise ValueError("no_completed_search")
+                if discarded:
+                    if not any(c["verdict"] != "uncertain" for c in accepted_claims):
+                        raise ValueError("unknown_source")
+                    analysis["discarded_claims"] = discarded
+                    analysis["summary"] = "Часть утверждений не удалось проверить по источникам."
+                    analysis["needs_followup"] = False
+                analysis["claims"] = accepted_claims
                 # Preserve cited evidence when the provider returns more than our UI limit.
                 used_ids = {
                     identifier for claim in analysis["claims"] for identifier in claim["source_ids"]
@@ -648,6 +664,8 @@ class ResearchEngine:
                     analysis["source_lookup"] = source_lookup(
                         decoded.get("source_lookup"), analysis["claims"], eligible
                     )
+                    if discarded:
+                        analysis["source_lookup"].pop("heading", None)
             except (ValueError, TypeError, KeyError, IndexError) as exc:
                 # Fixed categories only: exception text may contain source/model content.
                 reasons = {
@@ -730,7 +748,7 @@ class ResearchEngine:
                 analysis = merge_analysis(json.loads(run[1]), analysis, error)
                 actions = json.loads(run[3]) + actions
                 state, error = "completed", None
-            elif analysis and work.get("can_followup"):
+            elif analysis and work.get("can_followup") and not analysis.get("discarded_claims"):
                 plan = followup_input(work["profile"], analysis, sources, observed)
                 if plan:
                     analysis["followup"] = "started"
