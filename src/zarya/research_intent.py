@@ -81,9 +81,7 @@ VERIFY_TEXT = re.compile(
     r"факт.?чек|действительно|реально|точно|фейк\w*)\b",
     re.I,
 )
-TEXT_EVIDENCE = re.compile(
-    r"\b(?:цитат\w*|подпис[ьи]\w*|текст\w*)\b", re.I
-)
+TEXT_EVIDENCE = re.compile(r"\b(?:цитат\w*|подпис[ьи]\w*|текст\w*)\b", re.I)
 MEDIA_EVIDENCE = re.compile(
     r"\b(?:(?:на|в|из)\s+(?:видео|ролик\w*|аудио|кадр\w*)|"
     r"по\s+(?:видео|звуку|аудио)|видеоряд\w*|слышн\w*|озвуч\w*|"
@@ -99,6 +97,38 @@ POST_REFERENCE = re.compile(
 MEDIA_POINTER = re.compile(
     r"(?:подробнее|подробности|смотри(?:те)?|цитата|ответ|вс[её])?\s*"
     r"(?:в|на)\s+(?:видео|ролике|аудио)[.!…\s]*",
+    re.I,
+)
+POST_NOUN = (
+    r"(?:(?:репост|пост|текст)(?:а|у|ом|е|ы|ов|ам|ами|ах)?|"
+    r"стать(?:я|и|ю|ей|ёй|е|ям|ями|ях)|содержани(?:е|я|ю|ем|и))"
+)
+POST_TRANSFORM = (
+    r"(?:ужать|ужми\w*|сократ\w*|переска[зж]\w*|резюмир\w*|суммиру\w*|"
+    r"перевед\w*|перепиш\w*|о\s+ч[её]м)"
+)
+FORWARDED_POST_REFERENCE = re.compile(
+    rf"\b(?:эт(?:от|у|ого|ом|ой)|его|е[её]|присланн\w*|пересланн\w*|тут|здесь|вот)"
+    rf"\s+(?:\w+\s+){{0,2}}{POST_NOUN}\b",
+    re.I,
+)
+DIRECT_POST_TRANSFORM = re.compile(
+    rf"\b{POST_TRANSFORM}\s+{POST_NOUN}(?=\s*(?:$|[?!.,;]|и\s))",
+    re.I,
+)
+POST_DISCUSSION = re.compile(
+    r"\b(?:что\s+автор\s+(?:имеет\s+в\s+виду|хочет\s+сказать)|"
+    r"почему\s+автор|как\s+это\s+понять)\b",
+    re.I,
+)
+POST_EXTERNAL = re.compile(
+    r"\b(?:проверь\w*|поищи\w*|загугл\w*|найди\w*|сверь\w*|СМИ|"
+    r"в\s+интернет\w*|официальн\w+\s+источник\w*|"
+    r"и\s+(?:расскажи|разберись|объясни|сравни)\b)\b",
+    re.I,
+)
+INLINE_TEXT = re.compile(
+    r'[:\n]\s*\S|«[^»]+»|“[^”]+”|"[^"]+"|`[^`]+`',
     re.I,
 )
 
@@ -139,6 +169,67 @@ def expects_forwarded_quote(message: dict[str, Any]) -> bool:
         message.get("text")
         and text_factcheck(message)
         and POST_REFERENCE.search(speaker_text(message))
+    )
+
+
+def _has_inline_text(message: dict[str, Any]) -> bool:
+    return bool(INLINE_TEXT.search(str(message.get("text") or message.get("caption") or "")))
+
+
+def post_text_request(message: dict[str, Any]) -> bool:
+    text = speaker_text(message)
+    return bool(
+        (
+            DIRECT_POST_TRANSFORM.search(text)
+            or FORWARDED_POST_REFERENCE.search(text)
+            and re.search(rf"\b{POST_TRANSFORM}\b", text, re.I)
+        )
+        and not _has_inline_text(message)
+    )
+
+
+def post_opinion_request(message: dict[str, Any]) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:а\s+)?(?:как\s+тебе(?:\s+это)?|что\s+думаешь(?:\s+об\s+этом)?|"
+            r"что\s+об\s+этом\s+думаешь|как\s+считаешь)[?!.\s]*",
+            speaker_text(message).strip(),
+            re.I,
+        )
+    )
+
+
+def expects_post_comment(message: dict[str, Any]) -> bool:
+    text = speaker_text(message)
+    return bool(
+        expects_forwarded_quote(message)
+        or post_text_request(message)
+        or post_opinion_request(message)
+        or FORWARDED_POST_REFERENCE.search(text)
+        and not _has_inline_text(message)
+        or POST_DISCUSSION.search(text)
+    )
+
+
+def local_post_request(message: dict[str, Any]) -> bool:
+    text = speaker_text(message)
+    return bool(
+        (
+            post_text_request(message)
+            or post_opinion_request(message)
+            or POST_DISCUSSION.search(text)
+        )
+        and not POST_EXTERNAL.search(text)
+    )
+
+
+def needs_forwarded_text(message: dict[str, Any]) -> bool:
+    text = speaker_text(message)
+    return bool(
+        post_text_request(message)
+        or FORWARDED_POST_REFERENCE.search(text)
+        and POST_EXTERNAL.search(text)
+        and not _has_inline_text(message)
     )
 
 

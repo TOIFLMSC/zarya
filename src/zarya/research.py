@@ -13,7 +13,12 @@ from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
 from zarya.research_dates import claim_dates
 from zarya.research_fetch import Fetcher, SafeFetcher, check_target
-from zarya.research_intent import blocks_external, research_profile, speaker_text
+from zarya.research_intent import (
+    blocks_external,
+    local_post_request,
+    research_profile,
+    speaker_text,
+)
 from zarya.research_logic import (
     API_FEEDS,
     SEARCH_TOOL_LIMIT,
@@ -148,7 +153,10 @@ class ResearchEngine:
         elif market_question:
             question, material, selected_urls = market_question, "", []
         speaker_question = question if quote or market_question else speaker_text(message)
-        search = bool(news) or text_only or wants_search(speaker_question)
+        local_post = local_post_request(message) and any(
+            source["forwarded"] for source in selected["messages"]
+        )
+        search = bool(news) or text_only or (not local_post and wants_search(speaker_question))
         if not selected_urls and not material and not search:
             return False, None
         source_requests = [

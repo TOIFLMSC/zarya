@@ -29,7 +29,12 @@ from zarya.memory_logic import empty_snapshot
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
 from zarya.photo_logic import PHOTO_WAIT
-from zarya.research_intent import speaker_text, text_factcheck, usable_post_text
+from zarya.research_intent import (
+    needs_forwarded_text,
+    speaker_text,
+    text_factcheck,
+    usable_post_text,
+)
 from zarya.research_logic import RESEARCH_WAIT, research_answer_text, source_failure_text
 from zarya.research_plan import answer_mode as research_answer_mode
 from zarya.research_plan import answer_policy as research_answer_policy
@@ -39,8 +44,9 @@ from zarya.response_links import (
     message_requests_sources,
     requested,
 )
-from zarya.source_material import accepted, resolve
+from zarya.source_material import FORWARD_POLICY, accepted, resolve
 from zarya.source_material import valid as source_valid
+from zarya.telegram_content import forwarded
 from zarya.telegram_store import TelegramStore, row, stamp
 
 if TYPE_CHECKING:
@@ -134,6 +140,8 @@ class DialogueEngine:
             settings_row = await row(conn, "SELECT version,document FROM settings WHERE id=1", ())
             settings = Settings.model_validate_json(settings_row[1])
             trigger = payload.get("trigger", "legacy")
+            if trigger == "shared_post":
+                trigger = "private"
             sender_id = str(message.get("from", {}).get("id", ""))
             thread_id = topic_id(message)
             quote = verbatim_quote.match(
@@ -244,6 +252,33 @@ class DialogueEngine:
                     "text": accepted_question[1]["text"],
                     "entities": accepted_question[1].get("entities", []),
                 }
+            forwarded_post = bool(
+                paired
+                or forwarded(material_message)
+                or forwarded(reply)
+                or "rich_message" in reply
+                or any(item["forwarded"] for item in material["messages"])
+            )
+            post_unreadable = (
+                should_answer
+                and not payload.get("service_reply")
+                and not message_requests_permalink(message)
+                and (
+                    forwarded_post
+                    or payload["scope"] == "private" and needs_forwarded_text(message)
+                )
+                and not any(
+                    usable_post_text(item["text"]) or item["attachments"] or item["urls"]
+                    for item in material["messages"]
+                )
+            )
+            if post_unreadable:
+                payload["service_reply"] = True
+                payload["service_text"] = (
+                    "Не получилось прочитать пересланный пост. "
+                    "Пришли его текст, и я отвечу по нему."
+                )
+                should_answer, behavior_state = False, None
             text_first = text_factcheck(message) and any(
                 usable_post_text(item["text"])
                 and (paired or item["message_id"] != message["message_id"])
@@ -640,6 +675,8 @@ class DialogueEngine:
                     "используй результаты поиска по тексту. Если ролик не относится к цитате "
                     "или недоступен, дай результат проверки текста и обозначь границы вывода."
                 )
+                if forwarded_post:
+                    request["instructions"] += FORWARD_POLICY
             if research_context:
                 request["instructions"] += research_answer_policy(research_context)
                 request["input"] = json.dumps(
@@ -704,6 +741,8 @@ class DialogueEngine:
                 "avatar_id": avatar["id"] if avatar else None,
                 "avatar_profile": avatar_context,
                 "source_manifest": material["manifest"],
+                **({"forwarded_post": True} if forwarded_post else {}),
+                **({"post_unreadable": True} if post_unreadable else {}),
                 "source_access_version": access_version,
                 "memory": memory_context,
                 "retrieval_chat_id": chat_id,
@@ -1553,6 +1592,8 @@ class DialogueEngine:
             raise ValueError(
                 "Дословная цитата копируется напрямую. Для проверки отправь новый реплай."
             )
+        if mode == "paid" and original["snapshot"].get("post_unreadable"):
+            raise ValueError("Текст пересланного поста недоступен. Пришли его новым сообщением.")
         if mode == "paid" and self.adapter is None:
             raise ValueError("Ключ OpenAI не настроен")
         if (
@@ -1653,6 +1694,8 @@ class DialogueEngine:
         if mode == "paid":
             if saved.get("research"):
                 saved["request"]["instructions"] += research_answer_policy(saved["research"])
+            if saved.get("forwarded_post"):
+                saved["request"]["instructions"] += FORWARD_POLICY
             if "message_link_replacements" in saved:
                 saved["request"]["instructions"] += message_links.POLICY
             if saved.get("topic_context"):
