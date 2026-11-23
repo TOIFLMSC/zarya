@@ -17,15 +17,19 @@ FOLLOWUP_LINK_VERB = r"(?:дашь|скинешь|кинешь|пришл[её]�
 MODAL_LINK_REQUEST = (
     r"(?:можешь|можете|можно)\s+(?:дать|скинуть|кинуть|прислать|отправить|показать|найти)"
 )
+DIRECT_QUESTION = r"(?:^|(?<=[.!?;\n]))\s*(?:Заря\s*[:,!]\s*)?(?:а\s+)?(?:ты\s+)?"
+POLITE_LINK_REQUEST = r"(?:(?:мне|нам|пожалуйста|точную|прямую)\s+)*"
 MESSAGE_REQUEST = re.compile(
     rf"(?:^|(?<=[.!?,;\n]))\s*(?:Заря\s*[:,!]\s*)?(?:а\s+)?"
     rf"(?:(?:у\s+тебя\s+)?есть\s+(?:ли\s+)?(?:у\s+тебя\s+)?)?(?:{MESSAGE_TARGET})"
     r"(?:\s+(?:[а-яё-]+|в\s+чате))?\s*(?:\?|,\s*пожалуйста\b)|"
-    rf"\b(?:{MODAL_LINK_REQUEST}|{FOLLOWUP_LINK_VERB}|дай(?:те)?|скинь(?:те)?|"
-    r"кинь(?:те)?|пришл(?:и|ите)|отправь(?:те)?|покажи(?:те)?|найди(?:те)?|"
+    r"\b(?:дай(?:те)?|скинь(?:те)?|кинь(?:те)?|пришл(?:и|ите)|отправь(?:те)?|"
+    r"покажи(?:те)?|найди(?:те)?|"
     r"можно|хочу|где|нуж(?:ен|на|но|ны))\s+"
-    rf"(?:(?:мне|нам|пожалуйста|точную|прямую)\s+)*(?:{MESSAGE_TARGET})|"
-    rf"(?:{MESSAGE_TARGET})\s+{FOLLOWUP_LINK_VERB}\b",
+    rf"{POLITE_LINK_REQUEST}(?:{MESSAGE_TARGET})|"
+    rf"{DIRECT_QUESTION}(?:{MODAL_LINK_REQUEST}|{FOLLOWUP_LINK_VERB})\s+"
+    rf"{POLITE_LINK_REQUEST}(?:{MESSAGE_TARGET})|"
+    rf"{DIRECT_QUESTION}(?:{MESSAGE_TARGET})\s+{FOLLOWUP_LINK_VERB}\b",
     re.IGNORECASE,
 )
 EXTERNAL_DESTINATION = re.compile(r"\b(?:на\s+(?:официальном\s+)?сайте|в\s+статье)\b", re.I)

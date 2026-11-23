@@ -101,6 +101,7 @@ def test_strip_plain_markdown_html_links_preserves_explanation():
         ("Скинь ссылочку на эту реплику", True),
         ("А можешь скинуть ссылку на его сообщение?", True),
         ("Дашь ссылку на сообщение?", True),
+        ("Заря, ссылку на сообщение скинешь?", True),
         ("Дай ссылку на твой ответ", True),
         ("Почему ссылка на сообщение не открывается?", False),
         ("Заря, ссылка на сообщение работает", False),
@@ -116,6 +117,20 @@ def test_strip_plain_markdown_html_links_preserves_explanation():
 def test_chat_link_intent_is_a_request_about_the_message(text, expected):
     assert message_requests_permalink({"text": text}) is expected
     assert not message_requests_permalink({"text": text, "forward_date": 1})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Я знаю, что ты можешь скинуть ссылку на сообщение. Кто его написал?",
+        "Ты сказала, что скинешь ссылку на сообщение. Я спрашивал только про время",
+        "Ты сказала, что ссылку на сообщение скинешь. Я спрашивал только про время",
+    ],
+)
+def test_reported_chat_link_request_does_not_allow_links(text):
+    message = {"text": text}
+    assert not message_requests_permalink(message)
+    assert not message_requests_sources(message)
 
 
 def test_chat_link_render_uses_original_and_rejects_guessed_targets():
