@@ -28,10 +28,12 @@ FALLBACK = "Точную ссылку найти не удалось. Попро
 MARKER = re.compile(r"\[M\d+\]")
 TECHNICAL_ID = re.compile(
     r"(?:\s*[,—–]\s*)?(?:\bэто\s+)?"
-    r"\b(?:message_id|id|сообщени[еяюи]|номер(?:[уа]\s+сообщения)?)\s*[:№#—–-]?\s*`?\d+`?"
-    r"|(?<!\w)[№#]\s*\d+|^[\s`*_]*\d+[\s`*_.!]*$",
+    r"\b(?:message_id|id|сообщени[еяюи]|номер[уа]?(?:\s+сообщения)?|вот)"
+    r"\s*[:№#—–-]?\s*[`*_]*\d+[`*_]*|(?<!\w)[№#]\s*\d+",
     re.IGNORECASE,
 )
+BARE_ID = re.compile(r'^[\s`*_«“"]*\d+[\s`*_.!?»”"]*$')
+QUOTED_TEXT = re.compile(r'(«[^»\n]*»|“[^”\n]*”|„[^“”\n]*[“”]|"[^"\n]*")')
 TELEGRAM_SCHEME = re.compile(r"tg://[^\s<>]+", re.IGNORECASE)
 MAX_CANDIDATES = 64
 
@@ -150,7 +152,12 @@ def render(text: str, replacements: dict[str, str]) -> str:
         return "\n".join(dict.fromkeys(replies))
     if selected or URL_TARGET.search(text) or TELEGRAM_SCHEME.search(text):
         return FALLBACK
-    if match := TECHNICAL_ID.search(cleaned):
-        hint = TECHNICAL_ID.sub("", cleaned).strip(" \t\n.,:;—–()")
-        return hint if hint and match.start() else FALLBACK
+    parts = QUOTED_TEXT.split(cleaned)
+    if BARE_ID.fullmatch(cleaned) or any(BARE_ID.fullmatch(part) for part in parts[1::2]):
+        return FALLBACK
+    if any(TECHNICAL_ID.search(part) for part in parts[::2]):
+        if len(parts) == 1:
+            return FALLBACK
+        parts[::2] = [TECHNICAL_ID.sub("", part) for part in parts[::2]]
+        return "".join(parts).strip(" \t\n.,:;—–()")
     return cleaned or FALLBACK

@@ -99,6 +99,8 @@ def test_strip_plain_markdown_html_links_preserves_explanation():
         ("Заря, а ссылка на его сообщение?", True),
         ("Ссылку на это сообщение, пожалуйста", True),
         ("Скинь ссылочку на эту реплику", True),
+        ("А можешь скинуть ссылку на его сообщение?", True),
+        ("Дашь ссылку на сообщение?", True),
         ("Дай ссылку на твой ответ", True),
         ("Почему ссылка на сообщение не открывается?", False),
         ("Заря, ссылка на сообщение работает", False),
@@ -127,6 +129,11 @@ def test_chat_link_render_uses_original_and_rejects_guessed_targets():
     assert render(unclear, source) == unclear
     assert render("Вот [M38131]", source) == FALLBACK
     assert render("Сообщение 38131", source) == FALLBACK
+    assert render("Найди по номеру 38131", {}) == FALLBACK
+    assert render("Вот: 38131", {}) == FALLBACK
+    assert render("Вот «38131»", {}) == FALLBACK
+    hint = "Набери «Возьми номер 15 у стойки»"
+    assert render(hint, {}) == hint
     assert render("Вот tg://openmessage?chat_id=1234&message_id=4321", source) == FALLBACK
     assert permalink({"id": -1001234567890, "type": "supergroup"}, 3) == url
     assert permalink({"id": -1234567890, "type": "group"}, 3) is None
