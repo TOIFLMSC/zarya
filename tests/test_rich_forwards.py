@@ -144,6 +144,10 @@ async def test_unreadable_post_never_summarizes_an_old_post(tmp_path, scenario):
         )
         assert json.loads(payload)["text"].startswith(UNREADABLE)
         assert not model.calls and not search.calls
+        (snapshot,) = await store.db.one(
+            "SELECT snapshot FROM dialogue_runs WHERE message_id=?", (reply_id,)
+        )
+        assert OLD not in snapshot
         if scenario == "reply":
             (run_id,) = await store.db.one(
                 "SELECT id FROM dialogue_runs WHERE message_id=?", (reply_id,)
@@ -166,6 +170,26 @@ async def test_unrelated_question_and_forward_do_not_share_search_material(tmp_p
         work = await research.claim("999")
         assert work["question"] == question
         assert work["material"] == "" and work["sources"] == []
+
+
+@pytest.mark.parametrize("before_forward", ["generating", "waiting_delivery"])
+async def test_standalone_forward_does_not_cancel_an_unrelated_answer(tmp_path, before_forward):
+    async with store_at(tmp_path) as store:
+        await private_ready(store)
+        dialogue = DialogueEngine(store, FakeModel(ModelResult(text="Ответ на отдельный вопрос")))
+        await store.ingest("999", "zarya_test", [event(2, text="Сколько будет 2 + 2?")])
+        work = await dialogue.claim("999")
+        assert work and not work.get("skip")
+        if before_forward == "waiting_delivery":
+            await dialogue.execute(work)
+        await store.ingest("999", "zarya_test", [rich_post(3)])
+        if before_forward == "generating":
+            await dialogue.execute(work)
+        (state, payload) = await store.db.one(
+            "SELECT state,payload FROM outbox WHERE job_id=?", (work["job_id"],)
+        )
+        assert state == "pending"
+        assert json.loads(payload)["text"] == "Ответ на отдельный вопрос"
 
 
 @pytest.mark.parametrize(
@@ -201,6 +225,23 @@ async def test_private_topics_do_not_share_waiting_forward_comment(tmp_path):
         first_payload, second_payload = [json.loads(payload) for (payload,) in payloads]
         assert first_payload["thread_id"] == 71 and first_payload["post_wait_until"]
         assert second_payload["thread_id"] == 72 and not second_payload.get("post_question")
+
+
+async def test_attachment_caption_is_not_the_comment_for_a_subsequent_forward(tmp_path):
+    async with store_at(tmp_path) as store:
+        await private_ready(store)
+        own_document = event(
+            2, caption="Как тебе?", document={"file_id": "synthetic", "file_unique_id": "doc"}
+        )
+        del own_document["message"]["text"]
+        await store.ingest("999", "zarya_test", [own_document])
+        await store.ingest("999", "zarya_test", [rich_post(3)])
+        (first,), (second,) = await store.db.all(
+            "SELECT payload FROM jobs WHERE json_extract(payload,'$.message_id') IN (2,3) "
+            "ORDER BY id"
+        )
+        assert not json.loads(first).get("post_wait_until")
+        assert not json.loads(second).get("post_question")
 
 
 @pytest.mark.parametrize("question", ["О чём статья 228 УК РФ?", "Сократи текст «Можно короче»"])

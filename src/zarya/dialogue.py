@@ -242,7 +242,11 @@ class DialogueEngine:
                 accepted_question = await accepted(
                     conn, bot_id, chat_id, access_version, paired["message_id"]
                 )
-                if not accepted_question or accepted_question[0] != paired["event_id"]:
+                if (
+                    not accepted_question
+                    or accepted_question[0] != paired["event_id"]
+                    or not isinstance(accepted_question[1].get("text"), str)
+                ):
                     await conn.execute("UPDATE jobs SET state='cancelled' WHERE id=?", (job_id,))
                     return {"skip": True}
                 material["manifest"].append(paired)
@@ -476,18 +480,22 @@ class DialogueEngine:
                 and not payload.get("service_reply")
                 else None
             )
-            context, participant_coverage, context_refs = await select_participant(
-                conn,
-                bot_id,
-                chat_id,
-                access_version,
-                message,
-                settings,
-                enqueue_summaries=should_answer
-                and trigger != "initiative"
-                and not payload.get("service_reply")
-                and not (behavior_state and behavior_state.get("mode") == "shadow"),
-                thread=pilot_thread,
+            context, participant_coverage, context_refs = (
+                ([], {}, {"humans": [], "assistants": [], "media": [], "summaries": []})
+                if post_unreadable
+                else await select_participant(
+                    conn,
+                    bot_id,
+                    chat_id,
+                    access_version,
+                    message,
+                    settings,
+                    enqueue_summaries=should_answer
+                    and trigger != "initiative"
+                    and not payload.get("service_reply")
+                    and not (behavior_state and behavior_state.get("mode") == "shadow"),
+                    thread=pilot_thread,
+                )
             )
             incoming = {
                 "message_id": payload["message_id"],
@@ -498,7 +506,13 @@ class DialogueEngine:
             }
             photo_refs: list[dict[str, Any]] = []
             selected_material = [dict(m) for m in material["messages"]]
-            if self.photos and settings.photo_enabled and not avatar and not find_message_link:
+            if (
+                self.photos
+                and settings.photo_enabled
+                and not avatar
+                and not find_message_link
+                and not post_unreadable
+            ):
                 await self.photos.enrich(
                     conn,
                     bot_id,
@@ -512,7 +526,7 @@ class DialogueEngine:
                     conn, bot_id, chat_id, access_version, target_ids
                 )
             media_refs = []
-            if self.media and settings.media_enabled and not find_message_link:
+            if self.media and settings.media_enabled and not (find_message_link or post_unreadable):
                 media_refs = await self.media.enrich(
                     conn,
                     bot_id,
@@ -722,7 +736,7 @@ class DialogueEngine:
                 **({"current_messages": current_messages} if current_messages else {}),
                 **({"topic_context": topic_context} if topic_context else {}),
                 **({"task_state": task_state} if task_state else {}),
-                "participant_context": participant_coverage,
+                **({"participant_context": participant_coverage} if participant_coverage else {}),
                 "context_refs": context_refs,
                 "settings": settings.model_dump(),
                 "settings_version": settings_row[0],

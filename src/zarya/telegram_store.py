@@ -547,6 +547,14 @@ class TelegramStore:
                         if can_pair_post and not album_leader
                         else None
                     )
+                    if (
+                        not edited
+                        and not previous_question
+                        and trigger == "private"
+                        and forwarded(message)
+                    ):
+                        # A share without a question cannot supersede an unrelated request.
+                        trigger = "shared_post"
                     batch, album_job, new_photo_job = (
                         (None, None, not album_tail)
                         if previous_question or album_tail
@@ -702,14 +710,12 @@ class TelegramStore:
                         await conn.execute(
                             "UPDATE jobs SET state='cancelled' WHERE id=?", (question_job,)
                         )
-                    elif payload["trigger"] == "private" and forwarded(message):
-                        # A share without a question cannot supersede an unrelated request.
-                        payload["trigger"] = "shared_post"
                     elif explicit_reply(message) and text_factcheck(message):
                         payload["post_text_first"] = True
                     elif (
                         can_pair_post
                         and not explicit_reply(message)
+                        and isinstance(message.get("text"), str)
                         and expects_post_comment(message)
                     ):
                         payload["post_wait_until"] = now + FORWARD_QUESTION_WAIT

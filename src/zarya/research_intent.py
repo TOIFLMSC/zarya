@@ -81,7 +81,9 @@ VERIFY_TEXT = re.compile(
     r"факт.?чек|действительно|реально|точно|фейк\w*)\b",
     re.I,
 )
-TEXT_EVIDENCE = re.compile(r"\b(?:цитат\w*|подпис[ьи]\w*|текст\w*)\b", re.I)
+TEXT_EVIDENCE = re.compile(
+    r"\b(?:цитат\w*|подпис[ьи]\w*|текст\w*)\b", re.I
+)
 MEDIA_EVIDENCE = re.compile(
     r"\b(?:(?:на|в|из)\s+(?:видео|ролик\w*|аудио|кадр\w*)|"
     r"по\s+(?:видео|звуку|аудио)|видеоряд\w*|слышн\w*|озвуч\w*|"
