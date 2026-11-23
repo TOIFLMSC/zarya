@@ -226,6 +226,7 @@ def limit_unconfirmed_claims(analysis: dict[str, Any], origin: str, observed: se
             continue
         if not any(url in observed and host(url) != publisher for url in claim["urls"]):
             claim.update(kind="uncertain", verdict="uncertain")
+            claim.pop("dates", None)
             uncertain = True
     if uncertain or not any(c["verdict"] != "uncertain" for c in analysis["claims"]):
         analysis["summary"] = "Для части или всех утверждений нет независимого подтверждения."

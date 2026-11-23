@@ -317,8 +317,11 @@ def source_failure_text(research: dict[str, Any], show_links: bool) -> str:
 
 
 def research_answer_text(text: str, research: dict[str, Any], show_links: bool) -> str:
+    from zarya.research_dates import answer_dates, render_answer_dates
     from zarya.research_plan import SOURCE_KINDS
 
+    if dates := answer_dates(research):
+        text = render_answer_dates(text, dates)
     sources = reply_sources(research) if show_links else research.get("sources", [])
     lookup = (research.get("analysis") or {}).get("source_lookup") or {}
     selected = next(

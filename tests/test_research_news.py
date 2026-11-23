@@ -11,11 +11,118 @@ from test_telegram import event, store_at
 from zarya.dialogue import DialogueEngine
 from zarya.openai_adapter import ModelResult
 from zarya.research import ResearchEngine
+from zarya.research_dates import claim_dates
+from zarya.research_logic import research_answer_text
 
 PUBLIC_POST = "https://x.com/i/status/1234567890123456789"
 PUBLIC_ARTICLE = "https://www.reuters.com/business/example-board-reinstates-chief-executive-after-vote-2026-11-23/"
 CORRECTION = "Подожди, его же сняли недавно и только сегодня вернули"
 PRIVATE_NOTE = "Моя личная пометка ОЛЬХА-752"
+
+
+@pytest.mark.parametrize(
+    ("draft", "kept", "followup"),
+    [
+        ("Его восстановили 23 ноября", False, False),
+        ("Его восстановили 23.11.2026. [RESEARCH_DATES]", False, False),
+        ("Его восстановили сегодня. [RESEARCH_DATES]", False, False),
+        ("Его восстановили 23-го. Да, вопрос с датами важен.", True, True),
+        ("Да, вопрос с датами важен. [RESEARCH_DATES]", True, False),
+    ],
+)
+async def test_news_reply_keeps_event_and_publication_dates_distinct(
+    tmp_path, draft, kept, followup
+):
+    record = "https://example.org/board/decision"
+    announcement = "https://example.com/news/announcement"
+    async with store_at(tmp_path) as store:
+        dialogue, research, model, _ = await start_post(store, PUBLIC_POST, "metadata_only")
+        first_pass = ModelResult(
+            text=json.dumps({"summary": "Ищу объявление", "claims": [], "needs_followup": True}),
+            search_actions=[
+                {"type": "search", "status": "completed", "sources": [{"url": record}]}
+            ],
+        )
+        result = ModelResult(
+            text=json.dumps(
+                {
+                    "summary": "Решение принято 22 ноября, сообщение вышло 23 ноября",
+                    "claims": [
+                        {
+                            "text": (
+                                "Совет восстановил директора 22 ноября, компания сообщила 23 ноября"
+                            ),
+                            "kind": "fact",
+                            "verdict": "supported",
+                            "urls": [record, announcement],
+                            "dates": {
+                                "subject": "Возвращение директора",
+                                "event": {"date": "2026-11-22", "url": record},
+                                "publication": {"date": "2026-11-23", "url": announcement},
+                            },
+                        }
+                    ],
+                }
+            ),
+            search_actions=[
+                {
+                    "type": "search",
+                    "status": "completed",
+                    "sources": [{"url": announcement}]
+                    if followup
+                    else [{"url": record}, {"url": announcement}],
+                }
+            ],
+        )
+        model.generate = AsyncMock(side_effect=[first_pass, result] if followup else [result])
+        dialogue.adapter = FakeModel(ModelResult(text=draft))
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(
+                    3,
+                    text=CORRECTION,
+                    reply_to_message={"message_id": 1000, "from": {"id": 999, "is_bot": True}},
+                )
+            ],
+        )
+        work = await answer(dialogue, research, 3)
+        parts = await store.db.all(
+            "SELECT payload FROM outbox WHERE job_id=? ORDER BY part_index", (work["job_id"],)
+        )
+        sent = "\n".join(json.loads(payload)["text"] for (payload,) in parts)
+        assert "22 ноября 2026" in sent and "23 ноября 2026" in sent
+        assert "Его восстановили" not in sent
+        assert "[RESEARCH_DATES]" not in sent and "https://" not in sent
+        assert ("Да, вопрос с датами важен." in sent) is kept
+        assert "Вставь [RESEARCH_DATES]" in work["snapshot"]["request"]["instructions"]
+        context = work["snapshot"]["research"]
+        with_links = research_answer_text("[RESEARCH_DATES]", context, show_links=True)
+        assert record in with_links and announcement in with_links
+        claim = context["analysis"]["claims"][0]
+        assert claim["dates"]["event"]["source_id"] != claim["dates"]["publication"]["source_id"]
+        assert model.generate.await_count == (2 if followup else 1)
+
+
+@pytest.mark.parametrize("invalid", ["bad_day", "unknown_url", "missing_event", "dated_subject"])
+def test_dates_need_a_valid_source_for_each_role(invalid):
+    record = "https://example.org/decision"
+    release = "https://example.com/announcement"
+    dates = {
+        "subject": "Возвращение директора",
+        "event": {"date": "2026-11-22", "url": record},
+        "publication": {"date": "2026-11-23", "url": release},
+    }
+    if invalid == "bad_day":
+        dates["event"]["date"] = "2026-11-31"
+    elif invalid == "unknown_url":
+        dates["event"]["url"] = "https://example.org/unproven"
+    elif invalid == "missing_event":
+        del dates["event"]
+    else:
+        dates["subject"] = "Возвращение директора 21 ноября"
+    assert claim_dates(dates, {record: 1, release: 2}) is None
 
 
 async def start_post(store, url, coverage):
@@ -172,6 +279,11 @@ async def test_origin_post_alone_does_not_confirm_the_event(tmp_path):
                                 "kind": "fact",
                                 "verdict": "supported",
                                 "urls": [PUBLIC_POST],
+                                "dates": {
+                                    "subject": "Вступление решения в силу",
+                                    "event": {"date": "2026-11-22", "url": PUBLIC_POST},
+                                    "publication": {"date": "2026-11-23", "url": PUBLIC_POST},
+                                },
                             }
                         ],
                     }
@@ -201,6 +313,7 @@ async def test_origin_post_alone_does_not_confirm_the_event(tmp_path):
         assert model.generate.await_count == 2
         assert result["followup"] == "completed"
         assert result["claims"][0]["verdict"] == "uncertain"
+        assert "dates" not in result["claims"][0]
         assert "нет независимого подтверждения" in result["summary"]
         assert "точно" not in result["summary"] + result["followup_summary"]
 
