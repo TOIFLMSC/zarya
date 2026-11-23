@@ -4,10 +4,12 @@ import re
 from typing import Any
 
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
+from zarya.research_intent import DIRECT_SOURCE_REQUEST
 
-NOUN = r"(?:источник\w*|ссылк\w*|пруф\w*|линк\w*|url|адрес\w*)"
+NOUN = r"(?:первоисточник\w*|источник\w*|ссылк\w*|пруф\w*|линк\w*|url|адрес\w*)"
 POSITIVE = re.compile(
-    rf"\b(?:скинь\w*|пришли\w*|дай|дайте|отправь\w*|покажи\w*|приложи\w*|"
+    rf"{DIRECT_SOURCE_REQUEST.pattern}|"
+    rf"\b(?:скинь\w*|кинь\w*|пришли\w*|дай|дайте|отправь\w*|покажи\w*|приложи\w*|"
     rf"приведи|укажи\w*|добавь\w*|поделись|найди|хочу|нуж(?:ен|на|ны|но)|где)\b"
     rf"[^\n.!?]{{0,65}}\b{NOUN}\b|\b(?:send|show|provide|give|include)\b"
     rf"[^\n.!?]{{0,45}}\b(?:sources|links|references|citations|urls)\b|"
@@ -19,7 +21,7 @@ POSITIVE = re.compile(
 )
 NEGATIVE = re.compile(
     rf"\b(?:без|не\s+(?:дай|дава\w*|дайте|добав\w*|пришли\w*|присыла\w*|"
-    rf"отправ\w*|пока\w*|скин\w*|скиды\w*|прила\w*|приводи\w*|указ\w*|"
+    rf"отправ\w*|пока\w*|скин\w*|кин\w*|скиды\w*|прила\w*|приводи\w*|указ\w*|"
     rf"надо|хочу|нуж(?:ен|на|ны|но)))"
     rf"\s+(?:(?:никаких|мне|нам|сюда|пожалуйста|больше|вообще|пока)\s+)*{NOUN}\b|"
     rf"\b{NOUN}\s+не\s+(?:нуж(?:ен|на|ны|но)|надо)\b|"

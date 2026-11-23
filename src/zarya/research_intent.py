@@ -38,7 +38,7 @@ REQUEST = re.compile(
     r"помоги\w*|сравни\w*|сопоставь\w*|сверь\w*|оцени\w*|посоветуй\w*|"
     r"подбери\w*|проанализируй\w*|"
     r"проверь\w*|провер[иь]\w*|найди\w*|поищи\w*|загугл\w*|узнай\w*|"
-    r"исследуй\w*|рес[её]рч\w*|мини-исследовани\w*|"
+    r"исследуй\w*|"
     r"посмотри\w*|глянь\w*|гляни\w*|подтверди\w*|опровергни\w*|факт.?чек|"
     r"хочу\s+(?:узнать|понять|разобраться)|нуж(?:ен|на|но|ны)\s+\w+)\b|"
     r"^\s*(?:Заря[,!:\s]+)?(?:цен\w*|курс\w*|котиров\w*|стоимость|"
@@ -59,15 +59,20 @@ SOURCE_REQUEST = re.compile(
     re.I,
 )
 DIRECT_SOURCE_REQUEST = re.compile(
-    r"\b(?:найди|дай|скинь|пришли|кинь)\w*\s+(?:(?:мне|пожалуйста|прямую)\s+)*"
+    r"\b(?:найди|дай|скинь|пришли|кинь)(?:те)?\s+(?:(?:мне|нам|пожалуйста|прямую)\s+)*"
     r"(?:ссылк\w+\s+на|первоисточник\w*)\b",
+    re.I,
+)
+DIRECT_STUDY_REQUEST = re.compile(
+    r"\b(?:(?:сделай|проведи|начни)(?:те)?\s+"
+    r"(?:(?:небольш\w*|кратк\w*)\s+)?(?:мини[-\s])?(?:рес[её]рч\w*|исследовани\w*)|"
+    r"(?:проверь|сверь|посмотри|собери|сопоставь)\s+"
+    r"(?:(?:ещ[её]|сразу|хотя\s+бы)\s+)?несколько\s+источник\w*)\b",
     re.I,
 )
 DEEP = re.compile(
     r"\b(?:сравни\w*|исследуй\w*|рес[её]рч\w*|исследовани[еяю]|"
     r"(?:разбери|объясни|собери)\w*\s+(?:подробн\w*|по\s+пунктам)|"
-    r"(?:проверь|сверь|посмотри|собери|сопоставь)\s+"
-    r"(?:(?:ещ[её]|сразу|хотя\s+бы)\s+)?несколько\s+источник\w*|"
     r"(?:по|из)\s+(?:нескольким|нескольких)\s+источник\w*)\b",
     re.I,
 )
@@ -222,6 +227,7 @@ def search_kind(question: str) -> Kind:
         QUESTION.search(question)
         or REQUEST.search(question)
         or DIRECT_SOURCE_REQUEST.search(question)
+        or DIRECT_STUDY_REQUEST.search(question)
     ):
         return "request"
     return "none"
@@ -231,7 +237,9 @@ def research_profile(speaker_question: str) -> str:
     speaker_question = re.sub(r"https?://[^\s<>]+", " ", speaker_question)
     if DIRECT_SOURCE_REQUEST.search(speaker_question) or SOURCE_REQUEST.search(speaker_question):
         return "source"
-    return "study" if DEEP.search(speaker_question) else "answer"
+    if DIRECT_STUDY_REQUEST.search(speaker_question) or DEEP.search(speaker_question):
+        return "study"
+    return "answer"
 
 
 def market_followup(text: str) -> bool:

@@ -36,15 +36,38 @@ def test_followup_ignores_private_telegram_destinations_even_if_provider_reporte
     ) is None
 
 
-async def test_explicit_source_request_without_url_is_researched(tmp_path):
+@pytest.mark.parametrize(
+    ("question", "show_link"),
+    [
+        ("Дай ссылку на разъяснение ЦБ", True),
+        ("Кинь ссылку на разъяснение ЦБ", True),
+        ("Пришли первоисточник", True),
+        ("Пришли первоисточник, но без ссылок", False),
+    ],
+)
+async def test_explicit_source_request_gets_verified_link(tmp_path, question, show_link):
     async with store_at(tmp_path) as store:
-        _, research, model, fetch, work = await research_ready(
-            store, "Дай ссылку на разъяснение ЦБ"
+        dialogue, research, model, fetch, work = await research_ready(store, question)
+        data = {**analysis(), "source_lookup": {"kind": "official_section", "url": URL}}
+        model.generate = AsyncMock(
+            side_effect=[
+                ModelResult(
+                    text=json.dumps(data),
+                    search_actions=[
+                        action(),
+                        {"type": "open_page", "status": "completed", "url": URL},
+                    ],
+                ),
+                ModelResult(text="Разъяснение есть в FAQ."),
+            ]
         )
         assert work["profile"] == "source"
         await research.execute(work)
-        assert model.calls[0]["max_tool_calls"] == 4
+        assert model.generate.await_args.args[0]["max_tool_calls"] == 4
         assert fetch.calls == []
+        run = await run_one(dialogue)
+        detail = await dialogue.details(run["run_id"])
+        assert (URL in detail["response"]) is show_link
 
 
 async def test_quoted_text_cannot_enable_followup_or_change_answer_mode(tmp_path):
@@ -281,6 +304,8 @@ async def test_official_lookup_second_pass_is_isolated_and_reply_includes_verifi
         ("Заря, сделай мини-ресерч и сравни условия двух программ.", False),
         ("Заря, сделай мини-ресерч и сравни условия двух программ.", True),
         ("Заря, проверь несколько источников об условиях программы.", False),
+        ("Заря, собери несколько источников об условиях программы.", False),
+        ("Заря, сделай мини-исследование условий программы.", False),
     ],
 )
 async def test_mini_research_keeps_evidence_and_uses_a_detailed_answer(tmp_path, question, unknown):
