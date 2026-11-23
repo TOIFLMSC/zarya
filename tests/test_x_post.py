@@ -12,7 +12,15 @@ from zarya.research_fetch import SafeFetcher
 from zarya.research_logic import evidence_text, research_answer_text, source_failure_text
 from zarya.research_news import news_followup_plan, public_search_sources
 from zarya.research_plan import hosted_search_input
-from zarya.x_post import METADATA_NOTICE, XFetcher, parse_thread, post_id, post_url
+from zarya.x_post import (
+    ALL_METADATA_NOTICE,
+    METADATA_NOTICE,
+    PARTIAL_METADATA_NOTICE,
+    XFetcher,
+    parse_thread,
+    post_id,
+    post_url,
+)
 
 POST, QUOTE, ROOT, PARENT, OTHER = [f"100000000000000000{i}" for i in range(1, 6)]
 URL = f"https://twitter.com/TestAuthor/status/{POST}/photo/1?s=tracking"
@@ -209,6 +217,23 @@ def test_x_single_preview_with_search_alias_keeps_singular_notice():
     assert research_answer_text("Описание", {"sources": sources}, False) == (
         f"{METADATA_NOTICE}\n\nОписание"
     )
+
+
+@pytest.mark.parametrize(
+    ("other_id", "other_coverage", "notice"),
+    [
+        (POST, "x_post_text", ""),
+        (OTHER, "x_post_text", PARTIAL_METADATA_NOTICE),
+        (OTHER, "metadata_only", ALL_METADATA_NOTICE),
+    ],
+)
+def test_x_preview_notice_counts_ids_without_locally_loaded_text(other_id, other_coverage, notice):
+    sources = [
+        {"id": 1, "url": URL, "coverage": "metadata_only"},
+        {"id": 2, "url": post_url(other_id), "coverage": other_coverage},
+    ]
+    expected = f"{notice}\n\nОписание" if notice else "Описание"
+    assert research_answer_text("Описание", {"sources": sources}, False) == expected
 
 
 @pytest.mark.parametrize("fmt", ["Пост - {}", "Пост ({})", "[Пост]({})"])
