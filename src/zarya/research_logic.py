@@ -286,9 +286,11 @@ def source_failure_text(research: dict[str, Any], show_links: bool) -> str:
     Never reuse the rejected synthesis or the free-form research summary here.
     The caller must still check access and source revisions before delivery.
     """
+    from zarya.x_post import add_coverage_notice
+
     fallback = "Не получилось подготовить ответ с проверенными источниками."
     if not show_links or research.get("state") != "completed":
-        return fallback
+        return add_coverage_notice(fallback, research.get("sources", []))
     sources = {s["id"]: s for s in reply_sources(research)}
     analysis = research.get("analysis") or {}
     preferred = (analysis.get("source_lookup") or {}).get("source_id")
@@ -313,12 +315,14 @@ def source_failure_text(research: dict[str, Any], show_links: bool) -> str:
                 break
         if len(links) == 3:
             break
-    return prefix + "\n" + "\n".join(links) if links else fallback
+    message = prefix + "\n" + "\n".join(links) if links else fallback
+    return add_coverage_notice(message, research.get("sources", []))
 
 
 def research_answer_text(text: str, research: dict[str, Any], show_links: bool) -> str:
     from zarya.research_dates import answer_dates, render_answer_dates
     from zarya.research_plan import SOURCE_KINDS
+    from zarya.x_post import add_coverage_notice
 
     if dates := answer_dates(research):
         text = render_answer_dates(text, dates)
@@ -332,7 +336,9 @@ def research_answer_text(text: str, research: dict[str, Any], show_links: bool) 
         ),
         None,
     )
-    answer = evidence_text(text, sources, show_links)
+    answer = add_coverage_notice(
+        evidence_text(text, sources, show_links), research.get("sources", [])
+    )
     if not show_links or selected is None or lookup.get("kind") not in SOURCE_KINDS:
         return answer
     url = public_url(selected["url"])

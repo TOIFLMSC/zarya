@@ -475,6 +475,31 @@ async function openSettingsSection(page, title) {
         diagnostics: [{ step: "captions", code: "captions_empty" }],
       },
     });
+    detail.sources.push(
+      {
+        id: 78,
+        url: "https://x.com/i/status/1000000000000000001",
+        title: "Тестовый пост X",
+        coverage: "x_post_text",
+        text: "Выбранный пост и цитата",
+        error: null,
+        x_post: {
+          post_id: "1000000000000000001",
+          quote_status: "available",
+          parent_ids: ["1000000000000000002", "1000000000000000003"],
+          thread_status: "partial",
+        },
+      },
+      {
+        id: 79,
+        url: "https://x.com/i/status/1000000000000000004",
+        title: "Превью X",
+        coverage: "metadata_only",
+        text: "Публичное описание",
+        error: null,
+        x_post: { post_id: "1000000000000000004" },
+      },
+    );
     await route.fulfill({ response, json: detail });
   });
   await page
@@ -483,6 +508,8 @@ async function openSettingsSection(page, title) {
   await page.getByText("Главы и таймкоды", { exact: true }).click();
   await page.getByText("1:10 — Обсуждение", { exact: true }).waitFor();
   await page.getByText("Диагностика загрузки YouTube", { exact: true }).click();
+  await page.getByText("Цитата загружена · Предыдущих сообщений: 2 · ветка неполная").waitFor();
+  await page.getByText("По ссылке X доступны только заголовок или описание страницы.").waitFor();
   assert.equal(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,

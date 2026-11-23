@@ -127,10 +127,13 @@ class Fetcher(Protocol):
 
 class SafeFetcher:
     async def fetch(self, url: str) -> dict[str, Any]:
+        from zarya.x_post import XFetcher, post_id
         from zarya.youtube import YouTubeFetcher, is_youtube
 
         if is_youtube(url):
             return await YouTubeFetcher().fetch(url)
+        if identifier := post_id(url):
+            return await XFetcher().fetch(identifier, self)
         return await self.fetch_page(url)
 
     async def fetch_page(self, url: str) -> dict[str, Any]:

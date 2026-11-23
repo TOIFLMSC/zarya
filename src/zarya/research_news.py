@@ -84,13 +84,14 @@ def news_followup(text: str) -> bool:
 
 
 def social_post_url(value: str) -> str | None:
+    from zarya.x_post import post_id, post_url
+
+    if identifier := post_id(value):
+        return post_url(identifier)
     try:
         parts = urlsplit(check_target(value))
     except ValueError:
         return None
-    if parts.hostname in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
-        post = re.fullmatch(r"/(?:i(?:/web)?|[\w]{1,15})/status/([0-9]{5,25})/?", parts.path)
-        return f"https://x.com/i/status/{post[1]}" if post else None
     if parts.hostname in {"t.me", "telegram.me", "www.t.me"}:
         post = re.fullmatch(
             r"/(?:s/)?([A-Za-z][A-Za-z0-9_]{3,31})/([1-9][0-9]{0,11})/?", parts.path
