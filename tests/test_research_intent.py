@@ -77,6 +77,12 @@ from zarya.research_logic import wants_search
         ("Наш секрет ABC123, о чём видео? https://youtube.com/watch?v=test&si=TRACK", False),
         ("https://example.org/article?topic=physics", False),
         ("О чём видео и правда ли всё, что там сказано?", True),
+        ("Дай ссылку на разъяснение ЦБ", True),
+        ("Пришли ссылку на публикацию ведомства", True),
+        ("Не ищи в интернете, дай ссылку на разъяснение ЦБ", False),
+        ("Я уже нашёл первоисточник", False),
+        ("У меня есть официальный документ", False),
+        ("Результаты моего мини-ресерча готовы", False),
     ],
 )
 def test_general_request_routing_has_no_subject_or_recency_whitelist(question, expected):
@@ -96,19 +102,21 @@ def test_optout_uses_speaker_entities_and_utf16_offsets(quoted):
 
 
 @pytest.mark.parametrize(
-    "question",
+    ("question", "mode"),
     [
-        "Заря, че там по моексу, сколько уже летим вверх?",
-        "Почему индекс Мосбиржи сегодня растёт?",
-        "Какие новости по Мосбирже?",
-        "Заря, что такое чёрная дыра?",
-        "Заря, расскажи историю Мосбиржи",
-        "Заря, у меня водянка сломалась, могу вернуть?",
-        "Заря, посоветуй как выбрать роутер",
+        ("Заря, че там по моексу, сколько уже летим вверх?", "analysis"),
+        ("Почему индекс Мосбиржи сегодня растёт?", "analysis"),
+        ("Какие новости по Мосбирже?", "analysis"),
+        ("Заря, что такое чёрная дыра?", "analysis"),
+        ("Заря, расскажи историю Мосбиржи", "analysis"),
+        ("Заря, у меня водянка сломалась, могу вернуть?", "analysis"),
+        ("Заря, посоветуй как выбрать роутер", "analysis"),
+        ("Заря, какой курс доллара?", "brief"),
+        ("Почему индекс Мосбиржи сегодня растёт? Коротко.", "brief"),
     ],
 )
 async def test_implicit_request_searches_once_then_dialogue_without_private_search_context(
-    tmp_path, question
+    tmp_path, question, mode
 ):
     async with store_at(tmp_path) as store:
         dialogue, research, model, fetch, work = await research_ready(store, question)
@@ -123,7 +131,8 @@ async def test_implicit_request_searches_once_then_dialogue_without_private_sear
         details = await dialogue.details(result["run_id"])
         assert len(model.calls) == 2 and not model.calls[1].get("tools")
         assert details["snapshot"]["research_id"] == work["id"]
-        assert details["snapshot"]["answer_mode"] == "brief"
+        assert details["snapshot"]["answer_mode"] == mode
+        assert model.calls[1]["text"]["verbosity"] == ("medium" if mode == "analysis" else "low")
         assert "https://" not in details["response"] and fetch.calls == []
         assert (await store.db.one("SELECT count(*) FROM research_runs"))[0] == 1
 

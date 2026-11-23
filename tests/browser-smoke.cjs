@@ -499,6 +499,19 @@ async function openSettingsSection(page, title) {
     fullPage: true,
   });
   await page.unroute(/\/api\/research\/\d+$/);
+  const fixtureResearch = await page.request.get(`${origin}/fixture-research`);
+  assert.equal(fixtureResearch.ok(), true);
+  const lookupRow = page.locator(".photo-row").filter({ hasText: "о тестовом пропуске" });
+  await lookupRow.getByText("Завершено", { exact: true }).waitFor();
+  await lookupRow.click();
+  await page.getByText("Найден официальный раздел · Вопрос 4", { exact: true }).waitFor();
+  await page.locator("summary").filter({ hasText: "Поисковые действия и расход" }).click();
+  await page.getByText("Дополнительная проверка · Завершено", { exact: true }).waitFor();
+  assert.equal(
+    await page.getByRole("link", { name: "Источник 2 ↗", exact: true }).getAttribute("href"),
+    "https://example.org/agency/faq",
+  );
+  await page.screenshot({ path: path.join(output, "research-source-followup.png"), fullPage: true });
   await page.getByLabel("Область", { exact: true }).selectOption("private");
   await page
     .getByText("Для выбранных чатов исследований пока нет.", { exact: true })

@@ -441,6 +441,13 @@ export type ResearchDetail = ResearchItem & {
   sources: ResearchSource[];
   result: {
     summary: string;
+    followup_summary?: string;
+    followup?: "started" | "completed" | "incomplete";
+    source_lookup?: {
+      kind: "document" | "official_section" | "unconfirmed";
+      source_id?: number;
+      heading?: string;
+    };
     claims: {
       text: string;
       kind: string;
@@ -455,16 +462,19 @@ export type ResearchDetail = ResearchItem & {
     url?: string;
     status?: string;
   }[];
-  call: {
-    model: string;
-    pricing: string | null;
-    state: string;
-    usage: { input_tokens: number; output_tokens: number } | null;
-    latency_ms: number | null;
-    cost_usd: number | null;
-    search_cost_usd: number | null;
-    error: string | null;
-  } | null;
+  call: ResearchCall | null;
+  calls?: ResearchCall[];
+};
+type ResearchCall = {
+  phase?: "research_initial" | "research_gap";
+  model: string;
+  pricing: string | null;
+  state: string;
+  usage: { input_tokens: number; output_tokens: number } | null;
+  latency_ms: number | null;
+  cost_usd: number | null;
+  search_cost_usd: number | null;
+  error: string | null;
 };
 
 export type MemoryList = {

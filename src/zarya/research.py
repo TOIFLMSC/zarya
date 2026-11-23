@@ -11,8 +11,8 @@ import aiosqlite
 from zarya.memory_logic import epoch
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
-from zarya.research_fetch import Fetcher, SafeFetcher
-from zarya.research_intent import blocks_external, speaker_text
+from zarya.research_fetch import Fetcher, SafeFetcher, check_target
+from zarya.research_intent import blocks_external, research_profile, speaker_text
 from zarya.research_logic import (
     API_FEEDS,
     SEARCH_TOOL_LIMIT,
@@ -20,6 +20,16 @@ from zarya.research_logic import (
     search_policy,
     urls,
     wants_search,
+)
+from zarya.research_plan import (
+    FOLLOWUP,
+    FOLLOWUP_INSTRUCTIONS,
+    FOLLOWUP_TOOLS,
+    INITIAL,
+    OUTPUT_CONTRACT,
+    followup_input,
+    merge_analysis,
+    source_lookup,
 )
 from zarya.research_quote import resolve_market_question, resolve_quote
 from zarya.source_material import resolve
@@ -118,14 +128,15 @@ class ResearchEngine:
             question, material, selected_urls = quote.question(), "", []
         elif market_question:
             question, material, selected_urls = market_question, "", []
-        search = wants_search(question if quote or market_question else speaker_text(message))
+        speaker_question = question if quote or market_question else speaker_text(message)
+        search = wants_search(speaker_question)
         if not selected_urls and not material and not search:
             return False, None
         cursor = await conn.execute(
             "INSERT INTO "
             "research_runs(job_id,bot_id,chat_id,scope,access_version,state,mode,qu"
             "estion,material,manifest,sources,settings_version,model,reasoning,crea"
-            "ted_at) VALUES (?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?)",
+            "ted_at,profile) VALUES (?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?)",
             (
                 job,
                 bot,
@@ -141,6 +152,7 @@ class ResearchEngine:
                 settings.research_model,
                 settings.research_reasoning,
                 stamp(),
+                research_profile(speaker_question),
             ),
         )
         assert cursor.lastrowid is not None
@@ -221,7 +233,7 @@ class ResearchEngine:
                 conn,
                 "SELECT "
                 "r.id,r.job_id,r.bot_id,r.chat_id,r.scope,r.question,r.material,r.sourc"
-                "es,r.model,r.reasoning,r.settings_version,r.created_at FROM "
+                "es,r.model,r.reasoning,r.settings_version,r.created_at,r.profile FROM "
                 "research_runs r JOIN jobs j ON j.id=r.job_id WHERE r.bot_id=? AND "
                 "r.state='queued' AND j.state='pending' ORDER BY r.id LIMIT 1",
                 (bot,),
@@ -243,6 +255,7 @@ class ResearchEngine:
                         "reasoning",
                         "settings_version",
                         "created_at",
+                        "profile",
                     ),
                     value,
                     strict=True,
@@ -273,6 +286,8 @@ class ResearchEngine:
 
     async def execute(self, work: dict[str, Any]) -> None:
         started = time.monotonic()
+        work["phase"] = INITIAL
+        work["can_followup"] = False
         sources: list[dict[str, Any]] = []
         result = None
         try:
@@ -342,6 +357,8 @@ class ResearchEngine:
                     for source in sources:
                         if any(entry["id"] == source["id"] for entry in fallback_sources):
                             source.setdefault("youtube", {})["fallback_used"] = True
+                work["can_followup"] = run[0] == "search" and work["profile"] != "answer"
+                limit = SEARCH_TOOL_LIMIT - (FOLLOWUP_TOOLS if work["can_followup"] else 0)
                 search_input = (
                     {
                         "question": "Найди доступное описание и сведения о содержании именно этих "
@@ -362,7 +379,7 @@ class ResearchEngine:
                     "reasoning": {"effort": work["reasoning"]},
                     "tools": [{"type": "web_search", "search_context_size": "medium"}],
                     "tool_choice": "required",
-                    "max_tool_calls": SEARCH_TOOL_LIMIT,
+                    "max_tool_calls": limit,
                     "include": ["web_search_call.action.sources"],
                     "max_output_tokens": 3000,
                     "text": {"verbosity": "low"},
@@ -372,7 +389,8 @@ class ResearchEngine:
                         (await self.store.prompts_for(work["settings_version"])).text(
                             "research.analyse"
                         )
-                        + search_policy()
+                        + search_policy(limit)
+                        + OUTPUT_CONTRACT
                     ),
                     "input": json.dumps(search_input, ensure_ascii=False),
                 }
@@ -383,8 +401,8 @@ class ResearchEngine:
                 await conn.execute(
                     "INSERT INTO "
                     "model_calls(job_id,provider,model,state,created_at,settings_version,re"
-                    "quest_json,pricing_profile,research_run_id) VALUES "
-                    "(?,'openai',?,'started',?,?,?,?,?)",
+                    "quest_json,pricing_profile,research_run_id,operation) VALUES "
+                    "(?,'openai',?,'started',?,?,?,?,?,?)",
                     (
                         work["job_id"],
                         work["model"],
@@ -393,6 +411,7 @@ class ResearchEngine:
                         json.dumps(request, ensure_ascii=False),
                         pricing_profile(work["model"]),
                         work["id"],
+                        INITIAL,
                     ),
                 )
             assert self.adapter is not None
@@ -408,11 +427,66 @@ class ResearchEngine:
         except Exception:
             result = ModelResult(state="unknown", error="research_uncertain")
         if result:
-            await self.finish(work, sources, result, int((time.monotonic() - started) * 1000))
+            followup = await self.finish(
+                work, sources, result, int((time.monotonic() - started) * 1000)
+            )
+            if followup:
+                await self.execute_followup(work, *followup)
+
+    async def execute_followup(
+        self, work: dict[str, Any], request: dict[str, Any], sources: list[dict[str, Any]]
+    ) -> None:
+        assert self.adapter is not None
+        work = {**work, "phase": FOLLOWUP}
+        async with self.store.gate, self.db.transaction() as conn:
+            active = await self.search_current(conn, work) and await row(
+                conn,
+                "SELECT 1 FROM model_calls WHERE research_run_id=? AND operation=? "
+                "AND state='started'",
+                (work["id"], FOLLOWUP),
+            )
+        started = time.monotonic()
+        try:
+            result = (
+                await self.adapter.generate(request)
+                if active
+                else ModelResult(state="cancelled", error="source_changed")
+            )
+        except asyncio.CancelledError:
+            await self.finish(work, sources, ModelResult(state="unknown", error="interrupted"), 0)
+            raise
+        except Exception:
+            result = ModelResult(state="unknown", error="research_uncertain")
+        await self.finish(work, sources, result, int((time.monotonic() - started) * 1000))
+
+    async def search_current(
+        self,
+        conn: aiosqlite.Connection,
+        work: dict[str, Any],
+        expected_state: str = "search_started",
+    ) -> bool:
+        run = await row(conn, "SELECT state FROM research_runs WHERE id=?", (work["id"],))
+        settings = Settings.model_validate_json(
+            (await row(conn, "SELECT document FROM settings WHERE id=1", ()))[0]
+        )
+        return bool(
+            run
+            and run[0] == expected_state
+            and settings.research_enabled
+            and settings.dialogue_enabled
+            and await self.current_job(conn, work["job_id"])
+            and await self.valid(conn, work["id"])
+            and await epoch(conn, work["bot_id"]) == work["epoch"]
+        )
 
     async def finish(
         self, work: dict[str, Any], sources: list[dict[str, Any]], result: ModelResult, latency: int
-    ) -> None:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+        sources = list(sources)
+        phase = work.get("phase", INITIAL)
+        followup = phase == FOLLOWUP
+        observed: set[str] = set()
+        opened: set[str] = set()
         analysis = None
         state, error = result.state, result.error
         if state == "completed":
@@ -420,20 +494,38 @@ class ResearchEngine:
                 raw = result.text.strip()
                 if raw.startswith("```"):
                     raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-                analysis = json.loads(raw)
+                decoded = json.loads(raw)
                 if (
-                    not isinstance(analysis, dict)
-                    or not isinstance(analysis.get("summary"), str)
-                    or not isinstance(analysis.get("claims"), list)
-                    or len(analysis["claims"]) > 5
+                    not isinstance(decoded, dict)
+                    or not isinstance(decoded.get("summary"), str)
+                    or not isinstance(decoded.get("claims"), list)
+                    or len(decoded["claims"]) > 5
                 ):
                     raise ValueError("shape")
-                available = {s.get("url") for s in sources if s.get("url")}
+                analysis = {
+                    "summary": decoded["summary"],
+                    "claims": decoded["claims"],
+                    "needs_followup": decoded.get("needs_followup") is True,
+                }
+                available = {
+                    s["url"]
+                    for s in sources
+                    if s.get("url") and not s.get("error") and s.get("coverage") != "unavailable"
+                }
                 feeds: dict[str, int] = {}
+                next_id = max((s["id"] for s in sources), default=0) + 1
                 for action in result.search_actions or []:
                     if action.get("status") != "completed":
                         continue
-                    for s in action.get("sources", []):
+                    action_sources = list(action.get("sources") or [])
+                    if action.get("type") in {"open_page", "find_in_page"} and action.get("url"):
+                        try:
+                            opened.add(check_target(str(action["url"])))
+                        except ValueError:
+                            pass
+                        else:
+                            action_sources.append({"url": action["url"]})
+                    for s in action_sources:
                         name = s.get("name")
                         if (
                             action.get("type") == "search"
@@ -442,7 +534,8 @@ class ResearchEngine:
                             and name in API_FEEDS
                             and name not in feeds
                         ):
-                            identifier = len(sources) + 1
+                            identifier = next_id
+                            next_id += 1
                             feeds[name] = identifier
                             sources.append(
                                 {
@@ -459,13 +552,14 @@ class ResearchEngine:
                             )
                             continue
                         try:
-                            u = public_url(str(s.get("url", "")))
+                            u = check_target(str(s.get("url", "")))
                         except ValueError:
                             continue
+                        observed.add(u)
                         if u not in available:
                             sources.append(
                                 {
-                                    "id": len(sources) + 1,
+                                    "id": next_id,
                                     "url": u,
                                     "title": str(s.get("title") or u)[:300],
                                     "text": "",
@@ -473,16 +567,17 @@ class ResearchEngine:
                                     "error": None,
                                 }
                             )
+                            next_id += 1
                             available.add(u)
                 for citation in result.citations or []:
                     try:
-                        u = public_url(citation["url"])
+                        u = check_target(citation["url"])
                     except ValueError:
                         continue
                     if u not in available:
                         sources.append(
                             {
-                                "id": len(sources) + 1,
+                                "id": next_id,
                                 "url": u,
                                 "title": citation.get("title", u),
                                 "text": "",
@@ -490,6 +585,7 @@ class ResearchEngine:
                                 "error": None,
                             }
                         )
+                        next_id += 1
                         available.add(u)
                 for claim in analysis["claims"]:
                     if (
@@ -513,14 +609,26 @@ class ResearchEngine:
                         raise ValueError("uncited_claim")
                     claim["source_ids"] = list(
                         dict.fromkeys(
-                            [s["id"] for s in sources if s.get("url") in references]
+                            [
+                                s["id"]
+                                for s in sources
+                                if s.get("url") in references
+                                and not s.get("error")
+                                and s.get("coverage") != "unavailable"
+                            ]
                             + [feeds[name] for name in feed_refs]
                         )
                     )
                 if len(analysis["summary"]) > 2500:
                     raise ValueError("output_limit")
                 if not any(
-                    a.get("type") == "search" and a.get("status") == "completed"
+                    a.get("status") == "completed"
+                    and (
+                        a.get("type") == "search"
+                        or (
+                            followup and a.get("type") in {"open_page", "find_in_page"} and observed
+                        )
+                    )
                     for a in result.search_actions or []
                 ):
                     raise ValueError("no_completed_search")
@@ -530,13 +638,16 @@ class ResearchEngine:
                 }
                 if len(used_ids) > 60:
                     raise ValueError("source_limit")
-                cited = [source for source in sources if source["id"] in used_ids]
-                sources = (
-                    cited
-                    + [source for source in sources if source["id"] not in used_ids][
-                        : 60 - len(cited)
+                if work.get("profile") == "source":
+                    eligible = [
+                        s
+                        for s in sources
+                        if s.get("url") in opened
+                        or (not followup and s.get("text") and s.get("coverage") == "partial_text")
                     ]
-                )
+                    analysis["source_lookup"] = source_lookup(
+                        decoded.get("source_lookup"), analysis["claims"], eligible
+                    )
             except (ValueError, TypeError, KeyError, IndexError) as exc:
                 # Fixed categories only: exception text may contain source/model content.
                 reasons = {
@@ -552,35 +663,38 @@ class ResearchEngine:
                     reason = reasons.get(exc.args[0], reason)
                 analysis, state, error = None, "invalid", "invalid_evidence_" + reason
         async with self.store.gate, self.db.transaction() as conn:
-            run = await row(conn, "SELECT state FROM research_runs WHERE id=?", (work["id"],))
-            job = await row(conn, "SELECT state FROM jobs WHERE id=?", (work["job_id"],))
-            settings = Settings.model_validate_json(
-                (await row(conn, "SELECT document FROM settings WHERE id=1", ()))[0]
+            run = await row(
+                conn,
+                "SELECT state,result,sources,actions FROM research_runs WHERE id=?",
+                (work["id"],),
             )
-            valid = bool(
-                run
-                and run[0] == "search_started"
-                and job
-                and job[0] == "pending"
-                and await self.current_job(conn, work["job_id"])
-                and settings.research_enabled
-                and settings.dialogue_enabled
-                and await self.valid(conn, work["id"])
-                and await epoch(conn, work["bot_id"]) == work["epoch"]
-            )
+            if not followup and run and run[0] == "fetching":
+                if result.error != "interrupted":
+                    ready = await self.search_current(conn, work, "fetching")
+                    await conn.execute(
+                        "UPDATE research_runs SET state=?,error_code=?,finished_at=? WHERE id=?",
+                        (
+                            "rejected" if ready else "cancelled",
+                            "research_preparation_failed" if ready else "source_changed",
+                            stamp(),
+                            work["id"],
+                        ),
+                    )
+                return None
+            valid = await self.search_current(conn, work)
             cost = estimate_cost(result, work["model"])
             search_cost = (
                 0.01 * sum(a.get("type") == "search" for a in result.search_actions)
                 if result.search_actions is not None
                 else None
             )
-            await conn.execute(
+            updated = await conn.execute(
                 "UPDATE model_calls SET "
                 "state=?,model=COALESCE(?,model),pricing_profile=?,usage_json=?,"
                 "response_id=?,request_id=?,latency_ms=?,cost_usd="
                 "?,search_cost_usd=?,error_code=?,finished_at=?,request_json=CASE WHEN "
                 "? THEN request_json ELSE NULL END WHERE research_run_id=? AND "
-                "state='started'",
+                "COALESCE(operation,'research_initial')=? AND state='started'",
                 (
                     result.state,
                     result.model,
@@ -595,42 +709,101 @@ class ResearchEngine:
                     stamp(),
                     valid,
                     work["id"],
+                    phase,
                 ),
             )
-            if valid:
+            if updated.rowcount != 1:
+                return None
+            if not valid:
+                if run and run[0] != "cancelled":
+                    await conn.execute(
+                        "UPDATE research_runs SET state='cancelled',error_code='source_changed' "
+                        "WHERE id=?",
+                        (work["id"],),
+                    )
+                return None
+            actions = result.search_actions or []
+            plan = None
+            if followup:
+                if analysis is None:
+                    sources = json.loads(run[2])
+                analysis = merge_analysis(json.loads(run[1]), analysis, error)
+                actions = json.loads(run[3]) + actions
+                state, error = "completed", None
+            elif analysis and work.get("can_followup"):
+                plan = followup_input(work["profile"], analysis, sources, observed)
+                if plan:
+                    analysis["followup"] = "started"
+            used_ids = {
+                identifier
+                for claim in (analysis or {}).get("claims", [])
+                for identifier in claim["source_ids"]
+            }
+            cited = [s for s in sources if s["id"] in used_ids]
+            sources = cited + [s for s in sources if s["id"] not in used_ids][: 60 - len(cited)]
+            await conn.execute(
+                "UPDATE research_runs SET "
+                "state=?,result=?,sources=?,actions=?,error_code=?,finished_at=? WHERE id=?",
+                (
+                    "search_started" if plan else state,
+                    json.dumps(analysis, ensure_ascii=False) if analysis else None,
+                    json.dumps(sources, ensure_ascii=False),
+                    json.dumps(actions, ensure_ascii=False),
+                    error,
+                    None if plan else stamp(),
+                    work["id"],
+                ),
+            )
+            if plan:
+                request = {
+                    "model": work["model"],
+                    "reasoning": {"effort": work["reasoning"]},
+                    "tools": [{"type": "web_search", "search_context_size": "low"}],
+                    "tool_choice": "required",
+                    "max_tool_calls": FOLLOWUP_TOOLS,
+                    "include": ["web_search_call.action.sources"],
+                    "max_output_tokens": 1800,
+                    "text": {"verbosity": "low"},
+                    "store": False,
+                    "service_tier": "default",
+                    "instructions": FOLLOWUP_INSTRUCTIONS + OUTPUT_CONTRACT,
+                    "input": json.dumps(plan, ensure_ascii=False),
+                }
                 await conn.execute(
-                    "UPDATE research_runs SET "
-                    "state=?,result=?,sources=?,actions=?,error_code=?,finished_at=? WHERE "
-                    "id=?",
+                    "INSERT INTO model_calls(job_id,provider,model,state,created_at,"
+                    "settings_version,request_json,pricing_profile,research_run_id,operation) "
+                    "VALUES (?,'openai',?,'started',?,?,?,?,?,?)",
                     (
-                        state,
-                        json.dumps(analysis, ensure_ascii=False) if analysis else None,
-                        json.dumps(sources[:60], ensure_ascii=False),
-                        json.dumps(result.search_actions or [], ensure_ascii=False),
-                        error,
+                        work["job_id"],
+                        work["model"],
                         stamp(),
+                        work["settings_version"],
+                        json.dumps(request, ensure_ascii=False),
+                        pricing_profile(work["model"]),
                         work["id"],
+                        FOLLOWUP,
                     ),
                 )
-            elif run and run[0] != "cancelled":
-                await conn.execute(
-                    "UPDATE research_runs SET state='cancelled',error_code='source_changed' "
-                    "WHERE id=?",
-                    (work["id"],),
-                )
+                return request, sources
+        return None
 
     async def recover(self, bot: str) -> None:
         async with self.store.gate, self.db.transaction() as conn:
             await conn.execute(
-                "UPDATE model_calls SET state='unknown',error_code='interrupted' WHERE "
-                "state='started' AND research_run_id IN (SELECT id FROM research_runs "
+                "UPDATE model_calls SET state='unknown',error_code='interrupted',finished_at=? "
+                "WHERE state='started' AND research_run_id IN (SELECT id FROM research_runs "
                 "WHERE bot_id=?)",
-                (bot,),
+                (stamp(), bot),
             )
             await conn.execute(
-                "UPDATE research_runs SET state='unknown',error_code='interrupted' "
+                "UPDATE research_runs SET "
+                "state=CASE WHEN result IS NULL THEN 'unknown' ELSE 'completed' END,"
+                "error_code=CASE WHEN result IS NULL THEN 'interrupted' ELSE NULL END,"
+                "result=CASE WHEN result IS NULL THEN NULL ELSE "
+                "json_set(result,'$.followup','incomplete','$.followup_error','interrupted') END,"
+                "finished_at=? "
                 "WHERE bot_id=? AND state='search_started'",
-                (bot,),
+                (stamp(), bot),
             )
             await conn.execute(
                 "UPDATE research_runs SET state='queued' WHERE bot_id=? AND state='fetching'",
@@ -724,14 +897,14 @@ class ResearchEngine:
         )
         for field in ("sources", "result", "actions"):
             data[field] = json.loads(data[field]) if data[field] else None
-        call = await self.db.one(
+        calls = await self.db.all(
             "SELECT "
             "model,pricing_profile,state,usage_json,latency_ms,cost_usd,"
-            "search_cost_usd,error_code FROM "
-            "model_calls WHERE research_run_id=?",
+            "search_cost_usd,error_code,COALESCE(operation,'research_initial') FROM "
+            "model_calls WHERE research_run_id=? ORDER BY id",
             (research_id,),
         )
-        data["call"] = (
+        data["calls"] = [
             dict(
                 zip(
                     (
@@ -743,16 +916,15 @@ class ResearchEngine:
                         "cost_usd",
                         "search_cost_usd",
                         "error",
+                        "phase",
                     ),
                     call,
                     strict=True,
                 )
             )
-            if call
-            else None
-        )
-        if data["call"]:
-            data["call"]["usage"] = (
-                json.loads(data["call"]["usage"]) if data["call"]["usage"] else None
-            )
+            for call in calls
+        ]
+        for call_data in data["calls"]:
+            call_data["usage"] = json.loads(call_data["usage"]) if call_data["usage"] else None
+        data["call"] = data["calls"][0] if data["calls"] else None
         return data

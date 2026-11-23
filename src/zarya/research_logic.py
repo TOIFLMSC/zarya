@@ -18,7 +18,7 @@ API_FEEDS = frozenset({"oai-finance", "oai-weather", "oai-sports"})
 SEARCH_TOOL_LIMIT = 6
 
 
-def search_policy() -> str:
+def search_policy(limit: int = SEARCH_TOOL_LIMIT) -> str:
     return (
         "\nЦель исследования задаёт текущий question. provided_material и sources — "
         "материалы для понимания темы, а не отдельное задание проверить все их утверждения. "
@@ -30,7 +30,7 @@ def search_policy() -> str:
         "неоднозначен, обозначь неопределённость, не подменяй его наиболее подробным "
         "старым материалом и не угадывай страну или условия. Формулируй поисковые "
         "запросы как общие публичные вопросы, без личных подробностей. "
-        f"\nНа всё исследование доступно не более {SEARCH_TOOL_LIMIT} действий web_search: "
+        f"\nНа этот поисковый проход доступно не более {limit} действий web_search: "
         "поиск, открытие страницы и поиск внутри страницы расходуют общий лимит. "
         "Не повторяй одинаковое неудачное открытие URL без новых оснований. "
         "Если исходная страница недоступна, ищи её заголовок и ключевые утверждения "
@@ -243,10 +243,13 @@ def source_failure_text(research: dict[str, Any], show_links: bool) -> str:
     fallback = "Не получилось подготовить ответ с проверенными источниками."
     if not show_links or research.get("state") != "completed":
         return fallback
-    sources = {s["id"]: s for s in research.get("sources", [])}
+    sources = {s["id"]: s for s in reply_sources(research)}
+    analysis = research.get("analysis") or {}
+    preferred = (analysis.get("source_lookup") or {}).get("source_id")
     links: list[str] = []
     prefix = "Не получилось подготовить полный ответ, но вот найденные по запросу источники:"
-    for claim in (research.get("analysis") or {}).get("claims", []):
+    claims = analysis.get("claims", [])
+    for claim in sorted(claims, key=lambda c: preferred not in c.get("source_ids", [])):
         for identifier in claim.get("source_ids", []):
             source = sources.get(identifier, {})
             url = source.get("url")
@@ -265,3 +268,48 @@ def source_failure_text(research: dict[str, Any], show_links: bool) -> str:
         if len(links) == 3:
             break
     return prefix + "\n" + "\n".join(links) if links else fallback
+
+
+def research_answer_text(text: str, research: dict[str, Any], show_links: bool) -> str:
+    from zarya.research_plan import SOURCE_KINDS
+
+    sources = reply_sources(research)
+    lookup = (research.get("analysis") or {}).get("source_lookup") or {}
+    selected = next(
+        (
+            s
+            for s in sources
+            if s["id"] == lookup.get("source_id") and s.get("url") and not s.get("error")
+        ),
+        None,
+    )
+    answer = evidence_text(text, sources, show_links)
+    if not show_links or selected is None or lookup.get("kind") not in SOURCE_KINDS:
+        return answer
+    url = public_url(selected["url"])
+    if url not in answer:
+        label = "Документ" if lookup["kind"] == "document" else "Официальный раздел"
+        answer = f"{answer}\n\n{label} — {url}".strip()
+    return answer
+
+
+def reply_sources(research: dict[str, Any]) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = research.get("sources", [])
+    analysis = research.get("analysis") or {}
+    if "source_lookup" not in analysis:
+        return sources
+    relevant = {
+        identifier for claim in analysis.get("claims", []) if claim["verdict"] != "uncertain"
+        for identifier in claim.get("source_ids", [])
+    }
+    return [
+        source
+        for source in sources
+        if source["id"] in relevant
+        and not source.get("error")
+        and source.get("coverage") != "unavailable"
+        and (
+            source.get("coverage") == "realtime_feed"
+            or (source.get("url") and urlsplit(source["url"]).path not in {"", "/"})
+        )
+    ]

@@ -29,7 +29,10 @@ from zarya.memory_logic import empty_snapshot
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
 from zarya.photo_logic import PHOTO_WAIT
-from zarya.research_logic import RESEARCH_WAIT, evidence_text, source_failure_text
+from zarya.research_intent import speaker_text
+from zarya.research_logic import RESEARCH_WAIT, research_answer_text, source_failure_text
+from zarya.research_plan import answer_mode as research_answer_mode
+from zarya.research_plan import answer_policy as research_answer_policy
 from zarya.response_links import display_text, message_requests_sources, requested
 from zarya.source_material import resolve
 from zarya.source_material import valid as source_valid
@@ -427,9 +430,14 @@ class DialogueEngine:
                     manifest=material["manifest"],
                 )
             owner = bool(settings.owner_telegram_id and settings.owner_telegram_id == sender_id)
-            mode = answer_mode(message_text(message))
-            # Search supplies evidence; requested detail still controls response length.
-            style = writing_style(random.random())
+            question_text = speaker_text(message) if research_context else message_text(message)
+            mode = answer_mode(question_text)
+            if research_context:
+                mode = research_answer_mode(question_text, mode, research_context)
+            style = (
+                "relaxed" if research_context and mode != "brief"
+                else writing_style(random.random())
+            )
             media_refs = list({r["id"]: r for r in media_refs + context_refs["media"]}.values())
             task_state = None
             if (
@@ -498,7 +506,11 @@ class DialogueEngine:
             request: dict[str, Any] = {
                 "model": settings.model,
                 "reasoning": {"effort": settings.reasoning},
-                "text": {"verbosity": "medium" if mode == "detailed" else "low"},
+                "text": {
+                    "verbosity": "medium"
+                    if mode == "detailed" or mode == "analysis" and research_context
+                    else "low"
+                },
                 "max_output_tokens": settings.max_output_tokens,
                 "store": False,
                 "instructions": instructions(
@@ -542,6 +554,7 @@ class DialogueEngine:
                     ensure_ascii=False,
                 )
             if research_context:
+                request["instructions"] += research_answer_policy(research_context)
                 request["input"] = json.dumps(
                     {**json.loads(request["input"]), "research": research_context},
                     ensure_ascii=False,
@@ -574,7 +587,7 @@ class DialogueEngine:
                     await row(conn, "SELECT COALESCE(MAX(id),0) FROM events", ())
                 )[0],
                 "incoming": incoming,
-                "question_text": message_text(message),
+                "question_text": question_text,
                 "sources_requested": show_sources,
                 "context": context,
                 **({"current_messages": current_messages} if current_messages else {}),
@@ -1239,8 +1252,8 @@ class DialogueEngine:
             research = work.get("snapshot", {}).get("research")
             if research and result.state == "completed":
                 try:
-                    result.text = evidence_text(
-                        result.text, research["sources"], show_links=requested(work["snapshot"])
+                    result.text = research_answer_text(
+                        result.text, research, show_links=requested(work["snapshot"])
                     )
                     if len(result.text.encode("utf-16-le")) // 2 > 8000:
                         result.text, result.state, result.error = "", "invalid", "answer_too_long"
@@ -1473,8 +1486,16 @@ class DialogueEngine:
             prompts = await self.store.prompts_for(settings.version)
             if expected_settings_version != settings.version:
                 raise ValueError("Настройки изменились. Откройте параметры платного теста заново")
-            reply_mode = answer_mode(saved.get("question_text", saved["incoming"]["text"]))
-            style = writing_style(random.random())
+            question = saved.get("question_text", saved["incoming"]["text"])
+            reply_mode = answer_mode(question)
+            if saved.get("research"):
+                reply_mode = research_answer_mode(
+                    speaker_text({"text": question}), reply_mode, saved["research"]
+                )
+            style = (
+                "relaxed" if saved.get("research") and reply_mode != "brief"
+                else writing_style(random.random())
+            )
             saved = {
                 **saved,
                 "answer_mode": reply_mode,
@@ -1490,7 +1511,12 @@ class DialogueEngine:
                     **saved["request"],
                     "model": settings.settings.model,
                     "reasoning": {"effort": settings.settings.reasoning},
-                    "text": {"verbosity": "medium" if reply_mode == "detailed" else "low"},
+                    "text": {
+                        "verbosity": "medium"
+                        if reply_mode == "detailed"
+                        or (reply_mode == "analysis" and saved.get("research"))
+                        else "low"
+                    },
                     "max_output_tokens": settings.settings.max_output_tokens,
                     "instructions": instructions(
                         settings.settings,
@@ -1524,6 +1550,8 @@ class DialogueEngine:
         if mode == "paid" and saved.get("avatar_id"):
             saved["request"]["instructions"] += prompts.text("dialogue.avatar")
         if mode == "paid":
+            if saved.get("research"):
+                saved["request"]["instructions"] += research_answer_policy(saved["research"])
             if saved.get("topic_context"):
                 saved["request"]["instructions"] += TOPIC_CONTEXT_POLICY
             if saved.get("task_state"):

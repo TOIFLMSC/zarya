@@ -54,6 +54,33 @@ class BrowserModel:
                 usage={"input_tokens": 200, "output_tokens": 80},
             )
         if request.get("tools"):
+            data = json.loads(request["input"])
+            if "тестовом пропуске" in data.get("question", ""):
+                return ModelResult(
+                    text=json.dumps({"summary": "Нужен источник.", "claims": []}),
+                    search_actions=[{
+                        "type": "search", "status": "completed",
+                        "sources": [{"url": "https://example.org/news/test-pass"}],
+                    }],
+                )
+            if data.get("public_urls") == ["https://example.org/news/test-pass"]:
+                url = "https://example.org/agency/faq"
+                return ModelResult(
+                    text=json.dumps({
+                        "summary": "Условия опубликованы в разделе вопросов и ответов.",
+                        "claims": [{
+                            "text": "Срок действия пропуска указан в вопросе 4.",
+                            "kind": "fact", "verdict": "supported", "urls": [url],
+                        }],
+                        "source_lookup": {
+                            "kind": "official_section", "url": url, "heading": "Вопрос 4",
+                        },
+                    }),
+                    search_actions=[
+                        {"type": "search", "status": "completed", "sources": [{"url": url}]},
+                        {"type": "open_page", "status": "completed", "url": url},
+                    ],
+                )
             return ModelResult(
                 text=json.dumps(
                     {
@@ -343,6 +370,19 @@ if __name__ == "__main__":
     )
     app.state.media.processor = BrowserMediaProcessor()
     transport.store = app.state.telegram_store
+
+    @app.get("/fixture-research")
+    async def request_research():
+        await transport.store.ingest("999", "zarya_fixture_bot", [{
+            "update_id": 32,
+            "message": {
+                "message_id": 32, "date": 1,
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 42, "first_name": "Тестовый собеседник"},
+                "text": "Заря, найди ссылку на разъяснение о тестовом пропуске.",
+            },
+        }])
+        return {"synthetic": True}
 
     @app.get("/fixture-media")
     async def request_media():
