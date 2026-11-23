@@ -211,6 +211,33 @@ async def test_comment_can_request_web_search_about_the_selected_post(tmp_path, 
         assert research.adapter.calls[0]["tools"][0]["type"] == "web_search"
 
 
+async def test_visible_rich_post_link_reaches_the_fetcher_without_hidden_targets(tmp_path):
+    public = "https://x.com/i/status/1234567890123456789"
+    hidden = "https://example.org/hidden-target"
+    async with store_at(tmp_path) as store:
+        await private_ready(store)
+        dialogue = DialogueEngine(store, FakeModel(ModelResult(text="Ответ по посту")))
+        model, fetch = ResearchModel(), Fetch()
+        dialogue.research = research = ResearchEngine(store, model, fetch)
+        post = rich_post(3)
+        post["message"]["rich_message"]["blocks"] = [
+            {
+                "type": "paragraph",
+                "text": [public, " ", {"type": "url", "text": "см.", "url": hidden}],
+            }
+        ]
+        await store.ingest(
+            "999", "zarya_test", [event(2, text="Проверь этот пост по новостям"), post]
+        )
+        assert await dialogue.claim("999") == {"skip": True}
+        await research.execute(await research.claim("999"))
+        assert fetch.calls == [public]
+        payload = json.loads(model.calls[0]["input"])
+        assert public in payload["provided_material"]
+        assert public in {source["url"] for source in payload["sources"]}
+        assert hidden not in model.calls[0]["input"]
+
+
 async def test_private_topics_do_not_share_waiting_forward_comment(tmp_path):
     async with store_at(tmp_path) as store:
         await private_ready(store)
