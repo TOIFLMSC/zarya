@@ -30,6 +30,7 @@ const coverage: Record<string, string> = {
   metadata_only: "Только заголовок и описание",
   youtube_metadata: "YouTube: описание и доступные главы",
   youtube_transcript: "YouTube: метаданные и субтитры",
+  x_post_text: "X: текст поста",
   unavailable: "Материал недоступен",
   search_source: "Источник из поиска",
   realtime_feed: "Поток актуальных данных",
@@ -376,7 +377,20 @@ export function ResearchPanel({
                   )}
                   {s.coverage === "metadata_only" && (
                     <p className="notice">
-                      Содержание видео не проверено. Доступны только метаданные.
+                      {s.x_post
+                        ? "По ссылке X доступны только заголовок или описание страницы."
+                        : "По ссылке доступны только заголовок или описание страницы."}
+                    </p>
+                  )}
+                  {s.x_post && s.coverage === "x_post_text" && (
+                    <p className="muted">
+                      {s.x_post.quote_status === "available" && "Цитата загружена · "}
+                      {s.x_post.quote_status === "unavailable" && "Цитата недоступна · "}
+                      {s.x_post.quote_status === "no_text" && "В цитате нет доступного текста · "}
+                      Предыдущих сообщений: {s.x_post.parent_ids?.length ?? 0}
+                      {s.x_post.thread_status === "partial" && " · ветка неполная"}
+                      {s.x_post.text_truncated && " · часть текста сокращена"}
+                      {s.x_post.has_media && " · вложения не открывались"}
                     </p>
                   )}
                   {s.youtube && (

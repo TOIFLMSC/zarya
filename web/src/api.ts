@@ -421,6 +421,15 @@ export type ResearchSource = {
   text: string;
   coverage: string;
   error: string | null;
+  x_post?: {
+    post_id: string;
+    quote_status?: "none" | "available" | "unavailable" | "no_text";
+    parent_ids?: string[];
+    thread_status?: "none" | "available" | "partial";
+    text_truncated?: boolean;
+    has_media?: boolean;
+    provider_error?: string;
+  };
   youtube?: {
     video_id?: string;
     channel?: string;

@@ -246,15 +246,32 @@ def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = T
     if not show_links:
         return without_links(text)
     # Any URL supplied by the synthesis must already belong to the evidence manifest.
+    from zarya.x_post import post_id, post_url
+
     permitted = {str(source["url"]) for source in readable.values() if source.get("url")}
+    admitted_x = {identifier for target in permitted if (identifier := post_id(target))}
+
+    def admitted_post(value: str) -> str | None:
+        candidate = value if "://" in value else f"https://{value}"
+        identifier = post_id(candidate)
+        return post_url(identifier) if identifier and identifier in admitted_x else None
+
+    def inline_link(match: re.Match[str]) -> str:
+        target = admitted_post(match[2]) or (match[2] if match[2] in permitted else None)
+        return f"{match[1]} - {target}" if target else match[0]
+
+    def parenthesized_link(match: re.Match[str]) -> str:
+        target = admitted_post(match[1]) or (match[1] if match[1] in permitted else None)
+        return linked(match, target) if target else match[0]
+
     text = re.sub(
         r"\[([^\]\n]+)\]\(<?(https?://[^\s<>]+)>?\)",
-        lambda match: f"{match[1]} - {match[2]}" if match[2] in permitted else match[0],
+        inline_link,
         text,
     )
     text = re.sub(
         r"(?<!\])[ \t]*\((https?://[^\s<>]+)\)",
-        lambda match: linked(match, match[1]) if match[1] in permitted else match[0],
+        parenthesized_link,
         text,
     )
     known_links = {}
@@ -273,9 +290,10 @@ def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = T
         if not is_link_target(literal):
             return literal
         value = literal if literal in known_links else trim_url(literal)
-        if value not in known_links:
+        target = admitted_post(value) or known_links.get(value)
+        if target is None:
             raise ValueError("unknown_source")
-        return known_links[value] + literal[len(value) :]
+        return target + literal[len(value) :]
 
     return URL_TARGET.sub(verified_link, text).strip()
 
@@ -286,9 +304,11 @@ def source_failure_text(research: dict[str, Any], show_links: bool) -> str:
     Never reuse the rejected synthesis or the free-form research summary here.
     The caller must still check access and source revisions before delivery.
     """
+    from zarya.x_post import add_coverage_notice
+
     fallback = "Не получилось подготовить ответ с проверенными источниками."
     if not show_links or research.get("state") != "completed":
-        return fallback
+        return add_coverage_notice(fallback, research.get("sources", []))
     sources = {s["id"]: s for s in reply_sources(research)}
     analysis = research.get("analysis") or {}
     preferred = (analysis.get("source_lookup") or {}).get("source_id")
@@ -313,12 +333,14 @@ def source_failure_text(research: dict[str, Any], show_links: bool) -> str:
                 break
         if len(links) == 3:
             break
-    return prefix + "\n" + "\n".join(links) if links else fallback
+    message = prefix + "\n" + "\n".join(links) if links else fallback
+    return add_coverage_notice(message, research.get("sources", []))
 
 
 def research_answer_text(text: str, research: dict[str, Any], show_links: bool) -> str:
     from zarya.research_dates import answer_dates, render_answer_dates
     from zarya.research_plan import SOURCE_KINDS
+    from zarya.x_post import add_coverage_notice
 
     if dates := answer_dates(research):
         text = render_answer_dates(text, dates)
@@ -332,7 +354,9 @@ def research_answer_text(text: str, research: dict[str, Any], show_links: bool) 
         ),
         None,
     )
-    answer = evidence_text(text, sources, show_links)
+    answer = add_coverage_notice(
+        evidence_text(text, sources, show_links), research.get("sources", [])
+    )
     if not show_links or selected is None or lookup.get("kind") not in SOURCE_KINDS:
         return answer
     url = public_url(selected["url"])

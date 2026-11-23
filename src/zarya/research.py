@@ -42,7 +42,30 @@ from zarya.research_plan import (
 from zarya.research_quote import resolve_market_question, resolve_quote
 from zarya.source_material import resolve
 from zarya.telegram_store import TelegramStore, row, stamp
+from zarya.x_post import (
+    X_POLICY,
+    post_id,
+    post_url,
+    references_post,
+    source_post_id,
+    unavailable_post_ids,
+)
 from zarya.youtube import video_id
+
+
+def evidence_url(value: str) -> str:
+    checked = check_target(value)
+    identifier = post_id(checked)
+    return post_url(identifier) if identifier else checked
+
+
+def source_has_evidence(source: dict[str, Any]) -> bool:
+    return (
+        bool(source.get("url"))
+        and not source.get("error")
+        and source.get("coverage") != "unavailable"
+        and not (source_post_id(source) and source.get("coverage") == "metadata_only")
+    )
 
 
 class ResearchEngine:
@@ -428,6 +451,7 @@ class ResearchEngine:
                         )
                         + search_policy(limit)
                         + OUTPUT_CONTRACT
+                        + (X_POLICY if any(source_post_id(s) for s in sources) else "")
                     ),
                     "input": json.dumps(search_input, ensure_ascii=False),
                 }
@@ -545,10 +569,10 @@ class ResearchEngine:
                     "claims": decoded["claims"],
                     "needs_followup": decoded.get("needs_followup") is True,
                 }
+                blocked_x = unavailable_post_ids(sources)
                 available = {
-                    s["url"]
-                    for s in sources
-                    if s.get("url") and not s.get("error") and s.get("coverage") != "unavailable"
+                    evidence_url(s["url"]) for s in sources
+                    if source_has_evidence(s) and not references_post(s["url"], blocked_x)
                 }
                 feeds: dict[str, int] = {}
                 next_id = max((s["id"] for s in sources), default=0) + 1
@@ -558,7 +582,7 @@ class ResearchEngine:
                     action_sources = list(action.get("sources") or [])
                     if action.get("type") in {"open_page", "find_in_page"} and action.get("url"):
                         try:
-                            opened.add(check_target(str(action["url"])))
+                            opened.add(evidence_url(str(action["url"])))
                         except ValueError:
                             pass
                         else:
@@ -590,8 +614,10 @@ class ResearchEngine:
                             )
                             continue
                         try:
-                            u = check_target(str(s.get("url", "")))
+                            u = evidence_url(str(s.get("url", "")))
                         except ValueError:
+                            continue
+                        if references_post(u, blocked_x):
                             continue
                         observed.add(u)
                         if u not in available:
@@ -609,8 +635,10 @@ class ResearchEngine:
                             available.add(u)
                 for citation in result.citations or []:
                     try:
-                        u = check_target(citation["url"])
+                        u = evidence_url(citation["url"])
                     except ValueError:
+                        continue
+                    if references_post(u, blocked_x):
                         continue
                     if u not in available:
                         sources.append(
@@ -640,7 +668,7 @@ class ResearchEngine:
                     if any(not isinstance(url, str) for url in claim["urls"]):
                         raise ValueError("claim")
                     try:
-                        references = [check_target(url) for url in claim["urls"]]
+                        references = [evidence_url(url) for url in claim["urls"]]
                     except ValueError:
                         discarded += 1
                         continue
@@ -659,9 +687,7 @@ class ResearchEngine:
                             [
                                 s["id"]
                                 for s in sources
-                                if s.get("url") in references
-                                and not s.get("error")
-                                and s.get("coverage") != "unavailable"
+                                if source_has_evidence(s) and evidence_url(s["url"]) in references
                             ]
                             + [feeds[name] for name in feed_refs]
                         )
@@ -721,7 +747,10 @@ class ResearchEngine:
                         s
                         for s in sources
                         if s.get("url") in opened
-                        or (not followup and s.get("text") and s.get("coverage") == "partial_text")
+                        or (
+                            not followup and s.get("text")
+                            and s.get("coverage") in {"partial_text", "x_post_text"}
+                        )
                     ]
                     analysis["source_lookup"] = source_lookup(
                         decoded.get("source_lookup"), analysis["claims"], eligible
@@ -812,7 +841,7 @@ class ResearchEngine:
                 state, error = "completed", None
             elif analysis and work.get("can_followup") and not analysis.get("discarded_claims"):
                 plan = (
-                    news_followup_plan(analysis, work["sources"], actions)
+                    news_followup_plan(analysis, work["sources"], actions, sources)
                     if work.get("news_recheck")
                     else followup_input(work["profile"], analysis, sources, observed)
                 )
