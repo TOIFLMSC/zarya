@@ -210,9 +210,12 @@ def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = T
     mapping = {
         str(s["id"]): s
         for s in sources
-        if not s.get("error") and s.get("coverage") != "unavailable" and (
-            s.get("url") or (s.get("coverage") == "realtime_feed" and s.get("name") in API_FEEDS)
-        )
+        if s.get("url") or (s.get("coverage") == "realtime_feed" and s.get("name") in API_FEEDS)
+    }
+    readable = {
+        identifier: source
+        for identifier, source in mapping.items()
+        if not source.get("error") and source.get("coverage") != "unavailable"
     }
 
     def linked(match: re.Match[str], url: str) -> str:
@@ -222,7 +225,8 @@ def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = T
         return (" " if before[-1] in "-–—" else " - ") + url
 
     def replace(match: re.Match[str]) -> str:
-        source = mapping.get(match[2] or match[3])
+        identifier = match[2] or match[3]
+        source = (readable if show_links else mapping).get(identifier)
         if not source:
             raise ValueError("unknown_source")
         if not show_links:
@@ -237,7 +241,7 @@ def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = T
 
         return without_links(text)
     # Any URL supplied by the synthesis must already belong to the evidence manifest.
-    permitted = {source["url"] for source in mapping.values() if source.get("url")}
+    permitted = {source["url"] for source in readable.values() if source.get("url")}
     text = re.sub(
         r"\[([^\]\n]+)\]\(<?(https?://[^\s<>]+)>?\)",
         lambda match: f"{match[1]} - {match[2]}" if match[2] in permitted else match[0],
