@@ -208,12 +208,15 @@ def test_unreadable_page_cannot_be_rendered_as_evidence(rendered):
         )
 
 
-def test_link_free_answer_can_drop_existing_but_unavailable_marker():
-    assert evidence_text(
-        "Вывод [S1]",
-        [{"id": 1, "url": URL, "coverage": "unavailable", "error": "timeout"}],
-        show_links=False,
-    ) == "Вывод"
+@pytest.mark.parametrize("url", [URL, None])
+def test_link_free_answer_can_drop_existing_but_unavailable_marker(url):
+    context = {
+        "analysis": {"source_lookup": {"kind": "unconfirmed"}},
+        "sources": [{"id": 1, "url": url, "coverage": "unavailable", "error": "timeout"}],
+    }
+    assert research_answer_text("Вывод [S1]", context, False) == "Вывод"
+    with pytest.raises(ValueError, match="unknown_source"):
+        research_answer_text("Вывод [S999]", context, False)
 
 
 def test_partial_general_research_can_link_a_claim_bound_homepage():

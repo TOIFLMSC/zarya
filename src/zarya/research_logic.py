@@ -207,15 +207,16 @@ async def revision(conn: aiosqlite.Connection, bot: str, chat: str, message: int
 def evidence_text(text: str, sources: list[dict[str, Any]], show_links: bool = True) -> str:
     "Replace explicit source references; unknown refs fail instead of"
     "inventing citations."
-    mapping = {
-        str(s["id"]): s
-        for s in sources
-        if s.get("url") or (s.get("coverage") == "realtime_feed" and s.get("name") in API_FEEDS)
-    }
+    mapping = {str(source["id"]): source for source in sources}
     readable = {
         identifier: source
         for identifier, source in mapping.items()
-        if not source.get("error") and source.get("coverage") != "unavailable"
+        if not source.get("error")
+        and source.get("coverage") != "unavailable"
+        and (
+            source.get("url")
+            or (source.get("coverage") == "realtime_feed" and source.get("name") in API_FEEDS)
+        )
     }
 
     def linked(match: re.Match[str], url: str) -> str:
@@ -297,7 +298,7 @@ def source_failure_text(research: dict[str, Any], show_links: bool) -> str:
 def research_answer_text(text: str, research: dict[str, Any], show_links: bool) -> str:
     from zarya.research_plan import SOURCE_KINDS
 
-    sources = reply_sources(research)
+    sources = reply_sources(research) if show_links else research.get("sources", [])
     lookup = (research.get("analysis") or {}).get("source_lookup") or {}
     selected = next(
         (
