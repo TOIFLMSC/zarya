@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock
 import pytest
 from test_dialogue import run_one
 from test_research import research_ready
-from test_telegram import store_at
+from test_research_news import CORRECTION, start_post
+from test_telegram import event, store_at
 
 from zarya.openai_adapter import ModelResult
 from zarya.research_fetch import SafeFetcher
@@ -136,12 +137,60 @@ def test_x_unavailable_id_is_excluded_from_search_and_news_followup():
         {"id": 2, "coverage": "partial_text", "url": public, "title": "Тестовая новость"},
     ]
     for manifest in (sources, public_search_sources(entries, sources)):
-        request = hosted_search_input(f"Проверь {URL} ({POST})", "", manifest)
+        escaped = f"example.net/mirror/%31{POST[1:]}"
+        request = hosted_search_input(f"Проверь {URL} ({POST})", escaped, manifest)
         assert POST not in json.dumps(request)
+        assert escaped not in json.dumps(request)
         assert request["sources"][0]["url"] == public
     actions = [{"type": "search", "status": "completed", "sources": [{"url": URL}]}]
     followup = news_followup_plan({"needs_followup": True}, entries, actions, sources)
     assert followup == {"reason": "evidence_gap", "public_urls": [public]}
+
+
+@pytest.mark.parametrize("recheck", [False, True])
+async def test_x_unavailable_id_cannot_return_through_mirrors_in_search_requests(
+    tmp_path, monkeypatch, recheck
+):
+    blocked = ValueError("x_post_unavailable")
+    monkeypatch.setattr(XFetcher, "get", AsyncMock(side_effect=blocked))
+    mirror = f"https://threadreaderapp.com/thread/{POST}.html"
+    escaped = f"https://example.com/mirror/%31{POST[1:]}.html"
+    independent = "https://example.org/independent-report"
+    async with store_at(tmp_path) as store:
+        if recheck:
+            dialogue, research, model, _ = await start_post(store, post_url(POST), "metadata_only")
+            await store.ingest("999", "zarya_test", [
+                event(3, text=CORRECTION, reply_to_message={
+                    "message_id": 1000, "from": {"id": 999, "is_bot": True},
+                }),
+            ])
+            assert await dialogue.claim("999") == {"skip": True}
+            work = await research.claim("999")
+            assert work and work["news_recheck"]
+        else:
+            _, research, model, _, work = await research_ready(
+                store, f"Заря, сделай мини-ресерч и найди источники для {URL}"
+            )
+            assert work["profile"] == "study"
+        research.fetcher = SafeFetcher()
+        search_actions = [{
+            "type": "search", "status": "completed",
+            "sources": [{"url": url} for url in (mirror, independent, escaped)],
+        }]
+        model.generate = AsyncMock(side_effect=[
+            ModelResult(
+                text=json.dumps({"summary": "Ищу источник", "claims": [], "needs_followup": True}),
+                search_actions=search_actions,
+            ),
+            ModelResult(
+                text=json.dumps({"summary": "Источник проверен", "claims": []}),
+                search_actions=search_actions,
+            ),
+        ])
+        await research.execute(work)
+        first, second = [call.args[0]["input"] for call in model.generate.await_args_list]
+        assert POST not in first and POST not in second and escaped not in second
+        assert json.loads(second)["public_urls"] == [independent]
 
 
 @pytest.mark.parametrize("requested", [URL, "https://example.org/redirect"])
@@ -150,6 +199,16 @@ def test_x_legacy_preview_and_redirected_x_preview_are_disclosed(requested):
     context = {"state": "completed", "sources": [source]}
     assert METADATA_NOTICE in research_answer_text("Вот описание.", context, False)
     assert METADATA_NOTICE in source_failure_text(context, False)
+
+
+def test_x_single_preview_with_search_alias_keeps_singular_notice():
+    sources = [
+        {"id": 1, "url": post_url(POST), "coverage": "metadata_only"},
+        {"id": 2, "url": URL, "coverage": "search_source"},
+    ]
+    assert research_answer_text("Описание", {"sources": sources}, False) == (
+        f"{METADATA_NOTICE}\n\nОписание"
+    )
 
 
 @pytest.mark.parametrize("fmt", ["Пост - {}", "Пост ({})", "[Пост]({})"])

@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 from typing import Any, TypeGuard
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import aiohttp
 
@@ -13,6 +13,7 @@ from zarya.research_fetch import PublicResolver, SafeFetcher, check_target, fetc
 
 HOSTS = frozenset({"x.com", "www.x.com", "twitter.com", "www.twitter.com"})
 POST_ID = re.compile(r"[1-9][0-9]{1,19}")
+POST_NUMBER = re.compile(r"(?<![0-9])[0-9]{2,20}(?![0-9])")
 POST_PATH = re.compile(
     r"/(?:i(?:/web)?|[A-Za-z0-9_]{1,15})/status/([1-9][0-9]{1,19})"
     r"(?:/(?:photo|video)/[1-9][0-9]?)?/?"
@@ -38,9 +39,15 @@ PARTIAL_METADATA_NOTICE = (
 
 
 def add_coverage_notice(answer: str, sources: list[dict[str, Any]]) -> str:
-    coverage = {s.get("coverage") for s in sources if source_post_id(s)}
-    if "metadata_only" in coverage:
-        notice = PARTIAL_METADATA_NOTICE if len(coverage) > 1 else METADATA_NOTICE
+    local_sources = [
+        (identifier, source.get("coverage"))
+        for source in sources
+        if source.get("coverage") != "search_source" and (identifier := source_post_id(source))
+    ]
+    previews = {identifier for identifier, coverage in local_sources if coverage == "metadata_only"}
+    if previews:
+        mixed = any(identifier not in previews for identifier, _ in local_sources)
+        notice = PARTIAL_METADATA_NOTICE if mixed else METADATA_NOTICE
         if notice not in answer:
             return f"{notice}\n\n{answer}".strip()
     return answer
@@ -77,6 +84,19 @@ def unavailable_post_ids(sources: list[dict[str, Any]]) -> set[str]:
         identifier for source in sources
         if (identifier := source_post_id(source)) and source.get("coverage") == "unavailable"
     }
+
+
+def references_post(value: str, identifiers: set[str]) -> bool:
+    if not identifiers:
+        return False
+    for _ in range(4):
+        if any(match[0] in identifiers for match in POST_NUMBER.finditer(value)):
+            return True
+        decoded = unquote(value)
+        if decoded == value:
+            break
+        value = decoded
+    return False
 
 
 def restricted(raw: dict[str, Any]) -> bool:

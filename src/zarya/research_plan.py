@@ -64,10 +64,23 @@ def hosted_search_input(
     question: str, material: str, sources: list[dict[str, Any]]
 ) -> dict[str, Any]:
     """Carry only the links admitted by the bounded local fetch stage."""
-    from zarya.x_post import post_id, post_url, source_post_id, unavailable_post_ids
+    from zarya.x_post import (
+        POST_NUMBER,
+        post_id,
+        post_url,
+        references_post,
+        source_post_id,
+        unavailable_post_ids,
+    )
 
     blocked_x = unavailable_post_ids(sources)
-    sources = [source for source in sources if source_post_id(source) not in blocked_x]
+    sources = [
+        source for source in sources
+        if source_post_id(source) not in blocked_x and not any(
+            references_post(str(source.get(key) or ""), blocked_x)
+            for key in ("url", "verified_url", "requested_url")
+        )
+    ]
 
     allowed = {}
     for source in sources:
@@ -77,6 +90,8 @@ def hosted_search_input(
                 try:
                     checked = check_target(value)
                 except ValueError:
+                    continue
+                if references_post(checked, blocked_x):
                     continue
                 parts = urlsplit(checked)
                 # YouTube's adapter supplies an independently constructed video ID URL.
@@ -109,11 +124,13 @@ def hosted_search_input(
     def scrub(value: Any) -> Any:
         if isinstance(value, str):
             cleaned = ABSOLUTE_LINK.sub(replace, value)
-            return re.sub(
-                r"(?<![0-9])[0-9]{2,20}(?![0-9])",
+            if not blocked_x:
+                return cleaned
+            masked = POST_NUMBER.sub(
                 lambda match: "[пост недоступен]" if match[0] in blocked_x else match[0],
                 cleaned,
-            ) if blocked_x else cleaned
+            )
+            return "[пост недоступен]" if references_post(masked, blocked_x) else masked
         if isinstance(value, dict):
             return {key: scrub(item) for key, item in value.items()}
         if isinstance(value, list):
@@ -211,7 +228,7 @@ def source_lookup(
 def followup_input(
     profile: str, analysis: dict[str, Any], sources: list[dict[str, Any]], observed: set[str]
 ) -> dict[str, Any] | None:
-    from zarya.x_post import post_id, post_url, unavailable_post_ids
+    from zarya.x_post import post_id, post_url, references_post, unavailable_post_ids
 
     lookup = analysis.get("source_lookup") or {}
     if profile == "source" and lookup.get("kind") == "unconfirmed":
@@ -229,11 +246,11 @@ def followup_input(
     anchors = []
     for source in sources:
         value = source.get("url") or source.get("verified_url")
-        if not isinstance(value, str):
+        if not isinstance(value, str) or references_post(value, blocked_x):
             continue
         if identifier := post_id(value):
             canonical = post_url(identifier)
-            if identifier in blocked_x or not (
+            if not (
                 source.get("coverage") == "x_post_text"
                 or canonical in observed
                 or value in observed

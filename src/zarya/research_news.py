@@ -187,16 +187,19 @@ async def fresh_news_sources(
 def public_search_sources(
     inputs: list[dict[str, Any]], fetched: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    from zarya.x_post import post_id, source_post_id, unavailable_post_ids
+    from zarya.x_post import references_post, source_post_id, unavailable_post_ids
 
     blocked = unavailable_post_ids(fetched)
     output = []
     for entry, source in zip(inputs, fetched, strict=True):
         anchor = entry["requested_url"]
-        if post_id(anchor) in blocked or source_post_id(source) in blocked:
-            output.append(source)
+        identifier = source_post_id(source)
+        if identifier in blocked:
+            output.append({"coverage": "unavailable", "x_post": {"post_id": identifier}})
             continue
         result_url = str(source.get("url") or "")
+        if references_post(anchor, blocked) or references_post(result_url, blocked):
+            continue
         result_anchor = social_post_url(result_url) or news_article_url(result_url) or result_url
         title = (
             source.get("title", "") if not source.get("error") and result_anchor == anchor else ""
@@ -209,18 +212,19 @@ def news_followup_plan(
     analysis: dict[str, Any], inputs: list[dict[str, Any]], actions: list[dict[str, Any]],
     sources: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    from zarya.x_post import post_id, source_post_id, unavailable_post_ids
+    from zarya.x_post import references_post, source_post_id, unavailable_post_ids
 
     if not analysis.get("needs_followup"):
         return None
     blocked = unavailable_post_ids(sources)
-    observed = {url for url in search_discovered_urls(actions) if post_id(url) not in blocked}
+    observed = {url for url in search_discovered_urls(actions) if not references_post(url, blocked)}
     results = [{"url": url} for url in sorted(observed)]
     discovered = followup_input("study", analysis, results, observed)
     anchors = [
         source["url"]
         for source in public_search_sources(inputs, sources[:len(inputs)])
         if source_post_id(source) not in blocked
+        and source.get("url") and not references_post(source["url"], blocked)
     ]
     if discovered:
         anchors.extend(social_post_url(url) or url for url in discovered["public_urls"])

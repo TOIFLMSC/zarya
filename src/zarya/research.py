@@ -42,7 +42,14 @@ from zarya.research_plan import (
 from zarya.research_quote import resolve_market_question, resolve_quote
 from zarya.source_material import resolve
 from zarya.telegram_store import TelegramStore, row, stamp
-from zarya.x_post import X_POLICY, post_id, post_url, source_post_id, unavailable_post_ids
+from zarya.x_post import (
+    X_POLICY,
+    post_id,
+    post_url,
+    references_post,
+    source_post_id,
+    unavailable_post_ids,
+)
 from zarya.youtube import video_id
 
 
@@ -564,7 +571,8 @@ class ResearchEngine:
                 }
                 blocked_x = unavailable_post_ids(sources)
                 available = {
-                    evidence_url(s["url"]) for s in sources if source_has_evidence(s)
+                    evidence_url(s["url"]) for s in sources
+                    if source_has_evidence(s) and not references_post(s["url"], blocked_x)
                 }
                 feeds: dict[str, int] = {}
                 next_id = max((s["id"] for s in sources), default=0) + 1
@@ -609,7 +617,7 @@ class ResearchEngine:
                             u = evidence_url(str(s.get("url", "")))
                         except ValueError:
                             continue
-                        if post_id(u) in blocked_x:
+                        if references_post(u, blocked_x):
                             continue
                         observed.add(u)
                         if u not in available:
@@ -630,7 +638,7 @@ class ResearchEngine:
                         u = evidence_url(citation["url"])
                     except ValueError:
                         continue
-                    if post_id(u) in blocked_x:
+                    if references_post(u, blocked_x):
                         continue
                     if u not in available:
                         sources.append(
