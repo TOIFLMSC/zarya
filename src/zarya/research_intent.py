@@ -103,11 +103,11 @@ MEDIA_POINTER = re.compile(
 )
 
 
-def speaker_text(message: dict[str, Any]) -> str:
+def speaker_text(message: dict[str, Any], *, limit: int | None = 4000) -> str:
     """Ignore quoted/code/forwarded instructions; preserve UTF-16 entity offsets."""
     if message.get("forward_origin") or message.get("forward_date"):
         return ""
-    text = str(message.get("text") or message.get("caption") or "")[:4000]
+    text = str(message.get("text") or message.get("caption") or "")[:limit]
     entities = message.get("entities") if message.get("text") else message.get("caption_entities")
     encoded = bytearray(text.encode("utf-16-le"))
     for entity in entities or []:

@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from zarya import behavior, context_budget, message_batches, timings, verbatim_quote
+from zarya import behavior, context_budget, message_batches, message_links, timings, verbatim_quote
 from zarya.avatar_logic import AVATAR_WAIT
 from zarya.avatar_logic import valid as avatar_valid
 from zarya.chat_style import chat_dashes
@@ -33,7 +33,12 @@ from zarya.research_intent import speaker_text, text_factcheck, usable_post_text
 from zarya.research_logic import RESEARCH_WAIT, research_answer_text, source_failure_text
 from zarya.research_plan import answer_mode as research_answer_mode
 from zarya.research_plan import answer_policy as research_answer_policy
-from zarya.response_links import display_text, message_requests_sources, requested
+from zarya.response_links import (
+    display_text,
+    message_requests_permalink,
+    message_requests_sources,
+    requested,
+)
 from zarya.source_material import accepted, resolve
 from zarya.source_material import valid as source_valid
 from zarya.telegram_store import TelegramStore, row, stamp
@@ -244,12 +249,19 @@ class DialogueEngine:
                 and (paired or item["message_id"] != message["message_id"])
                 for item in material["messages"]
             )
+            link_route_allowed = (
+                should_answer
+                and trigger != "initiative"
+                and not (payload.get("service_reply") or current_messages)
+            )
+            find_message_link = link_route_allowed and message_requests_permalink(message)
             avatar = None
             avatar_context = None
             if (
                 should_answer
                 and trigger != "initiative"
                 and self.avatars
+                and not find_message_link
                 and not (payload.get("service_reply") or current_messages)
             ):
                 avatar = await self.avatars.prepare(
@@ -284,7 +296,7 @@ class DialogueEngine:
                 else None
             )
             research_context = None
-            if research_engine and text_first:
+            if research_engine and text_first and not find_message_link:
                 waiting, research_context = await research_engine.prepare(
                     conn,
                     job_id,
@@ -311,6 +323,7 @@ class DialogueEngine:
                 and trigger != "initiative"
                 and self.media
                 and not avatar
+                and not find_message_link
                 and not (payload.get("service_reply") or current_messages)
             ):
                 if await self.media.prepare(
@@ -331,6 +344,7 @@ class DialogueEngine:
                 and settings.photo_enabled
                 and self.photos
                 and not avatar
+                and not find_message_link
                 and not current_messages
             ):
                 await self.photos.prepare_sources(
@@ -364,8 +378,9 @@ class DialogueEngine:
                 )
                 if spoken and spoken[0]:
                     message = {**message, "text": spoken[0]}
+                    find_message_link = link_route_allowed and message_requests_permalink(message)
             show_sources = not current_messages and message_requests_sources(message)
-            if research_engine and not text_first:
+            if research_engine and not text_first and not find_message_link:
                 research_material = {
                     **material,
                     "messages": [dict(m) for m in material["messages"]],
@@ -447,7 +462,7 @@ class DialogueEngine:
             }
             photo_refs: list[dict[str, Any]] = []
             selected_material = [dict(m) for m in material["messages"]]
-            if self.photos and settings.photo_enabled and not avatar:
+            if self.photos and settings.photo_enabled and not avatar and not find_message_link:
                 await self.photos.enrich(
                     conn,
                     bot_id,
@@ -461,7 +476,7 @@ class DialogueEngine:
                     conn, bot_id, chat_id, access_version, target_ids
                 )
             media_refs = []
-            if self.media and settings.media_enabled:
+            if self.media and settings.media_enabled and not find_message_link:
                 media_refs = await self.media.enrich(
                     conn,
                     bot_id,
@@ -477,19 +492,27 @@ class DialogueEngine:
             if research_context:
                 mode = research_answer_mode(question_text, mode, research_context)
             style = (
-                "relaxed" if research_context and mode != "brief"
+                "relaxed"
+                if research_context and mode != "brief"
                 else writing_style(random.random())
             )
             media_refs = list({r["id"]: r for r in media_refs + context_refs["media"]}.values())
             task_state = None
             if (
-                should_answer and trigger != "initiative" and settings.memory_enabled
-                and not payload.get("service_reply") and not avatar
+                should_answer
+                and trigger != "initiative"
+                and settings.memory_enabled
+                and not payload.get("service_reply")
+                and not avatar
             ):
                 from zarya.task_state import context as task_context
 
                 task_state = await task_context(
-                    conn, bot_id, chat_id, access_version, thread_id or 0,
+                    conn,
+                    bot_id,
+                    chat_id,
+                    access_version,
+                    thread_id or 0,
                     [m["message_id"] for m in current_messages] or [incoming["message_id"]],
                 )
             memory_context: dict[str, Any] = {}
@@ -570,6 +593,21 @@ class DialogueEngine:
             }
             if topic_context:
                 request["instructions"] += TOPIC_CONTEXT_POLICY
+            message_link_replacements = None
+            if find_message_link:
+                link_context, message_link_replacements = await message_links.prepare(
+                    conn,
+                    bot_id,
+                    chat_id,
+                    access_version,
+                    message,
+                    material["manifest"],
+                    context_refs,
+                )
+                request["instructions"] += message_links.POLICY
+                request["input"] = json.dumps(
+                    {**json.loads(request["input"]), **link_context}, ensure_ascii=False
+                )
             if task_state:
                 from zarya.task_state import USE
 
@@ -637,6 +675,11 @@ class DialogueEngine:
                 "incoming": incoming,
                 "question_text": question_text,
                 "sources_requested": show_sources,
+                **(
+                    {"message_link_replacements": message_link_replacements}
+                    if message_link_replacements is not None
+                    else {}
+                ),
                 "context": context,
                 **({"current_messages": current_messages} if current_messages else {}),
                 **({"topic_context": topic_context} if topic_context else {}),
@@ -1307,6 +1350,14 @@ class DialogueEngine:
                         result.text, result.state, result.error = "", "invalid", "answer_too_long"
                 except ValueError:
                     result.text, result.state, result.error = "", "invalid", "unknown_source"
+            if (
+                "message_link_replacements" in work["snapshot"]
+                and result.state == "completed"
+                and (not work.get("behavior_plan") or work["behavior_plan"].action == "text")
+            ):
+                result.text = message_links.render(
+                    result.text, work["snapshot"]["message_link_replacements"]
+                )
         except asyncio.CancelledError:
             capture()
             await self.finish(
@@ -1541,7 +1592,8 @@ class DialogueEngine:
                     speaker_text({"text": question}), reply_mode, saved["research"]
                 )
             style = (
-                "relaxed" if saved.get("research") and reply_mode != "brief"
+                "relaxed"
+                if saved.get("research") and reply_mode != "brief"
                 else writing_style(random.random())
             )
             saved = {
@@ -1600,6 +1652,8 @@ class DialogueEngine:
         if mode == "paid":
             if saved.get("research"):
                 saved["request"]["instructions"] += research_answer_policy(saved["research"])
+            if "message_link_replacements" in saved:
+                saved["request"]["instructions"] += message_links.POLICY
             if saved.get("topic_context"):
                 saved["request"]["instructions"] += TOPIC_CONTEXT_POLICY
             if saved.get("task_state"):
