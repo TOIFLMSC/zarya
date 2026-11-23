@@ -441,6 +441,10 @@ class MemoryEngine:
     async def apply_proposal(
         self, conn: aiosqlite.Connection, work: dict[str, Any], p: Proposal
     ) -> None:
+        # Only self-attributed evidence, whose author was checked in finish(),
+        # may automatically dispute a person's fact or revoke its sharing.
+        if p.relation == "contradicts" and p.provenance != "self":
+            return
         if p.existing_fact_id is not None:
             claimed = next(
                 (f for f in work.get("existing", []) if f["id"] == p.existing_fact_id), None

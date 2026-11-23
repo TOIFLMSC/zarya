@@ -142,6 +142,8 @@ def test_chat_link_render_uses_original_and_rejects_guessed_targets():
     )
     unclear = "Ты про «Включили запасной сервер» или «Переключились на резерв»?"
     assert render(unclear, source) == unclear
+    technical = "Ищи «настройка Node.js и pyproject.toml»"
+    assert render(technical, source) == technical
     assert render("Вот [M38131]", source) == FALLBACK
     assert render("Сообщение 38131", source) == FALLBACK
     assert render("Найди по номеру 38131", {}) == FALLBACK

@@ -3,6 +3,7 @@
 import re
 from typing import Any
 
+from zarya._iana_tlds import TOP_LEVEL_DOMAINS
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
 from zarya.research_intent import DIRECT_SOURCE_REQUEST, speaker_text
 
@@ -57,11 +58,25 @@ NEGATIVE = re.compile(
     re.IGNORECASE,
 )
 URL_TARGET = re.compile(
-    r"(?:https?://|www\.|t\.me/)[^\s<>]+|"
-    r"(?<![\w@])(?:[a-zа-я0-9][a-zа-я0-9-]*\.)+"
-    r"(?:com|org|net|ru|io|dev|ai|co|uk|me|info|edu|gov|рф)\b(?:/[^\s<>]*)?",
+    r"https?://[^\s<>]+|(?<![\w@])(?:[^\W_][\w-]*\.)+"
+    r"(?:xn--[a-z0-9-]{2,59}|[^\W\d_]{2,63})(?![\w-])(?::\d{1,5})?(?:[/?#][^\s<>]*)?",
     re.IGNORECASE,
 )
+
+
+def is_link_target(value: str) -> bool:
+    if value.lower().startswith(("http://", "https://")):
+        return True
+    host = re.split(r"[/:?#]", value, maxsplit=1)[0]
+    suffix = host.rsplit(".", 1)[-1]
+    try:
+        return suffix.encode("idna").decode("ascii").lower() in TOP_LEVEL_DOMAINS
+    except UnicodeError:
+        return False
+
+
+def contains_link(text: str) -> bool:
+    return any(is_link_target(match[0]) for match in URL_TARGET.finditer(text))
 
 
 def wants_sources(question: str) -> bool:
@@ -122,6 +137,8 @@ def without_links(text: str) -> str:
 
     def remove_url(match: re.Match[str]) -> str:
         url, suffix = match.group(), ""
+        if not is_link_target(url):
+            return url
         while url:
             last = url[-1]
             if last in ".,!?;:" or (

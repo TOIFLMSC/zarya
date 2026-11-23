@@ -27,6 +27,7 @@ from zarya.research_plan import (
     INITIAL,
     OUTPUT_CONTRACT,
     followup_input,
+    hosted_search_input,
     merge_analysis,
     source_lookup,
 )
@@ -361,19 +362,15 @@ class ResearchEngine:
                 work["can_followup"] = run[0] == "search" and work["profile"] != "answer"
                 limit = SEARCH_TOOL_LIMIT - (FOLLOWUP_TOOLS if work["can_followup"] else 0)
                 search_input = (
-                    {
-                        "question": "Найди доступное описание и сведения о содержании именно этих "
+                    hosted_search_input(
+                        "Найди доступное описание и сведения о содержании именно этих "
                         "YouTube-роликов. Сверяй video ID; не подменяй их похожими видео. "
                         "Если сведений нет, честно скажи. Не утверждай, что посмотрел видеоряд.",
-                        "provided_material": "",
-                        "sources": fallback_sources,
-                    }
+                        "",
+                        fallback_sources,
+                    )
                     if fallback
-                    else {
-                        "question": work["question"],
-                        "provided_material": work["material"],
-                        "sources": sources,
-                    }
+                    else hosted_search_input(work["question"], work["material"], sources)
                 )
                 request = {
                     "model": work["model"],

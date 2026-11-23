@@ -8,7 +8,7 @@ from typing import Any
 import aiosqlite
 
 from zarya.dialogue_logic import explicit_reply
-from zarya.response_links import URL_TARGET, without_links
+from zarya.response_links import contains_link, without_links
 from zarya.source_material import accepted, one
 
 POLICY = (
@@ -150,7 +150,7 @@ def render(text: str, replacements: dict[str, str]) -> str:
     replies = [replacements[marker] for marker in selected if marker in replacements]
     if replies:
         return "\n".join(dict.fromkeys(replies))
-    if selected or URL_TARGET.search(text) or TELEGRAM_SCHEME.search(text):
+    if selected or contains_link(text) or TELEGRAM_SCHEME.search(text):
         return FALLBACK
     parts = QUOTED_TEXT.split(cleaned)
     if BARE_ID.fullmatch(cleaned) or any(BARE_ID.fullmatch(part) for part in parts[1::2]):
