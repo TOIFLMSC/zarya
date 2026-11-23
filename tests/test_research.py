@@ -16,7 +16,8 @@ from zarya.memory import MemoryEngine
 from zarya.openai_adapter import ModelResult
 from zarya.research import ResearchEngine
 from zarya.research_fetch import PublicResolver, SafeFetcher, TextParser
-from zarya.research_logic import evidence_text, public_url, urls, wants_search
+from zarya.research_logic import evidence_text, public_address, public_url, urls, wants_search
+from zarya.research_plan import hosted_search_input
 from zarya.telegram_runtime import TelegramRuntime
 
 
@@ -88,6 +89,64 @@ async def research_ready(store, question="Заря, проверь публич�
     work = await research.claim("999")
     assert work
     return dialogue, research, model, fetch, work
+
+
+async def test_search_adapter_only_receives_checked_links(tmp_path):
+    links = [f"https://example.org/article-{n}" for n in range(3)]
+    extra = "https://example.com/unselected?test-marker=not-for-adapter"
+    async with store_at(tmp_path) as store:
+        question = "Заря, проверь в интернете публичный тезис. " + " ".join([*links, extra])
+        _, research, model, fetch, work = await research_ready(store, question)
+        work["material"] = "Синтетическая цитата " + extra
+        await research.execute(work)
+        assert fetch.calls == links
+        body = json.loads(model.calls[0]["input"])
+        assert all(link in body["question"] for link in links)
+        assert body["provided_material"].startswith("Синтетическая цитата ")
+        assert "not-for-adapter" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("target", ["example.com/other", "example.bank/info"])
+def test_search_reply_rejects_unverified_scheme_less_links(target):
+    sources = [{"id": 1, "url": "https://example.org/verified", "coverage": "partial_text"}]
+    assert "https://example.org/verified" in evidence_text("Источник [S1]", sources)
+    assert evidence_text("Источник example.org/verified", sources) == (
+        "Источник https://example.org/verified"
+    )
+    assert evidence_text("Источник " + target, sources, show_links=False) == "Источник"
+    with pytest.raises(ValueError, match="unknown_source"):
+        evidence_text("Источник " + target, sources)
+
+
+@pytest.mark.parametrize("show_links", [False, True])
+def test_source_link_filter_preserves_technical_words(show_links):
+    sources = [{"id": 1, "url": "https://example.org/", "coverage": "partial_text"}]
+    note = "Настройка Node.js в pyproject.toml."
+    assert evidence_text(note, sources, show_links=show_links) == note
+    if show_links:
+        assert evidence_text("Источник example.org", sources) == ("Источник https://example.org/")
+
+
+def test_hosted_search_uses_checked_destinations_only():
+    unknown = "https://example.com/unconfirmed"
+    requested_video = "https://www.youtube.com/watch?v=abcdefghijk&t=5"
+    video = "https://www.youtube.com/watch?v=abcdefghijk"
+    body = hosted_search_input(
+        unknown + " " + requested_video,
+        "",
+        [
+            {"requested_url": unknown, "url": None, "error": "dns_error"},
+            {"requested_url": requested_video, "url": video},
+        ],
+    )
+    serialized = json.dumps(body)
+    assert unknown not in serialized and requested_video not in serialized
+    assert video in serialized
+
+
+def test_public_address_rejects_mapped_non_unicast():
+    assert not public_address("::ffff:224.0.0.1")
+    assert public_address("::ffff:8.8.8.8")
 
 
 @pytest.mark.parametrize(

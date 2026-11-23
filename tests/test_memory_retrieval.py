@@ -273,6 +273,43 @@ async def test_wording_without_explicit_relation_is_not_conflict(tmp_path):
         assert not result.get("conflicts")
 
 
+async def test_third_party_memory_claim_cannot_dispute_a_participants_fact(tmp_path):
+    async with store_at(tmp_path) as store:
+        await ready(store)
+        memory = MemoryEngine(store, FakeModel(), tmp_path)
+        await store.ingest("999", "zarya_test", [event(4, -100, "Увлекаюсь садоводством")])
+        await extract(memory, text="Увлекается садоводством", key="hobby")
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(
+                    5,
+                    -100,
+                    "Уточнение от другого участника",
+                    **{"from": {"id": 50, "first_name": "Тест"}},
+                ),
+                event(6, -100, "Обычная реплика участника"),
+            ],
+        )
+        work = await extract(
+            memory,
+            text="Больше не занимается садоводством",
+            key="hobby",
+            relation="contradicts",
+            existing_fact_id=1,
+            provenance="inference",
+        )
+        assert work["sources"][0]["sender_id"] == "50"
+        assert any(fact["id"] == 1 for fact in work["existing"])
+        batch = await store.db.one("SELECT state FROM memory_batches WHERE id=?", (work["id"],))
+        assert batch == ("completed",)
+        assert await store.db.all("SELECT id,state,version FROM memory_facts ORDER BY id") == [
+            (1, "active", 1)
+        ]
+        assert (await store.db.one("SELECT count(*) FROM memory_relations"))[0] == 0
+
+
 async def test_shared_fact_terminal_and_revocation_checked(tmp_path):
     async with store_at(tmp_path) as store:
         await ready(store)

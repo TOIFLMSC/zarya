@@ -165,6 +165,8 @@ class SafeFetcher:
                 for attempt in range(4):
                     check_target(current)
                     async with client.get(current, allow_redirects=False) as response:
+                        # A public destination was reached even if it declined the request.
+                        source["verified_url"] = current
                         if response.status in {301, 302, 303, 307, 308}:
                             if attempt == 3 or not response.headers.get("Location"):
                                 raise ValueError("redirect_limit")

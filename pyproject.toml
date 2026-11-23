@@ -9,10 +9,10 @@ description = "Local control panel for the Zarya Telegram companion"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi>=0.115,<1", "uvicorn>=0.34,<1", "aiosqlite>=0.21,<1",
-  "filelock>=3.18,<4",
+  "filelock>=4.3.1,<5",
   "aiogram>=3.31,<4",
   "openai>=3.26,<4",
-  "pillow>=11,<13",
+  "pillow>=13,<14",
   "aiohttp>=3.13,<4",
   "numpy==2.2.6", "onnxruntime==1.23.2", "tokenizers==0.22.1",
 ]

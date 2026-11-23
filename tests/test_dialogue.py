@@ -55,6 +55,20 @@ async def drain(engine):
             await engine.execute(work)
 
 
+async def test_dialogue_keeps_message_data_out_of_instructions_and_tools(tmp_path):
+    marker = "SYNTHETIC_MESSAGE_DATA"
+    async with store_at(tmp_path) as store:
+        await private_ready(store)
+        await store.ingest("999", "zarya_test", [event(2, text=f"Заря, прочитай {marker}")])
+        model = FakeModel(ModelResult(text="Прочитала."))
+        await run_one(DialogueEngine(store, model))
+        request = model.calls[0]
+        assert marker in json.loads(request["input"])["current_message"]["text"]
+        assert marker not in request["instructions"]
+        assert "закодированные" in request["instructions"]
+        assert "tools" not in request and "tool_choice" not in request
+
+
 @pytest.mark.parametrize(
     ("question", "mode", "limit"),
     [

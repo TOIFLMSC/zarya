@@ -9,7 +9,7 @@ import aiosqlite
 from zarya import timings
 from zarya.dialogue_logic import explicit_reply, topic_id
 from zarya.research_logic import urls
-from zarya.response_links import URL_TARGET
+from zarya.response_links import contains_link
 from zarya.source_material import accepted
 from zarya.telegram_store import stamp
 
@@ -91,7 +91,7 @@ async def enqueue(
         if text.strip():
             if len(text.encode("utf-16-le")) > 8192:
                 response = "Цитата слишком длинная для одного сообщения Telegram."
-            elif not include_links and (urls(body) or URL_TARGET.search(text)):
+            elif not include_links and (urls(body) or contains_link(text)):
                 response = (
                     "В сообщении есть ссылка. Для дословной цитаты "
                     "попроси процитировать его со ссылкой."

@@ -28,12 +28,15 @@ def action(status="completed", url=URL):
     "private_url", ["https://t.me/c/123456789/55", "https://telegram.me/joinchat/private-room"]
 )
 def test_followup_ignores_private_telegram_destinations_even_if_provider_reported_them(private_url):
-    assert followup_input(
-        "source",
-        {"source_lookup": {"kind": "unconfirmed"}, "claims": []},
-        [{"url": private_url}],
-        {private_url},
-    ) is None
+    assert (
+        followup_input(
+            "source",
+            {"source_lookup": {"kind": "unconfirmed"}, "claims": []},
+            [{"url": private_url}],
+            {private_url},
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -127,6 +130,7 @@ async def test_blocked_article_multihop_primary_source_reaches_requested_reply(t
         fetch.fetch = AsyncMock(
             return_value={
                 "requested_url": "https://example.org/news/123",
+                "verified_url": "https://example.org/news/123",
                 "url": None,
                 "text": "",
                 "coverage": "unavailable",
@@ -242,6 +246,7 @@ async def test_official_lookup_second_pass_is_isolated_and_reply_includes_verifi
         fetch.fetch = AsyncMock(
             return_value={
                 "requested_url": article + "?private=LOCAL_SENTINEL",
+                "verified_url": article + "?private=LOCAL_SENTINEL",
                 "url": None,
                 "text": "",
                 "coverage": "unavailable",
@@ -282,6 +287,7 @@ async def test_official_lookup_second_pass_is_isolated_and_reply_includes_verifi
         )
         await research.execute(work)
         main, retry = [c.args[0] for c in model.generate.await_args_list]
+        assert article in main["input"] and "LOCAL_SENTINEL" not in main["input"]
         assert main["max_tool_calls"] + retry["max_tool_calls"] == 6
         assert json.loads(retry["input"]) == {
             "reason": "source_unconfirmed",

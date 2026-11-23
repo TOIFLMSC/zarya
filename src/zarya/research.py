@@ -34,6 +34,7 @@ from zarya.research_plan import (
     INITIAL,
     OUTPUT_CONTRACT,
     followup_input,
+    hosted_search_input,
     merge_analysis,
     source_lookup,
 )
@@ -149,6 +150,9 @@ class ResearchEngine:
         search = bool(news) or text_only or wants_search(speaker_question)
         if not selected_urls and not material and not search:
             return False, None
+        source_requests = [
+            {"requested_url": url, "news_recheck": bool(news)} for url in selected_urls
+        ]
         cursor = await conn.execute(
             "INSERT INTO "
             "research_runs(job_id,bot_id,chat_id,scope,access_version,state,mode,qu"
@@ -164,7 +168,7 @@ class ResearchEngine:
                 question,
                 material,
                 json.dumps(manifest),
-                json.dumps([{"requested_url": u} for u in selected_urls]),
+                json.dumps(source_requests),
                 version,
                 settings.research_model,
                 settings.research_reasoning,
@@ -295,6 +299,19 @@ class ResearchEngine:
                 )
                 return {"skip": True}
             work["sources"] = json.loads(work["sources"])
+            work["news_recheck"] = bool(work["sources"]) and all(
+                entry.get("news_recheck") is True for entry in work["sources"]
+            )
+            # Jobs from before this flag was persisted cannot establish news provenance.
+            if work["question"] == RECHECK_QUESTION and any(
+                "news_recheck" not in entry for entry in work["sources"]
+            ):
+                await conn.execute(
+                    "UPDATE research_runs SET state='rejected',"
+                    "error_code='legacy_news_recheck',finished_at=? WHERE id=?",
+                    (stamp(), work["id"]),
+                )
+                return {"skip": True}
             work["epoch"] = await epoch(conn, bot)
             await conn.execute(
                 "UPDATE research_runs SET state='fetching' WHERE id=?", (work["id"],)
@@ -377,21 +394,21 @@ class ResearchEngine:
                 work["can_followup"] = run[0] == "search" and work["profile"] != "answer"
                 limit = SEARCH_TOOL_LIMIT - (FOLLOWUP_TOOLS if work["can_followup"] else 0)
                 search_input = (
-                    {
-                        "question": "Найди доступное описание и сведения о содержании именно этих "
+                    hosted_search_input(
+                        "Найди доступное описание и сведения о содержании именно этих "
                         "YouTube-роликов. Сверяй video ID; не подменяй их похожими видео. "
                         "Если сведений нет, честно скажи. Не утверждай, что посмотрел видеоряд.",
-                        "provided_material": "",
-                        "sources": fallback_sources,
-                    }
+                        "",
+                        fallback_sources,
+                    )
                     if fallback
-                    else {
-                        "question": work["question"],
-                        "provided_material": work["material"],
-                        "sources": public_search_sources(work["sources"], sources)
-                        if work["question"] == RECHECK_QUESTION
+                    else hosted_search_input(
+                        work["question"],
+                        work["material"],
+                        public_search_sources(work["sources"], sources)
+                        if work.get("news_recheck")
                         else sources,
-                    }
+                    )
                 )
                 request = {
                     "model": work["model"],
@@ -671,7 +688,7 @@ class ResearchEngine:
                     analysis["summary"] = "Часть утверждений не удалось проверить по источникам."
                     analysis["needs_followup"] = False
                 analysis["claims"] = accepted_claims
-                if work["question"] == RECHECK_QUESTION and work["sources"]:
+                if work.get("news_recheck"):
                     limit_unconfirmed_claims(
                         analysis, work["sources"][0]["requested_url"], observed
                     )
@@ -778,7 +795,7 @@ class ResearchEngine:
             elif analysis and work.get("can_followup") and not analysis.get("discarded_claims"):
                 plan = (
                     news_followup_plan(analysis, work["sources"], actions)
-                    if work["question"] == RECHECK_QUESTION
+                    if work.get("news_recheck")
                     else followup_input(work["profile"], analysis, sources, observed)
                 )
                 if plan:

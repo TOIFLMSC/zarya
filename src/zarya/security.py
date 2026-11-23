@@ -1,6 +1,8 @@
 import hashlib
 import hmac
+import os
 import secrets
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,11 +21,24 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 def bootstrap_token(path: Path) -> str:
-    if not path.exists():
-        with path.open("x", encoding="utf-8") as file:
-            file.write(secrets.token_urlsafe(32))
-        path.chmod(0o600)
-    return path.read_text(encoding="utf-8").strip()
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        if path.is_symlink():
+            raise ValueError("Invalid bootstrap token file") from None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(path, flags), encoding="utf-8") as file:
+            mode = os.fstat(file.fileno()).st_mode
+            if not stat.S_ISREG(mode):
+                raise ValueError("Invalid bootstrap token file") from None
+            chmod_descriptor = getattr(os, "fchmod", None)
+            if chmod_descriptor is not None and stat.S_IMODE(mode) != 0o600:
+                chmod_descriptor(file.fileno(), 0o600)
+            return file.read().strip()
+    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+        token = secrets.token_urlsafe(32)
+        file.write(token)
+    return token
 
 
 @dataclass

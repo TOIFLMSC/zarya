@@ -48,7 +48,7 @@ async def test_verbatim_reply_does_not_generate_even_when_model_repeats_previous
         await ready(store, -100)
         model = FakeModel(ModelResult(text="20:00"))
         dialogue = DialogueEngine(store, model)
-        original = "Проверка Зари:  созвон Маяк — в 19:00.\n\nТочно."
+        original = "Проверка Зари:  созвон Маяк — в 19:00.\n\nПро Node.js и pyproject.toml."
         await store.ingest(
             "999",
             "zarya_test",

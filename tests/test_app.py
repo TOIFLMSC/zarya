@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import stat
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from zarya.app import COOKIE, create_app
 from zarya.config import Config
 from zarya.database import Database
 from zarya.models import Settings
+from zarya.security import bootstrap_token
 
 ORIGIN = "http://127.0.0.1:8787"
 PASSWORD = "local-test-password-only"
@@ -69,6 +72,26 @@ async def test_setup_and_settings_persist_but_sessions_do_not(tmp_path):
         assert saved["settings"]["owner_name"] == "Алексей"
         assert saved["settings"]["owner_telegram_id"] == "9007199254740993"
         assert saved["version"] == 2
+
+
+def test_bootstrap_token_is_created_with_private_mode(tmp_path, monkeypatch):
+    token_file = tmp_path / "test-setup-token.txt"
+    real_open = os.open
+    creation_modes = []
+
+    def tracked_open(path, flags, mode=0o777, **kwargs):
+        if path == token_file and flags & os.O_CREAT:
+            creation_modes.append(mode)
+        return real_open(path, flags, mode, **kwargs)
+
+    monkeypatch.setattr(os, "open", tracked_open)
+    token = bootstrap_token(token_file)
+    assert creation_modes == [0o600]
+    if os.name == "posix":
+        token_file.chmod(0o644)
+    assert bootstrap_token(token_file) == token
+    if os.name == "posix":
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
 
 
 async def test_bootstrap_survives_restart_and_single_admin(tmp_path):
