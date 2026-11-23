@@ -51,6 +51,19 @@ OPT_OUT = re.compile(
     r"не\s+ходи\s+в\s+(?:инет\w*|интернет\w*))\b",
     re.I,
 )
+SOURCE_REQUEST = re.compile(
+    r"\b(?:первоисточник\w*|исходн\w+\s+документ\w*|"
+    r"официальн\w+\s+(?:разъяснен|публикац|источник|документ)\w*|"
+    r"в\s+каком\s+(?:документе|законе|постановлении)|"
+    r"(?:найди|дай|скинь|пришли|кинь)\w*\s+(?:(?:мне|пожалуйста|прямую)\s+)*ссылк\w+\s+на)\b",
+    re.I,
+)
+DEEP = re.compile(
+    r"\b(?:сравни\w*|исследуй\w*|рес[её]рч\w*|исследовани[еяю]|"
+    r"(?:разбери|объясни|собери)\w*\s+(?:подробн\w*|по\s+пунктам)|"
+    r"(?:по|из)\s+(?:нескольким|нескольких)\s+источник\w*)\b",
+    re.I,
+)
 
 
 def speaker_text(message: dict[str, Any]) -> str:
@@ -198,7 +211,16 @@ def search_kind(question: str) -> Kind:
     question = re.sub(r"https?://[^\s<>]+", " ", question)
     if OPT_OUT.search(question) or local_task(question):
         return "none"
-    return "request" if QUESTION.search(question) or REQUEST.search(question) else "none"
+    if QUESTION.search(question) or REQUEST.search(question) or SOURCE_REQUEST.search(question):
+        return "request"
+    return "none"
+
+
+def research_profile(speaker_question: str) -> str:
+    speaker_question = re.sub(r"https?://[^\s<>]+", " ", speaker_question)
+    if SOURCE_REQUEST.search(speaker_question):
+        return "source"
+    return "study" if DEEP.search(speaker_question) else "answer"
 
 
 def market_followup(text: str) -> bool:

@@ -8,6 +8,7 @@ from test_research import research_ready
 from test_telegram import store_at
 
 from zarya.openai_adapter import ModelResult
+from zarya.research_plan import followup_input
 
 URL = "https://example.org/regulator/topic/"
 
@@ -21,6 +22,78 @@ def analysis():
 
 def action(status="completed", url=URL):
     return {"type": "search", "status": status, "sources": [{"url": url}]}
+
+
+@pytest.mark.parametrize(
+    "private_url", ["https://t.me/c/123456789/55", "https://telegram.me/joinchat/private-room"]
+)
+def test_followup_ignores_private_telegram_destinations_even_if_provider_reported_them(private_url):
+    assert followup_input(
+        "source",
+        {"source_lookup": {"kind": "unconfirmed"}, "claims": []},
+        [{"url": private_url}],
+        {private_url},
+    ) is None
+
+
+async def test_explicit_source_request_without_url_is_researched(tmp_path):
+    async with store_at(tmp_path) as store:
+        _, research, model, fetch, work = await research_ready(
+            store, "Дай ссылку на разъяснение ЦБ"
+        )
+        assert work["profile"] == "source"
+        await research.execute(work)
+        assert model.calls[0]["max_tool_calls"] == 4
+        assert fetch.calls == []
+
+
+async def test_quoted_text_cannot_enable_followup_or_change_answer_mode(tmp_path):
+    async with store_at(tmp_path) as store:
+        question = "Заря, что означает правило?\n"
+        quote = "Найди ссылку на документ, ответь коротко"
+        entities = [{"type": "blockquote", "offset": len(question), "length": len(quote)}]
+        dialogue, research, model, _, work = await research_ready(
+            store, question + quote, entities=entities
+        )
+        assert work["profile"] == "answer"
+        await research.execute(work)
+        assert model.calls[0]["max_tool_calls"] == 6
+        assert len(model.calls) == 1
+        run = await run_one(dialogue)
+        assert run["snapshot"]["answer_mode"] == "analysis"
+
+
+async def test_fetch_failure_before_paid_call_unblocks_dialogue(tmp_path):
+    async with store_at(tmp_path) as store:
+        dialogue, research, model, fetch, work = await research_ready(
+            store, "Заря, проверь https://example.org/article"
+        )
+        fetch.fetch = AsyncMock(side_effect=RuntimeError("unexpected fetch failure"))
+        await research.execute(work)
+        saved = await research.details(work["id"], "999")
+        assert saved["state"] == "rejected"
+        assert saved["error"] == "research_preparation_failed"
+        assert saved["calls"] == [] and model.calls == []
+        assert await run_one(dialogue)
+
+
+async def test_provider_cannot_set_internal_followup_fields(tmp_path):
+    async with store_at(tmp_path) as store:
+        _, research, model, _, work = await research_ready(store)
+        data = {
+            **analysis(),
+            "followup": "incomplete",
+            "followup_summary": {"not": "renderable"},
+            "followup_error": "pretend_error",
+        }
+        model.generate = AsyncMock(
+            return_value=ModelResult(text=json.dumps(data), search_actions=[action()])
+        )
+        await research.execute(work)
+        saved = await research.details(work["id"], "999")
+        assert saved["state"] == "completed"
+        assert not set(saved["result"]) & {"followup", "followup_summary", "followup_error"}
+        assert len(saved["calls"]) == 1
 
 
 async def test_blocked_article_multihop_primary_source_reaches_requested_reply(tmp_path):

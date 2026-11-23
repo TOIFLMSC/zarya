@@ -29,6 +29,7 @@ from zarya.memory_logic import empty_snapshot
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
 from zarya.photo_logic import PHOTO_WAIT
+from zarya.research_intent import speaker_text
 from zarya.research_logic import RESEARCH_WAIT, research_answer_text, source_failure_text
 from zarya.research_plan import answer_mode as research_answer_mode
 from zarya.research_plan import answer_policy as research_answer_policy
@@ -429,9 +430,10 @@ class DialogueEngine:
                     manifest=material["manifest"],
                 )
             owner = bool(settings.owner_telegram_id and settings.owner_telegram_id == sender_id)
-            mode = answer_mode(message_text(message))
+            question_text = speaker_text(message) if research_context else message_text(message)
+            mode = answer_mode(question_text)
             if research_context:
-                mode = research_answer_mode(message_text(message), mode, research_context)
+                mode = research_answer_mode(question_text, mode, research_context)
             style = (
                 "relaxed" if research_context and mode != "brief"
                 else writing_style(random.random())
@@ -585,7 +587,7 @@ class DialogueEngine:
                     await row(conn, "SELECT COALESCE(MAX(id),0) FROM events", ())
                 )[0],
                 "incoming": incoming,
-                "question_text": message_text(message),
+                "question_text": question_text,
                 "sources_requested": show_sources,
                 "context": context,
                 **({"current_messages": current_messages} if current_messages else {}),
@@ -1487,7 +1489,9 @@ class DialogueEngine:
             question = saved.get("question_text", saved["incoming"]["text"])
             reply_mode = answer_mode(question)
             if saved.get("research"):
-                reply_mode = research_answer_mode(question, reply_mode, saved["research"])
+                reply_mode = research_answer_mode(
+                    speaker_text({"text": question}), reply_mode, saved["research"]
+                )
             style = (
                 "relaxed" if saved.get("research") and reply_mode != "brief"
                 else writing_style(random.random())

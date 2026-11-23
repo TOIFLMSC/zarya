@@ -72,9 +72,12 @@ class ResearchModel(FakeModel):
         return ModelResult(text="Тезис подтверждается [S1]")
 
 
-async def research_ready(store, question="Заря, проверь публичный тезис"):
+async def research_ready(store, question="Заря, проверь публичный тезис", *, entities=None):
     await private_ready(store)
-    await store.ingest("999", "zarya_test", [event(2, text=question)])
+    update = event(2, text=question)
+    if entities is not None:
+        update["message"]["entities"] = entities
+    await store.ingest("999", "zarya_test", [update])
     model = ResearchModel()
     fetch = Fetch()
     dialogue = DialogueEngine(store, model)

@@ -4,23 +4,13 @@ import re
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from zarya.research_fetch import check_target
+from zarya.research_intent import research_profile
+
 INITIAL = "research_initial"
 FOLLOWUP = "research_gap"
 FOLLOWUP_TOOLS = 2
 SOURCE_KINDS = {"document", "official_section"}
-SOURCE_REQUEST = re.compile(
-    r"\b(?:первоисточник\w*|исходн\w+\s+документ\w*|"
-    r"официальн\w+\s+(?:разъяснен|публикац|источник|документ)\w*|"
-    r"в\s+каком\s+(?:документе|законе|постановлении)|"
-    r"(?:найди|дай|скинь|пришли|кинь)\w*\s+(?:(?:мне|пожалуйста|прямую)\s+)*ссылк\w+\s+на)\b",
-    re.I,
-)
-DEEP = re.compile(
-    r"\b(?:сравни\w*|исследуй\w*|рес[её]рч\w*|исследовани[еяю]|"
-    r"(?:разбери|объясни|собери)\w*\s+(?:подробн\w*|по\s+пунктам)|"
-    r"(?:по|из)\s+(?:нескольким|нескольких)\s+источник\w*)\b",
-    re.I,
-)
 BRIEF = re.compile(
     r"\b(?:кратко|коротко|только\s+(?:ссылк\w*|ответ|число|цену|курс)|"
     r"(?:одной|в\s+одной)\s+(?:строкой|строке|фразой|фразе))\b",
@@ -61,24 +51,12 @@ FOLLOWUP_INSTRUCTIONS = (
 )
 
 
-def intent(question: str) -> str:
-    from zarya.research_intent import speaker_text
-
-    text = speaker_text({"text": question})
-    if SOURCE_REQUEST.search(text):
-        return "source"
-    return "study" if DEEP.search(text) else "answer"
-
-
-def answer_mode(question: str, existing: str, context: dict[str, Any]) -> str:
-    from zarya.research_intent import speaker_text
-
-    text = speaker_text({"text": question})
+def answer_mode(text: str, existing: str, context: dict[str, Any]) -> str:
     if context.get("mode") != "search" or not context.get("analysis"):
         return existing
     if BRIEF.search(text):
         return "brief"
-    if existing == "detailed" or intent(question) == "study":
+    if existing == "detailed" or research_profile(text) == "study":
         return "detailed"
     return "brief" if QUICK.search(text) else "analysis"
 
@@ -105,13 +83,11 @@ def answer_policy(context: dict[str, Any]) -> str:
 def source_lookup(
     raw: Any, claims: list[dict[str, Any]], sources: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    from zarya.research_logic import public_url
-
     unknown = {"kind": "unconfirmed"}
     if not isinstance(raw, dict) or raw.get("kind") not in SOURCE_KINDS:
         return unknown
     try:
-        url = public_url(str(raw.get("url", "")))
+        url = check_target(str(raw.get("url", "")))
     except ValueError:
         return unknown
     if urlsplit(url).path == "/":
@@ -139,8 +115,6 @@ def source_lookup(
 def followup_input(
     profile: str, analysis: dict[str, Any], sources: list[dict[str, Any]], observed: set[str]
 ) -> dict[str, Any] | None:
-    from zarya.research_logic import public_url
-
     lookup = analysis.get("source_lookup") or {}
     if profile == "source" and lookup.get("kind") == "unconfirmed":
         reason = "source_unconfirmed"
@@ -159,7 +133,7 @@ def followup_input(
         if not isinstance(value, str):
             continue
         try:
-            parts = urlsplit(public_url(value))
+            parts = urlsplit(check_target(value))
         except ValueError:
             continue
         host = parts.hostname or ""

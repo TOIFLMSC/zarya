@@ -11,8 +11,8 @@ import aiosqlite
 from zarya.memory_logic import epoch
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
-from zarya.research_fetch import Fetcher, SafeFetcher
-from zarya.research_intent import blocks_external, speaker_text
+from zarya.research_fetch import Fetcher, SafeFetcher, check_target
+from zarya.research_intent import blocks_external, research_profile, speaker_text
 from zarya.research_logic import (
     API_FEEDS,
     SEARCH_TOOL_LIMIT,
@@ -28,7 +28,6 @@ from zarya.research_plan import (
     INITIAL,
     OUTPUT_CONTRACT,
     followup_input,
-    intent,
     merge_analysis,
     source_lookup,
 )
@@ -129,14 +128,15 @@ class ResearchEngine:
             question, material, selected_urls = quote.question(), "", []
         elif market_question:
             question, material, selected_urls = market_question, "", []
-        search = wants_search(question if quote or market_question else speaker_text(message))
+        speaker_question = question if quote or market_question else speaker_text(message)
+        search = wants_search(speaker_question)
         if not selected_urls and not material and not search:
             return False, None
         cursor = await conn.execute(
             "INSERT INTO "
             "research_runs(job_id,bot_id,chat_id,scope,access_version,state,mode,qu"
             "estion,material,manifest,sources,settings_version,model,reasoning,crea"
-            "ted_at) VALUES (?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?)",
+            "ted_at,profile) VALUES (?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?)",
             (
                 job,
                 bot,
@@ -152,6 +152,7 @@ class ResearchEngine:
                 settings.research_model,
                 settings.research_reasoning,
                 stamp(),
+                research_profile(speaker_question),
             ),
         )
         assert cursor.lastrowid is not None
@@ -232,7 +233,7 @@ class ResearchEngine:
                 conn,
                 "SELECT "
                 "r.id,r.job_id,r.bot_id,r.chat_id,r.scope,r.question,r.material,r.sourc"
-                "es,r.model,r.reasoning,r.settings_version,r.created_at FROM "
+                "es,r.model,r.reasoning,r.settings_version,r.created_at,r.profile FROM "
                 "research_runs r JOIN jobs j ON j.id=r.job_id WHERE r.bot_id=? AND "
                 "r.state='queued' AND j.state='pending' ORDER BY r.id LIMIT 1",
                 (bot,),
@@ -254,6 +255,7 @@ class ResearchEngine:
                         "reasoning",
                         "settings_version",
                         "created_at",
+                        "profile",
                     ),
                     value,
                     strict=True,
@@ -285,7 +287,6 @@ class ResearchEngine:
     async def execute(self, work: dict[str, Any]) -> None:
         started = time.monotonic()
         work["phase"] = INITIAL
-        work["profile"] = intent(work["question"])
         work["can_followup"] = False
         sources: list[dict[str, Any]] = []
         result = None
@@ -458,14 +459,19 @@ class ResearchEngine:
             result = ModelResult(state="unknown", error="research_uncertain")
         await self.finish(work, sources, result, int((time.monotonic() - started) * 1000))
 
-    async def search_current(self, conn: aiosqlite.Connection, work: dict[str, Any]) -> bool:
+    async def search_current(
+        self,
+        conn: aiosqlite.Connection,
+        work: dict[str, Any],
+        expected_state: str = "search_started",
+    ) -> bool:
         run = await row(conn, "SELECT state FROM research_runs WHERE id=?", (work["id"],))
         settings = Settings.model_validate_json(
             (await row(conn, "SELECT document FROM settings WHERE id=1", ()))[0]
         )
         return bool(
             run
-            and run[0] == "search_started"
+            and run[0] == expected_state
             and settings.research_enabled
             and settings.dialogue_enabled
             and await self.current_job(conn, work["job_id"])
@@ -488,14 +494,19 @@ class ResearchEngine:
                 raw = result.text.strip()
                 if raw.startswith("```"):
                     raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-                analysis = json.loads(raw)
+                decoded = json.loads(raw)
                 if (
-                    not isinstance(analysis, dict)
-                    or not isinstance(analysis.get("summary"), str)
-                    or not isinstance(analysis.get("claims"), list)
-                    or len(analysis["claims"]) > 5
+                    not isinstance(decoded, dict)
+                    or not isinstance(decoded.get("summary"), str)
+                    or not isinstance(decoded.get("claims"), list)
+                    or len(decoded["claims"]) > 5
                 ):
                     raise ValueError("shape")
+                analysis = {
+                    "summary": decoded["summary"],
+                    "claims": decoded["claims"],
+                    "needs_followup": decoded.get("needs_followup") is True,
+                }
                 available = {
                     s["url"]
                     for s in sources
@@ -509,7 +520,7 @@ class ResearchEngine:
                     action_sources = list(action.get("sources") or [])
                     if action.get("type") in {"open_page", "find_in_page"} and action.get("url"):
                         try:
-                            opened.add(public_url(str(action["url"])))
+                            opened.add(check_target(str(action["url"])))
                         except ValueError:
                             pass
                         else:
@@ -541,7 +552,7 @@ class ResearchEngine:
                             )
                             continue
                         try:
-                            u = public_url(str(s.get("url", "")))
+                            u = check_target(str(s.get("url", "")))
                         except ValueError:
                             continue
                         observed.add(u)
@@ -560,7 +571,7 @@ class ResearchEngine:
                             available.add(u)
                 for citation in result.citations or []:
                     try:
-                        u = public_url(citation["url"])
+                        u = check_target(citation["url"])
                     except ValueError:
                         continue
                     if u not in available:
@@ -635,11 +646,8 @@ class ResearchEngine:
                         or (not followup and s.get("text") and s.get("coverage") == "partial_text")
                     ]
                     analysis["source_lookup"] = source_lookup(
-                        analysis.get("source_lookup"), analysis["claims"], eligible
+                        decoded.get("source_lookup"), analysis["claims"], eligible
                     )
-                else:
-                    analysis.pop("source_lookup", None)
-                analysis["needs_followup"] = analysis.get("needs_followup") is True
             except (ValueError, TypeError, KeyError, IndexError) as exc:
                 # Fixed categories only: exception text may contain source/model content.
                 reasons = {
@@ -660,6 +668,19 @@ class ResearchEngine:
                 "SELECT state,result,sources,actions FROM research_runs WHERE id=?",
                 (work["id"],),
             )
+            if not followup and run and run[0] == "fetching":
+                if result.error != "interrupted":
+                    ready = await self.search_current(conn, work, "fetching")
+                    await conn.execute(
+                        "UPDATE research_runs SET state=?,error_code=?,finished_at=? WHERE id=?",
+                        (
+                            "rejected" if ready else "cancelled",
+                            "research_preparation_failed" if ready else "source_changed",
+                            stamp(),
+                            work["id"],
+                        ),
+                    )
+                return None
             valid = await self.search_current(conn, work)
             cost = estimate_cost(result, work["model"])
             search_cost = (
