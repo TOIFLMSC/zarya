@@ -20,6 +20,13 @@ from zarya.research_logic import (
     urls,
     wants_search,
 )
+from zarya.research_news import (
+    RECHECK_QUESTION,
+    fresh_news_sources,
+    limit_unconfirmed_claims,
+    news_followup_plan,
+    public_search_sources,
+)
 from zarya.research_plan import (
     FOLLOWUP,
     FOLLOWUP_INSTRUCTIONS,
@@ -79,16 +86,21 @@ class ResearchEngine:
             selected if selected is not None else await resolve(conn, bot, chat, grant, message)
         )
         quote = await resolve_quote(conn, bot, chat, grant, message, selected)
+        news = (
+            await fresh_news_sources(conn, bot, chat, grant, message)
+            if not quote and not text_only
+            else None
+        )
         market_question = (
             await resolve_market_question(conn, bot, chat, grant, message, selected)
-            if not quote
+            if not quote and not news
             else None
         )
         has_post = not selected.get("via_assistant") or any(
             source["forwarded"] or source["attachments"] or source["urls"]
             for source in selected["messages"]
         )
-        if selected["messages"] and has_post:
+        if selected["messages"] and has_post and not news:
             parts = []
             for source in selected["messages"]:
                 text = source["text"]
@@ -125,12 +137,16 @@ class ResearchEngine:
         if forwarded:
             material = material or question
             question = "Кратко поясни переданный пост"
-        if quote:
+        if news:
+            selected_urls, dependencies = news
+            manifest += [ref for ref in dependencies if ref not in manifest]
+            question, material = RECHECK_QUESTION, ""
+        elif quote:
             question, material, selected_urls = quote.question(), "", []
         elif market_question:
             question, material, selected_urls = market_question, "", []
         speaker_question = question if quote or market_question else speaker_text(message)
-        search = text_only or wants_search(speaker_question)
+        search = bool(news) or text_only or wants_search(speaker_question)
         if not selected_urls and not material and not search:
             return False, None
         cursor = await conn.execute(
@@ -153,7 +169,7 @@ class ResearchEngine:
                 settings.research_model,
                 settings.research_reasoning,
                 stamp(),
-                research_profile(speaker_question),
+                "study" if news else research_profile(speaker_question),
             ),
         )
         assert cursor.lastrowid is not None
@@ -372,7 +388,9 @@ class ResearchEngine:
                     else {
                         "question": work["question"],
                         "provided_material": work["material"],
-                        "sources": sources,
+                        "sources": public_search_sources(work["sources"], sources)
+                        if work["question"] == RECHECK_QUESTION
+                        else sources,
                     }
                 )
                 request = {
@@ -653,6 +671,10 @@ class ResearchEngine:
                     analysis["summary"] = "Часть утверждений не удалось проверить по источникам."
                     analysis["needs_followup"] = False
                 analysis["claims"] = accepted_claims
+                if work["question"] == RECHECK_QUESTION and work["sources"]:
+                    limit_unconfirmed_claims(
+                        analysis, work["sources"][0]["requested_url"], observed
+                    )
                 # Preserve cited evidence when the provider returns more than our UI limit.
                 used_ids = {
                     identifier for claim in analysis["claims"] for identifier in claim["source_ids"]
@@ -754,7 +776,11 @@ class ResearchEngine:
                 actions = json.loads(run[3]) + actions
                 state, error = "completed", None
             elif analysis and work.get("can_followup") and not analysis.get("discarded_claims"):
-                plan = followup_input(work["profile"], analysis, sources, observed)
+                plan = (
+                    news_followup_plan(analysis, work["sources"], actions)
+                    if work["question"] == RECHECK_QUESTION
+                    else followup_input(work["profile"], analysis, sources, observed)
+                )
                 if plan:
                     analysis["followup"] = "started"
             used_ids = {
