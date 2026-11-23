@@ -4,11 +4,29 @@ import re
 from typing import Any
 
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
-from zarya.research_intent import DIRECT_SOURCE_REQUEST
+from zarya.research_intent import DIRECT_SOURCE_REQUEST, speaker_text
 
-NOUN = r"(?:первоисточник\w*|источник\w*|ссыл(?:к\w*|ок)|пруф\w*|линк\w*|url|адрес\w*)"
+LINK = r"(?:ссыл(?:к\w*|ок|очк\w*)|линк\w*|url)"
+MESSAGE_TARGET = (
+    rf"\b{LINK}\s+на\s+(?:(?:его|е[её]|их|мой|твой|тво[её]|сво[её]|тот|то|ту|"
+    r"это|эту|этот|исходн\w*|предыдущ\w*)\s+){0,3}"
+    r"(?:сообщени[ея]|реплик[уи]|(?:твой\s+)?ответ\s+Зари)\b"
+    rf"|\b{LINK}\s+на\s+твой\s+(?:предыдущий\s+)?ответ\b"
+)
+MESSAGE_REQUEST = re.compile(
+    rf"(?:^|(?<=[.!?,;\n]))\s*(?:Заря\s*[:,!]\s*)?(?:а\s+)?"
+    rf"(?:(?:у\s+тебя\s+)?есть\s+(?:ли\s+)?(?:у\s+тебя\s+)?)?(?:{MESSAGE_TARGET})"
+    r"(?:\s+(?:[а-яё-]+|в\s+чате))?\s*(?:\?|,\s*пожалуйста\b)|"
+    r"\b(?:дай(?:те)?|скинь(?:те)?|кинь(?:те)?|пришл(?:и|ите)|отправь(?:те)?|"
+    r"покажи(?:те)?|найди(?:те)?|можно|хочу|где|нуж(?:ен|на|но|ны))\s+"
+    rf"(?:(?:мне|нам|пожалуйста|точную|прямую)\s+)*(?:{MESSAGE_TARGET})|"
+    rf"(?:{MESSAGE_TARGET})\s+(?:дашь|скинешь|пришл[её]шь|покажешь)\b",
+    re.IGNORECASE,
+)
+EXTERNAL_DESTINATION = re.compile(r"\b(?:на\s+(?:официальном\s+)?сайте|в\s+статье)\b", re.I)
+NOUN = rf"(?:первоисточник\w*|источник\w*|{LINK}|пруф\w*|адрес\w*)"
 POSITIVE = re.compile(
-    rf"{DIRECT_SOURCE_REQUEST.pattern}|"
+    rf"{DIRECT_SOURCE_REQUEST.pattern}|{MESSAGE_REQUEST.pattern}|"
     rf"\b(?:скинь\w*|кинь\w*|пришли\w*|дай|дайте|отправь\w*|покажи\w*|приложи\w*|"
     rf"приведи|укажи\w*|добавь\w*|поделись|найди|хочу|нуж(?:ен|на|ны|но)|где)\b"
     rf"[^\n.!?]{{0,65}}\b{NOUN}\b|\b(?:send|show|provide|give|include)\b"
@@ -59,18 +77,21 @@ def wants_sources(question: str) -> bool:
 
 
 def message_requests_sources(message: dict[str, Any]) -> bool:
-    if message.get("forward_origin") or message.get("forward_date"):
+    return wants_sources(speaker_text(message, limit=None))
+
+
+def message_requests_permalink(message: dict[str, Any]) -> bool:
+    question = speaker_text(message, limit=None)
+    if not wants_sources(question):
         return False
-    text = str(message.get("text") or message.get("caption") or "")
-    entities = message.get("entities") if message.get("text") else message.get("caption_entities")
-    encoded = bytearray(text.encode("utf-16-le"))
-    for entity in entities or []:
-        if entity.get("type") in {"blockquote", "expandable_blockquote", "pre", "code"}:
-            start = max(0, int(entity.get("offset", 0))) * 2
-            end = min(len(encoded), start + max(0, int(entity.get("length", 0))) * 2)
-            if start < end:
-                encoded[start:end] = b" \x00" * ((end - start) // 2)
-    return wants_sources(encoded.decode("utf-16-le", errors="replace"))
+    negatives = list(NEGATIVE.finditer(question))
+    return any(
+        not any(n.start() < match.end() and match.start() < n.end() for n in negatives)
+        and not EXTERNAL_DESTINATION.search(
+            re.split(r"[.!?\n]", question[match.end() :], maxsplit=1)[0]
+        )
+        for match in MESSAGE_REQUEST.finditer(question)
+    )
 
 
 def requested(snapshot: dict[str, Any]) -> bool:
@@ -116,6 +137,7 @@ def display_text(text: str, snapshot: dict[str, Any]) -> str:
 
 def source_policy(show: bool, prompts: PromptBundle = DEFAULT_PROMPTS) -> str:
     research_status = (
+        "Не подменяй ссылку на сообщение его техническим номером. "
         "Если research.state означает ошибку или незавершённую проверку, "
         "скажи, что проверку не удалось завершить, а не что нужной информации нет. "
         "Технический сбой поиска не доказывает отсутствие источника. "
