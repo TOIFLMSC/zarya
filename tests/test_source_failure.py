@@ -85,7 +85,7 @@ async def test_correct_nonsequential_source_id_preserves_normal_answer(tmp_path)
         assert detail["state"] == "completed" and not detail["error"]
         assert URL in detail["response"]
         assert "id=33" in source_policy(True)
-        assert evidence_text("Вот [S33]", SOURCES) == "Вот  (" + URL + ")"
+        assert evidence_text("Вот [S33]", SOURCES) == "Вот - " + URL
 
 
 async def test_service_does_not_send_unrequested_links(tmp_path):

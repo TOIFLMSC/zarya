@@ -52,7 +52,8 @@ async def refs_valid(conn: aiosqlite.Connection, refs: list[dict[str, Any]]) -> 
 
 async def current_job(conn: aiosqlite.Connection, run: int, job: int | None = None) -> Any:
     async with conn.execute(
-        "SELECT j.id,e.id,e.payload FROM media_dependencies md JOIN jobs j ON j.id=md.job_id "
+        "SELECT j.id,e.id,e.payload,j.payload FROM media_dependencies md "
+        "JOIN jobs j ON j.id=md.job_id "
         "JOIN events e ON e.id=j.event_id WHERE md.media_run_id=? "
         "AND j.state='pending' AND e.payload!='{}' "
         "AND (? IS NULL OR j.id=?) "

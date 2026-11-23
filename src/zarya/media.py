@@ -216,6 +216,17 @@ class MediaEngine:
                 )
                 original = await accepted(conn, source[0], source[1], source[2], source[3])
                 assert original
+                manifest = [{"message_id": question["message_id"], "event_id": dependency[1]}]
+                paired = json.loads(dependency[3]).get("post_question")
+                if paired:
+                    author_question = await accepted(
+                        conn, source[0], source[1], source[2], paired["message_id"]
+                    )
+                    if not author_question or author_question[0] != paired["event_id"]:
+                        await purge(conn, "id=?", (item[0],))
+                        return {"skip": True}
+                    question = author_question[1]
+                    manifest.append(paired)
                 spoken = await row(
                     conn,
                     "SELECT transcript FROM media_runs WHERE bot_id=? AND chat_id=? "
@@ -232,7 +243,7 @@ class MediaEngine:
                     )[:4000],
                     "sender_id": str(question.get("from", {}).get("id", "")),
                     "caption": str(original[1].get("caption") or "")[:8000],
-                    "manifest": [{"message_id": question["message_id"], "event_id": dependency[1]}],
+                    "manifest": manifest,
                 }
             await conn.execute(
                 "UPDATE media_runs SET state='preparing',analysis_context=? WHERE id=?",
