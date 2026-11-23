@@ -11,6 +11,7 @@ import aiosqlite
 from zarya.memory_logic import epoch
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
+from zarya.research_dates import claim_dates
 from zarya.research_fetch import Fetcher, SafeFetcher, check_target
 from zarya.research_intent import blocks_external, research_profile, speaker_text
 from zarya.research_logic import (
@@ -522,6 +523,7 @@ class ResearchEngine:
         phase = work.get("phase", INITIAL)
         followup = phase == FOLLOWUP
         observed: set[str] = set()
+        first_pass_urls: set[str] = work.get("date_source_urls", set())
         opened: set[str] = set()
         analysis = None
         state, error = result.state, result.error
@@ -664,10 +666,26 @@ class ResearchEngine:
                             + [feeds[name] for name in feed_refs]
                         )
                     )
-                    accepted_claims.append(
-                        {key: claim[key] for key in ("text", "kind", "verdict")}
-                        | {"urls": references, "feeds": feed_refs, "source_ids": source_ids}
-                    )
+                    accepted = {key: claim[key] for key in ("text", "kind", "verdict")} | {
+                        "urls": references,
+                        "feeds": feed_refs,
+                        "source_ids": source_ids,
+                    }
+                    if claim["kind"] == "fact" and claim["verdict"] == "supported":
+                        date_sources = {
+                            s["url"]: s["id"]
+                            for s in sources
+                            if s.get("url") in references
+                            and s["id"] in source_ids
+                            and (
+                                s.get("url") in observed
+                                or s.get("url") in first_pass_urls
+                                or s.get("coverage") == "partial_text"
+                            )
+                        }
+                        if dates := claim_dates(claim.get("dates"), date_sources):
+                            accepted["dates"] = dates
+                    accepted_claims.append(accepted)
                 if len(analysis["summary"]) > 2500:
                     raise ValueError("output_limit")
                 if not any(
@@ -821,6 +839,7 @@ class ResearchEngine:
                 ),
             )
             if plan:
+                work["date_source_urls"] = observed
                 request = {
                     "model": work["model"],
                     "reasoning": {"effort": work["reasoning"]},
