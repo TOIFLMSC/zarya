@@ -453,7 +453,7 @@ class DialogueEngine:
                     bot_id,
                     chat_id,
                     access_version,
-                    selected_material + [incoming]
+                    (selected_material if text_first else selected_material + [incoming])
                     if selected_material or material["unavailable"]
                     else context + [incoming],
                 )

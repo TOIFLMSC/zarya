@@ -153,14 +153,22 @@ class PhotoEngine:
 
     async def claim(self, bot: str) -> dict[str, Any] | None:
         async with self.store.gate, self.db.transaction() as conn:
+            now = time.time()
             value = await row(
                 conn,
                 "SELECT id,model,bot_id,chat_id,access_version,processing_version,"
                 "COALESCE(settings_version,(SELECT version FROM settings WHERE id="
                 "1)) "
-                "FROM photo_batches "
-                "WHERE bot_id=? AND state='queued' AND collect_until<=? ORDER BY id LIMIT 1",
-                (bot, time.time()),
+                "FROM photo_batches b WHERE b.bot_id=? AND b.state='queued' AND b.collect_until<=? "
+                "AND NOT EXISTS (SELECT 1 FROM photo_items i JOIN jobs j ON j.access_version="
+                "b.access_version JOIN events e ON e.id=j.event_id AND e.bot_id=b.bot_id "
+                "AND e.chat_id=b.chat_id WHERE i.batch_id=b.id AND j.state='pending' "
+                "AND CAST(strftime('%s',j.created_at) AS REAL)>=? "
+                "AND json_extract(j.payload,'$.post_text_first')=1 AND i.message_id=COALESCE("
+                "json_extract(e.payload,'$.message.reply_to_message.message_id'),"
+                "json_extract(e.payload,'$.edited_message.reply_to_message.message_id'))) "
+                "ORDER BY b.id LIMIT 1",
+                (bot, now, now - 600),
             )
             if not value:
                 return None

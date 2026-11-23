@@ -316,7 +316,8 @@ def research_answer_text(text: str, research: dict[str, Any], show_links: bool) 
 def reply_sources(research: dict[str, Any]) -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = research.get("sources", [])
     analysis = research.get("analysis") or {}
-    if "source_lookup" not in analysis and not analysis.get("discarded_claims"):
+    lookup = "source_lookup" in analysis
+    if not lookup and not analysis.get("discarded_claims"):
         return sources
     relevant = {
         identifier for claim in analysis.get("claims", []) if claim["verdict"] != "uncertain"
@@ -329,7 +330,8 @@ def reply_sources(research: dict[str, Any]) -> list[dict[str, Any]]:
         and not source.get("error")
         and source.get("coverage") != "unavailable"
         and (
-            source.get("coverage") == "realtime_feed"
+            not lookup
+            or source.get("coverage") == "realtime_feed"
             or (source.get("url") and urlsplit(source["url"]).path not in {"", "/"})
         )
     ]

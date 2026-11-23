@@ -12,7 +12,7 @@ from test_telegram import event, store_at
 from zarya.openai_adapter import ModelResult
 from zarya.photos import PhotoEngine
 from zarya.research import ResearchEngine
-from zarya.research_logic import evidence_text
+from zarya.research_logic import evidence_text, research_answer_text
 
 QUESTION = "Эта цитата Трампа правдива?"
 CAPTION = "Трамп: Хуанг — лидер. Старые чипы Nvidia можно продавать в Китай."
@@ -142,6 +142,7 @@ async def test_caption_search_runs_before_photo_processing(tmp_path, paired):
         else:
             updates = [post, event(3, text=QUESTION, reply_to_message={"message_id": 2})]
         await store.ingest("999", "zarya_test", updates)
+        assert await photos.claim("999") is None
         assert await dialogue.claim("999") == {"skip": True}
         work = await research.claim("999")
         assert work["material"] == CAPTION
@@ -154,6 +155,25 @@ async def test_caption_search_runs_before_photo_processing(tmp_path, paired):
             assert (await dialogue.claim("999"))["skip"]
         output = await run_one(dialogue)
         assert output["snapshot"]["photo_refs"]
+        assert output["snapshot"]["incoming"]["text"] == QUESTION
+
+
+async def test_late_photo_is_admitted_without_creating_second_album_answer(tmp_path):
+    async with store_at(tmp_path) as store:
+        await private_ready(store)
+        first = photo(3, caption=CAPTION, album="late")
+        first["message"]["forward_origin"] = {"type": "channel"}
+        await store.ingest("999", "zarya_test", [event(2, text=QUESTION), first])
+        async with store.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE jobs SET state='done' WHERE json_extract(payload,'$.message_id')=3"
+            )
+        later = photo(4, album="late", file="late-item")
+        await store.ingest("999", "zarya_test", [later])
+        assert await store.db.one("SELECT 1 FROM photo_items WHERE message_id=4")
+        assert not await store.db.one(
+            "SELECT 1 FROM jobs WHERE json_extract(payload,'$.message_id')=4"
+        )
 
 
 async def test_adjacent_forward_with_old_telegram_timestamp_is_not_bound(tmp_path):
@@ -186,6 +206,18 @@ def test_unreadable_page_cannot_be_rendered_as_evidence(rendered):
             rendered,
             [{"id": 1, "url": URL, "coverage": "unavailable", "error": "no_readable_text"}],
         )
+
+
+def test_partial_general_research_can_link_a_claim_bound_homepage():
+    homepage = "https://example.org/"
+    context = {
+        "analysis": {
+            "discarded_claims": 1,
+            "claims": [{"verdict": "supported", "source_ids": [1]}],
+        },
+        "sources": [{"id": 1, "url": homepage}],
+    }
+    assert research_answer_text("Опубликовано [S1]", context, True) == f"Опубликовано - {homepage}"
 
 
 @pytest.mark.parametrize("reference", ["https://unobserved.example/", "/press/transcript"])

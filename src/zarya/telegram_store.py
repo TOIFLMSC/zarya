@@ -525,24 +525,25 @@ class TelegramStore:
                         and service_text is None
                         and settings.dialogue_enabled
                     )
-                    album_tail = bool(
-                        can_pair_post
-                        and album
-                        and await row(
+                    album_leader = (
+                        await row(
                             conn,
-                            "SELECT 1 FROM jobs j JOIN events e ON e.id=j.event_id "
+                            "SELECT j.state FROM jobs j JOIN events e ON e.id=j.event_id "
                             "WHERE e.bot_id=? AND e.chat_id=? AND j.access_version=? "
                             "AND json_extract(j.payload,'$.sender_id')=? "
                             "AND json_extract(j.payload,'$.thread_id') IS ? "
                             "AND json_extract(j.payload,'$.post_album')=? LIMIT 1",
                             (bot_id, subject, access[1], sender_id, thread_id, album),
                         )
+                        if can_pair_post and album
+                        else None
                     )
+                    album_tail = bool(album_leader and album_leader[0] == "pending")
                     previous_question = (
                         await preceding_forward_question(
                             conn, bot_id, subject, access[1], message, now
                         )
-                        if can_pair_post and not album_tail
+                        if can_pair_post and not album_leader
                         else None
                     )
                     batch, album_job, new_photo_job = (
@@ -591,6 +592,7 @@ class TelegramStore:
                     if (edited and not batch_member) or (
                         not album_job
                         and new_photo_job
+                        and not album_leader
                         and trigger in {"private", "name", "mention", "reply", "continuation"}
                     ):
                         await conn.execute(
@@ -638,7 +640,7 @@ class TelegramStore:
                             time.time(),
                         ),
                     )
-                    if album_tail:
+                    if album_leader:
                         continue
                     # Retention handles history; neighbours must not evict personal windows.
                     payload = {
