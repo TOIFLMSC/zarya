@@ -18,6 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.types import ASGIApp
 
 from zarya import __version__
+from zarya.activity import ACTIVITY_BUCKET_MINUTES, overview_activity
 from zarya.avatars import AvatarEngine
 from zarya.backup import MARKER
 from zarya.behavior import BehaviorEngine
@@ -493,6 +494,13 @@ def create_app(
                 )
                 await conn.execute("DELETE FROM active_dialogues")
         return {"settings": saved.settings.model_dump(), "version": saved.version}
+
+    @app.get("/api/overview/activity", dependencies=[Depends(authenticated)])
+    async def activity(period: int = Query(default=60)) -> dict[str, Any]:
+        if period not in ACTIVITY_BUCKET_MINUTES:
+            raise HTTPException(422, "Период в минутах: 30, 60, 180, 720 или 1440")
+        bot = str(telegram.bot.get("id", "")) if telegram.bot else ""
+        return await overview_activity(db, bot=bot, period_minutes=period)
 
     @app.get("/api/operations", dependencies=[Depends(authenticated)])
     async def operations_overview(

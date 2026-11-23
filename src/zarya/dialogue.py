@@ -348,7 +348,8 @@ class DialogueEngine:
                 and not current_messages
             ):
                 await self.photos.prepare_sources(
-                    conn, bot_id, chat_id, payload["scope"], access_version, target_ids, settings
+                    conn, bot_id, chat_id, payload["scope"], access_version, target_ids, settings,
+                    job_id=job_id,
                 )
                 pending = await row(
                     conn,

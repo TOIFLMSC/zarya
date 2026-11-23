@@ -506,6 +506,8 @@ async def test_own_voice_is_brief_question_not_research_post(tmp_path):
         await process(media)
         answer = await dialogue.claim("999")
         assert answer["snapshot"]["answer_mode"] == "brief"
+        linked = await store.db.one("SELECT request_job_id FROM model_calls WHERE operation='asr'")
+        assert linked[0] == answer["job_id"]
         assert (await store.db.one("SELECT COUNT(*) FROM research_runs"))[0] == 0
         prompt = instructions(Settings(), False, "brief", False)
         assert "sampled_media" in prompt and "Аудио и видеоряд не анализировались" not in prompt
