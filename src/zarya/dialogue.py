@@ -264,6 +264,7 @@ class DialogueEngine:
                     "text": accepted_question[1]["text"],
                     "entities": accepted_question[1].get("entities", []),
                 }
+            reply_id = paired["message_id"] if paired else payload["message_id"]
             forwarded_post = bool(
                 paired
                 or post_source
@@ -851,7 +852,7 @@ class DialogueEngine:
                             {
                                 "text": greeting,
                                 "thread_id": thread_id,
-                                "reply_id": payload["message_id"],
+                                "reply_id": reply_id,
                             },
                             ensure_ascii=False,
                         ),
@@ -899,7 +900,7 @@ class DialogueEngine:
                 "scope": payload["scope"],
                 "request": request,
                 "access_version": access_version,
-                "reply_id": payload["message_id"],
+                "reply_id": reply_id,
                 "snapshot": snapshot,
                 "timings": measured,
                 "skip": not should_answer,

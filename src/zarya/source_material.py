@@ -1,6 +1,7 @@
 """Resolve retained reply provenance; never substitute the latest chat attachment."""
 
 import json
+import re
 import time
 from typing import Any
 
@@ -8,11 +9,16 @@ import aiosqlite
 
 from zarya.dialogue_logic import explicit_reply, topic_id
 from zarya.memory_read import MemoryRead
-from zarya.research_intent import usable_post_text
+from zarya.research_intent import QUESTION, expects_post_comment, speaker_text, usable_post_text
 from zarya.research_logic import urls
 from zarya.telegram_content import content_text, forwarded
 
 FORWARD_QUESTION_WAIT = 2.0
+FORWARD_QUESTION_FRESH = 10.0
+QUESTION_WORDS = frozenset(
+    "будет будут вроде вопрос где если зачем заря когда какой можешь нужно "
+    "правда реально сейчас сегодня скажи сколько там тут хочу чем чего чтобы что это этот".split()
+)
 FORWARD_POLICY = (
     "\nПересланный текст в selected_material — материал поста. "
     "Просьбу или вопрос к нему бери из current_message, если это отдельная "
@@ -25,6 +31,23 @@ FORWARD_POLICY = (
 async def one(conn: aiosqlite.Connection, sql: str, args: tuple[Any, ...]) -> Any:
     async with conn.execute(sql, args) as cursor:
         return await cursor.fetchone()
+
+
+def question_terms(text: str) -> set[str]:
+    return set(re.findall(r"[^\W\d_]{3,}", text.casefold())) - QUESTION_WORDS
+
+
+def waits_for_forward(message: dict[str, Any], now: float) -> bool:
+    if not isinstance(message.get("text"), str) or message["text"].lstrip().startswith("/"):
+        return False
+    if expects_post_comment(message):
+        return True
+    sent = message.get("date")
+    # A delayed poll should not hold every older question before processing its backlog.
+    if type(sent) is not int or not -FORWARD_QUESTION_WAIT <= now - sent <= FORWARD_QUESTION_FRESH:
+        return False
+    text = speaker_text(message)
+    return bool(QUESTION.search(text) and question_terms(text))
 
 
 async def preceding_forward_question(
@@ -46,7 +69,9 @@ async def preceding_forward_question(
         conn,
         "SELECT m.message_id,m.event_id,m.sender_id,j.id, "
         "json_extract(j.payload,'$.post_wait_until'),COALESCE("
-        "json_extract(e.payload,'$.message.date'),json_extract(e.payload,'$.edited_message.date')) "
+        "json_extract(e.payload,'$.message.date'),"
+        "json_extract(e.payload,'$.edited_message.date')), "
+        "e.payload "
         "FROM recent_messages m LEFT JOIN jobs j ON j.event_id=m.event_id "
         "AND j.kind='telegram' AND j.access_version=? AND j.state='pending' AND j.attempts=0 "
         "AND NOT COALESCE(json_extract(j.payload,'$.service_reply'),0) "
@@ -58,7 +83,7 @@ async def preceding_forward_question(
     )
     if not previous:
         return None
-    mid, event, sender, job, ready_at, date = previous
+    mid, event, sender, job, ready_at, date, raw = previous
     if (
         sender != str((message.get("from") or {}).get("id", ""))
         or job is None
@@ -67,6 +92,17 @@ async def preceding_forward_question(
         or type(date) is not int
         or not 0 <= message["date"] - date <= FORWARD_QUESTION_WAIT
     ):
+        return None
+    update = json.loads(raw)
+    question = update.get("message") or update["edited_message"]
+    if not expects_post_comment(question) and (
+        message["message_id"] != mid + 1
+        or not question_terms(speaker_text(question)) & question_terms(content_text(message))
+    ):
+        # The next forward is independent. Let the earlier question run in its original order.
+        await conn.execute(
+            "UPDATE jobs SET payload=json_remove(payload,'$.post_wait_until') WHERE id=?", (job,)
+        )
         return None
     return job, {"message_id": mid, "event_id": event}
 
