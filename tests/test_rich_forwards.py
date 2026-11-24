@@ -60,7 +60,7 @@ def rich_post(number, *, readable=True):
     return post
 
 
-@pytest.mark.parametrize("same_poll", [True, False])
+@pytest.mark.parametrize("delivery", ["one_poll", "two_polls", "edited"])
 @pytest.mark.parametrize(
     ("question_text", "post_text"),
     [
@@ -73,7 +73,7 @@ def rich_post(number, *, readable=True):
     ],
 )
 async def test_private_question_and_forward_read_public_link_and_reply_once(
-    tmp_path, same_poll, question_text, post_text
+    tmp_path, delivery, question_text, post_text
 ):
     article = "https://example.org/exchange-fee"
     date = int(time.time())
@@ -91,13 +91,19 @@ async def test_private_question_and_forward_read_public_link_and_reply_once(
         fetch = Fetch()
         dialogue = DialogueEngine(store, model)
         dialogue.research = research = ResearchEngine(store, ResearchModel(), fetch)
-        if same_poll:
+        if delivery == "one_poll":
             await store.ingest("999", "zarya_test", [question, post])
         else:
             await store.ingest("999", "zarya_test", [question])
             assert await dialogue.claim("999") is None
             assert await research.claim("999") is None
             await store.ingest("999", "zarya_test", [post])
+        if delivery == "edited":
+            question_text += " В рублях."
+            edited = event(4, message_id=2, text=question_text)
+            await store.ingest(
+                "999", "zarya_test", [{"update_id": 4, "edited_message": edited["message"]}]
+            )
         assert await dialogue.claim("999") == {"skip": True}
         lookup = await research.claim("999")
         assert lookup["question"] == question_text and post_text in lookup["material"]
@@ -110,7 +116,9 @@ async def test_private_question_and_forward_read_public_link_and_reply_once(
         assert body["selected_material"]["messages"][0]["text"] == post_text
         (payload,) = await store.db.one("SELECT payload FROM outbox")
         assert json.loads(payload)["reply_id"] == 2
-        assert await store.db.all("SELECT message_id FROM dialogue_runs") == [(3,)]
+        assert await store.db.all("SELECT message_id FROM dialogue_runs") == [
+            (2 if delivery == "edited" else 3,)
+        ]
 
 
 @pytest.mark.parametrize("scenario", ["alone", "comment", "same_poll_comment", "reply"])

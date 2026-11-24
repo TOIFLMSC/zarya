@@ -265,10 +265,9 @@ class DialogueEngine:
                     "entities": accepted_question[1].get("entities", []),
                 }
             reply_id = paired["message_id"] if paired else payload["message_id"]
+            bound_post = bool(paired or post_source or material.get("restored_post"))
             forwarded_post = bool(
-                paired
-                or post_source
-                or material.get("restored_post")
+                bound_post
                 or forwarded(material_message)
                 or forwarded(reply)
                 or "rich_message" in reply
@@ -369,7 +368,7 @@ class DialogueEngine:
                     settings_row[0],
                     material,
                     text_only=True,
-                    paired_post=bool(paired),
+                    bound_post=bound_post,
                 )
                 if waiting:
                     if payload.get("post_members"):
@@ -490,7 +489,7 @@ class DialogueEngine:
                     settings,
                     settings_row[0],
                     research_material,
-                    paired_post=bool(paired),
+                    bound_post=bound_post,
                 )
                 if waiting:
                     return {"skip": True}
