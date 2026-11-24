@@ -45,7 +45,8 @@ async def preceding_forward_question(
     previous = await one(
         conn,
         "SELECT m.message_id,m.event_id,m.sender_id,j.id, "
-        "json_extract(j.payload,'$.post_wait_until'),json_extract(e.payload,'$.message.date') "
+        "json_extract(j.payload,'$.post_wait_until'),COALESCE("
+        "json_extract(e.payload,'$.message.date'),json_extract(e.payload,'$.edited_message.date')) "
         "FROM recent_messages m LEFT JOIN jobs j ON j.event_id=m.event_id "
         "AND j.kind='telegram' AND j.access_version=? AND j.state='pending' AND j.attempts=0 "
         "AND NOT COALESCE(json_extract(j.payload,'$.service_reply'),0) "
@@ -182,8 +183,63 @@ async def valid(
     return True
 
 
+async def revised_post_question(
+    conn: aiosqlite.Connection,
+    bot: str,
+    chat: str,
+    grant: int,
+    reply_id: int,
+    message: dict[str, Any],
+) -> tuple[dict[str, int], dict[str, int]] | None:
+    """Recover the post reference alone after an edit erased a sent answer."""
+    if chat.startswith("-"):
+        return None
+    sent = await one(
+        conn,
+        "SELECT j.event_id,j.payload FROM outbox o "
+        "JOIN jobs j ON j.id=o.job_id JOIN dialogue_runs r ON r.job_id=j.id "
+        "WHERE o.bot_id=? AND o.chat_id=? AND o.access_version=? AND o.message_id=? "
+        "AND o.state='sent' AND r.mode='live' AND r.state='cancelled' "
+        "AND r.error_code IN ('source_changed','research_changed','memory_changed') "
+        "AND r.sender_id=? AND r.thread_id IS ? "
+        "AND CAST(strftime('%s',o.created_at) AS REAL)>=?",
+        (
+            bot,
+            chat,
+            grant,
+            reply_id,
+            str((message.get("from") or {}).get("id", "")),
+            topic_id(message),
+            time.time() - 90 * 86400,
+        ),
+    )
+    if not sent:
+        return None
+    event, raw = sent
+    payload = json.loads(raw)
+    question = payload.get("post_question") or {
+        "message_id": payload.get("message_id"),
+        "event_id": event,
+    }
+    post = payload.get("post_source")
+    if payload.get("post_question"):
+        post = {"message_id": payload["message_id"], "event_id": event}
+    if not post or not question["message_id"]:
+        return None
+    current = await accepted(conn, bot, chat, grant, question["message_id"])
+    if not current or current[0] == question["event_id"]:
+        return None
+    return post, {"message_id": question["message_id"], "event_id": current[0]}
+
+
 async def resolve(
-    conn: aiosqlite.Connection, bot: str, chat: str, grant: int, message: dict[str, Any]
+    conn: aiosqlite.Connection,
+    bot: str,
+    chat: str,
+    grant: int,
+    message: dict[str, Any],
+    *,
+    post_source: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Walk only actual sent outbox messages and accepted current user revisions."""
     result: dict[str, Any] = {
@@ -200,7 +256,10 @@ async def resolve(
         or any(message.get(k) for k in ("video", "animation", "voice", "video_note", "sticker"))
     )
     reply = explicit_reply(message)
-    if not forwarded(message) and (forwarded(reply) or "rich_message" in reply):
+    target_id: int | None
+    if post_source:
+        target_id = post_source["message_id"]
+    elif not forwarded(message) and (forwarded(reply) or "rich_message" in reply):
         target_id = reply.get("message_id")
     else:
         target_id = message["message_id"] if own_material else reply.get("message_id")
@@ -212,6 +271,10 @@ async def resolve(
             break
         seen.add(target_id)
         source = await accepted(conn, bot, chat, grant, target_id)
+        if post_source and (
+            not source or source[0] != post_source["event_id"] or not forwarded(source[1])
+        ):
+            break
         if source:
             event, original = source
             result["manifest"].append({"message_id": target_id, "event_id": event})
@@ -225,6 +288,17 @@ async def resolve(
                     for k in ("photo", "video", "animation", "voice", "video_note", "sticker")
                 )
             )
+            if not post_source and not forwarded(original) and not chat.startswith("-"):
+                binding = await one(
+                    conn,
+                    "SELECT json_extract(payload,'$.post_source') FROM jobs "
+                    "WHERE event_id=? AND kind='telegram' AND access_version=?",
+                    (event, grant),
+                )
+                if binding and binding[0]:
+                    post_source = json.loads(binding[0])
+                    target_id = post_source["message_id"]
+                    continue
             if material or not reply_id:
                 result["messages"].append(describe(original))
                 album = original.get("media_group_id")
@@ -262,6 +336,13 @@ async def resolve(
             (bot, chat, target_id, grant, time.time() - 90 * 86400),
         )
         if not sent:
+            revised = await revised_post_question(conn, bot, chat, grant, target_id, message)
+            if revised:
+                post_source, question = revised
+                result["via_assistant"] = True
+                result["manifest"].append(question)
+                target_id = post_source["message_id"]
+                continue
             break
         result["via_assistant"] = True
         snapshot = json.loads(sent[1])

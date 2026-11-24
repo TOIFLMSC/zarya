@@ -236,7 +236,10 @@ class DialogueEngine:
             ):
                 # Own spoken reply is a question about its reply-chain, not a new post.
                 material_message = {key: value for key, value in message.items() if key != "voice"}
-            material = await resolve(conn, bot_id, chat_id, access_version, material_message)
+            post_source = payload.get("post_source")
+            material = await resolve(
+                conn, bot_id, chat_id, access_version, material_message, post_source=post_source
+            )
             paired = payload.get("post_question")
             if paired:
                 accepted_question = await accepted(
@@ -258,6 +261,7 @@ class DialogueEngine:
                 }
             forwarded_post = bool(
                 paired
+                or post_source
                 or forwarded(material_message)
                 or forwarded(reply)
                 or "rich_message" in reply
@@ -353,6 +357,15 @@ class DialogueEngine:
                 if waiting:
                     return {"skip": True}
             payload.pop("post_text_first", None)
+            if payload["scope"] == "private" and forwarded_post and not (paired or post_source):
+                parent = reply.get("message_id")
+                if any(
+                    item["message_id"] == parent and item["forwarded"]
+                    for item in material["messages"]
+                ):
+                    payload["post_source"] = next(
+                        ref for ref in material["manifest"] if ref["message_id"] == parent
+                    )
             payload["source_message_ids"] = target_ids
             await conn.execute(
                 "UPDATE jobs SET payload=? WHERE id=?", (json.dumps(payload), job_id)

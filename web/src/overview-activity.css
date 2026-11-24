@@ -95,6 +95,10 @@
   --activity-series: var(--sidebar-active);
 }
 
+.activity-chart--research_token_limits {
+  grid-column: 1 / -1;
+}
+
 .activity-chart-total {
   display: flex;
   align-items: baseline;

@@ -28,6 +28,7 @@ type Point = {
   requests: number;
   attachments: number;
   attachment_types: Partial<Record<AttachmentType, number>>;
+  research_token_limits: number;
 };
 type Activity = {
   period_minutes: number;
@@ -65,7 +66,7 @@ function ActivityChart({
   empty,
 }: {
   activity: Activity;
-  metric: "requests" | "attachments";
+  metric: "requests" | "attachments" | "research_token_limits";
   title: string;
   summary: string;
   empty: string;
@@ -210,7 +211,7 @@ function ActivityChart({
                 key={points[index].bucket_time}
                 className={`activity-chart-slot${partial(points[index]) ? " is-partial" : ""}${active === index ? " is-selected" : ""}`}
               >
-                {metric === "requests" && value > 0 && (
+                {metric !== "attachments" && value > 0 && (
                   <i style={{ height: `${(value / limit) * 100}%` }} />
                 )}
                 {series.map(({ kind }) => {
@@ -390,6 +391,14 @@ export function OverviewActivity({
             title="Обработанные вложения"
             summary="По времени завершения обработки"
             empty="За выбранный период вложений не обработано"
+          />
+          <ActivityChart
+            key={`research-token-limits-${period}`}
+            activity={charts}
+            metric="research_token_limits"
+            title="Вызовы веб-поиска, исчерпавшие лимит"
+            summary="Лимит выходных токенов включает токены рассуждений"
+            empty="За выбранный период таких случаев не зафиксировано"
           />
         </div>
       )}

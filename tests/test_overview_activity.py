@@ -201,7 +201,10 @@ async def test_activity_api_requires_admin_and_returns_empty_minutes(tmp_path):
         assert response.headers["Cache-Control"] == "no-store"
         data = response.json()
         assert data["leader"] is None and len(data["minutes"]) == 60
-        assert all(row["requests"] == row["attachments"] == 0 for row in data["minutes"])
+        assert all(
+            row["requests"] == row["attachments"] == row["research_token_limits"] == 0
+            for row in data["minutes"]
+        )
         for period, bucket in ((30, 1), (60, 1), (180, 5), (720, 15), (1440, 30)):
             response = await client.get(path, params={"period": period})
             assert response.status_code == 200
@@ -306,3 +309,139 @@ async def test_attachment_completed_after_left_chart_boundary_is_counted(tmp_pat
         assert data["leader"] is None
         assert data["minutes"][0]["attachment_types"] == {"voice": 1}
         assert all(row["requests"] == 0 for row in data["minutes"])
+
+
+async def test_research_token_limits_are_counted_per_finished_model_call(tmp_path):
+    now = datetime(2026, 11, 23, 12, 4, 30, tzinfo=UTC)
+    old = (now - timedelta(hours=25)).isoformat()
+    in_window = (now - timedelta(minutes=35)).isoformat()
+    second_bucket = (now - timedelta(minutes=5)).isoformat()
+    open_minute = now.replace(second=0).isoformat()
+    async with store_at(tmp_path) as store:
+        async with store.db.transaction() as conn:
+            for run in range(1, 11):
+                bot = "888" if run == 8 else "999"
+                await request(conn, run, old, state="cancelled", bot=bot)
+                await conn.execute(
+                    "INSERT INTO research_runs(id,job_id,bot_id,chat_id,scope,access_version,"
+                    "state,mode,question,material,manifest,settings_version,model,reasoning,"
+                    "created_at) VALUES (?,?,?,'42','private',1,'cancelled','search','','','[]',"
+                    "1,'test','low',?)",
+                    (run, run, bot, old),
+                )
+            await conn.executemany(
+                "INSERT INTO model_calls(provider,model,state,created_at,research_run_id,"
+                "operation,error_code,request_json,usage_json,finished_at) "
+                "VALUES ('openai','test',?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        "invalid",
+                        old,
+                        1,
+                        "research_initial",
+                        "incomplete_or_empty",
+                        '{"max_output_tokens":3000}',
+                        '{"output_tokens":3000}',
+                        in_window,
+                    ),
+                    (
+                        "invalid",
+                        old,
+                        1,
+                        "research_gap",
+                        "max_output_tokens",
+                        '{"max_output_tokens":6000}',
+                        '{"output_tokens":6000}',
+                        in_window,
+                    ),
+                    (
+                        "invalid",
+                        old,
+                        2,
+                        "research_initial",
+                        "max_output_tokens",
+                        None,
+                        None,
+                        second_bucket,
+                    ),
+                    (
+                        "invalid",
+                        old,
+                        3,
+                        "research_initial",
+                        "incomplete_or_empty",
+                        None,
+                        '{"output_tokens":3000}',
+                        in_window,
+                    ),
+                    (
+                        "invalid",
+                        old,
+                        4,
+                        "research_initial",
+                        "incomplete_or_empty",
+                        "broken",
+                        '{"output_tokens":3000}',
+                        in_window,
+                    ),
+                    (
+                        "invalid",
+                        old,
+                        5,
+                        "research_initial",
+                        "incomplete_other",
+                        '{"max_output_tokens":12000}',
+                        '{"output_tokens":12000}',
+                        in_window,
+                    ),
+                    (
+                        "completed",
+                        old,
+                        6,
+                        "research_initial",
+                        None,
+                        '{"max_output_tokens":12000}',
+                        '{"output_tokens":12000}',
+                        in_window,
+                    ),
+                    (
+                        "invalid",
+                        old,
+                        7,
+                        "research_initial",
+                        "max_output_tokens",
+                        None,
+                        None,
+                        open_minute,
+                    ),
+                    (
+                        "invalid",
+                        old,
+                        8,
+                        "research_initial",
+                        "max_output_tokens",
+                        None,
+                        None,
+                        in_window,
+                    ),
+                    (
+                        "invalid",
+                        old,
+                        9,
+                        "research_initial",
+                        "incomplete_or_empty",
+                        '{"max_output_tokens":12000}',
+                        '{"output_tokens":3000}',
+                        in_window,
+                    ),
+                    ("invalid", old, 10, "research_initial", "max_output_tokens", None, None, old),
+                    ("invalid", old, None, "dialogue", "max_output_tokens", None, None, in_window),
+                ],
+            )
+
+        day = await overview_activity(store.db, bot="999", period_minutes=1440, now=now)
+        assert [
+            row["research_token_limits"] for row in day["minutes"] if row["research_token_limits"]
+        ] == [2, 1]
+        half_hour = await overview_activity(store.db, bot="999", period_minutes=30, now=now)
+        assert sum(row["research_token_limits"] for row in half_hour["minutes"]) == 1

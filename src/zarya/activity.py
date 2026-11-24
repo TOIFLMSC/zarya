@@ -90,6 +90,22 @@ WITH candidate_runs AS (
 ), request_buckets AS (
     SELECT unixepoch(substr(received_at,1,19))/:bucket_seconds bucket,COUNT(*) count FROM requests
     WHERE received_at>=:range_start AND received_at<:range_end GROUP BY bucket
+), research_token_limit_buckets AS (
+    SELECT unixepoch(substr(c.finished_at,1,19))/:bucket_seconds bucket,COUNT(*) count
+    FROM model_calls c JOIN research_runs w ON w.id=c.research_run_id
+    WHERE c.finished_at>=:range_start AND c.finished_at<:range_end AND (:bot='' OR w.bot_id=:bot)
+      AND c.provider='openai' AND COALESCE(c.operation,'research_initial')
+        IN ('research_initial','research_gap') AND c.state='invalid'
+      AND (c.error_code='max_output_tokens' OR CASE
+        WHEN c.error_code='incomplete_or_empty'
+          AND json_valid(c.request_json) AND json_valid(c.usage_json) THEN
+          json_type(c.request_json,'$.max_output_tokens')='integer'
+          AND json_extract(c.request_json,'$.max_output_tokens')>0
+          AND json_type(c.usage_json,'$.output_tokens')='integer'
+          AND json_extract(c.usage_json,'$.output_tokens')
+            >=json_extract(c.request_json,'$.max_output_tokens')
+        ELSE 0 END)
+    GROUP BY bucket
 ), legacy_leader_media AS (
     SELECT DISTINCT c.id,
       CASE WHEN c.operation='vision' AND json_extract(m.analysis_context,'$.job_id') IS NOT NULL
@@ -145,6 +161,7 @@ WITH candidate_runs AS (
 SELECT
     (SELECT json_group_array(json_array(bucket,count)) FROM request_buckets),
     (SELECT json_group_array(json_array(bucket,kind,count)) FROM attachment_buckets),
+    (SELECT json_group_array(json_array(bucket,count)) FROM research_token_limit_buckets),
     (SELECT requests FROM leader),
     (SELECT json_extract(profile,'$.username') FROM leader_identity),
     (SELECT json_extract(profile,'$.first_name') FROM leader_identity),
@@ -178,6 +195,7 @@ async def overview_activity(
     (
         request_json,
         attachment_json,
+        research_token_limit_json,
         count,
         username,
         name,
@@ -188,6 +206,7 @@ async def overview_activity(
         unassigned,
     ) = value
     requests = dict(json.loads(request_json))
+    research_token_limits = dict(json.loads(research_token_limit_json))
     attachments: dict[int, dict[str, int]] = defaultdict(dict)
     for bucket, kind, amount in json.loads(attachment_json):
         attachments[bucket][kind] = amount
@@ -203,6 +222,7 @@ async def overview_activity(
                 "requests": requests.get(bucket, 0),
                 "attachments": sum(attachments[bucket].values()),
                 "attachment_types": attachments[bucket],
+                "research_token_limits": research_token_limits.get(bucket, 0),
             }
             for bucket in range(start // bucket_seconds, (end - 1) // bucket_seconds + 1)
         ],

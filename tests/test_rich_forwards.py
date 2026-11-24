@@ -7,7 +7,7 @@ import pytest
 from aiogram.types import Update
 from test_dialogue import FakeModel, private_ready
 from test_research import Fetch, ResearchModel
-from test_source_material import answer
+from test_source_material import answer, deliver
 from test_telegram import event, store_at
 
 from zarya.dialogue import DialogueEngine
@@ -209,6 +209,116 @@ async def test_comment_can_request_web_search_about_the_selected_post(tmp_path, 
         assert BODY in work["material"]
         await research.execute(work)
         assert research.adapter.calls[0]["tools"][0]["type"] == "web_search"
+
+
+@pytest.mark.parametrize(
+    "edit_at", ["before_forward", "after_forward", "queued_search", "after_delivery"]
+)
+async def test_news_comment_edit_keeps_post_and_link_through_replies(tmp_path, edit_at):
+    question = "Объясни смысл этой новости. Сколько заплачу за покупку?"
+    revised = "Объясни смысл этой новости. Посчитай для 80 000 рублей."
+    body = "На бирже объявили новый сбор. Подробности"
+    label = "Подробности"
+    article = "https://example.org/exchange-fee"
+    forward = event(
+        3,
+        text=body,
+        forward_origin=rich_post(3)["message"]["forward_origin"],
+        entities=[
+            {
+                "type": "text_link",
+                "offset": body.index(label),
+                "length": len(label),
+                "url": article,
+            }
+        ],
+    )
+    edit = event(4 if edit_at != "before_forward" else 3, text=revised, message_id=2)
+    edit["edited_message"] = edit.pop("message")
+    if edit_at == "before_forward":
+        forward["update_id"] = 4
+    async with store_at(tmp_path) as store:
+        await private_ready(store)
+        search = ResearchModel()
+        dialogue = DialogueEngine(store, FakeModel(ModelResult(text="Ответ по источнику")))
+        dialogue.research = research = ResearchEngine(store, search, Fetch())
+        await store.ingest("999", "zarya_test", [event(2, text=question)])
+        assert await dialogue.claim("999") is None
+        if edit_at == "before_forward":
+            await store.ingest("999", "zarya_test", [edit, forward])
+        else:
+            await store.ingest("999", "zarya_test", [forward])
+            if edit_at == "queued_search":
+                assert await dialogue.claim("999") == {"skip": True}
+            if edit_at == "after_delivery":
+                work = await answer(dialogue, research, 3)
+                await deliver(store, work, 100)
+            await store.ingest("999", "zarya_test", [edit])
+        if edit_at == "after_delivery":
+            edited_work = await dialogue.claim("999")
+            if edited_work and not edited_work.get("skip"):
+                await dialogue.execute(edited_work)
+            assert len(dialogue.adapter.calls) == 1
+            assert await store.db.one(
+                "SELECT state,response FROM dialogue_runs WHERE id=?", (work["run_id"],)
+            ) == ("cancelled", None)
+        else:
+            work = await answer(dialogue, research, 3 if edit_at == "before_forward" else 2)
+            await deliver(store, work, 100)
+        assert len(search.calls) == 1
+        first = json.loads(search.calls[0]["input"])
+        assert first["question"] == (question if edit_at == "after_delivery" else revised)
+        assert body in str(first) and article in str(first)
+        assert await dialogue.claim("999") is None
+
+        for question_id, reply_id in ((5, 100), (6, 101)):
+            await store.ingest(
+                "999",
+                "zarya_test",
+                [
+                    event(
+                        question_id,
+                        text="Поищи по ссылке и проверь",
+                        reply_to_message={
+                            "message_id": reply_id,
+                            "from": {"id": 999, "is_bot": True},
+                        },
+                    )
+                ],
+            )
+            followup = await answer(dialogue, research, question_id)
+            if question_id == 5:
+                await deliver(store, followup, 101)
+            selected = str(
+                json.loads(followup["snapshot"]["request"]["input"])["selected_material"]
+            )
+            hosted = search.calls[-1]["input"]
+            assert body in selected and article in selected
+            assert body in hosted and article in hosted
+
+        if edit_at == "after_delivery":
+            changed_post = event(
+                7,
+                message_id=3,
+                text="Новая редакция поста. https://example.org/updated",
+                forward_origin=forward["message"]["forward_origin"],
+            )
+            changed_post["edited_message"] = changed_post.pop("message")
+            await store.ingest(
+                "999",
+                "zarya_test",
+                [
+                    changed_post,
+                    event(
+                        8,
+                        text="Поищи по ссылке и проверь",
+                        reply_to_message={"message_id": 100, "from": {"id": 999, "is_bot": True}},
+                    ),
+                ],
+            )
+            await answer(dialogue, research, 8)
+            hosted = search.calls[-1]["input"]
+            assert article not in hosted and "https://example.org/updated" not in hosted
 
 
 async def test_visible_rich_post_link_reaches_the_fetcher_without_hidden_targets(tmp_path):
