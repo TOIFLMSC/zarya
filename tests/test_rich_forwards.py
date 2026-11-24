@@ -61,11 +61,23 @@ def rich_post(number, *, readable=True):
 
 
 @pytest.mark.parametrize("same_poll", [True, False])
-async def test_private_question_and_forward_read_public_link_and_reply_once(tmp_path, same_poll):
+@pytest.mark.parametrize(
+    ("question_text", "post_text"),
+    [
+        (USDT_QUESTION, "Мосбиржа будет взимать НДС 22% со сделок с USDT."),
+        ("Сколько стоит вывод BTC на этой бирже?", "Тарифы биржи на вывод BTC."),
+        (
+            "Когда откроют новую станцию метро?",
+            "Открытие новой станции метрополитена состоится в декабре.",
+        ),
+    ],
+)
+async def test_private_question_and_forward_read_public_link_and_reply_once(
+    tmp_path, same_poll, question_text, post_text
+):
     article = "https://example.org/exchange-fee"
-    post_text = "Мосбиржа будет взимать НДС 22% со сделок с USDT."
     date = int(time.time())
-    question = event(2, text=USDT_QUESTION, date=date)
+    question = event(2, text=question_text, date=date)
     post = event(
         3,
         text=post_text,
@@ -88,13 +100,13 @@ async def test_private_question_and_forward_read_public_link_and_reply_once(tmp_
             await store.ingest("999", "zarya_test", [post])
         assert await dialogue.claim("999") == {"skip": True}
         lookup = await research.claim("999")
-        assert lookup["question"] == USDT_QUESTION and post_text in lookup["material"]
+        assert lookup["question"] == question_text and post_text in lookup["material"]
         await research.execute(lookup)
         await answer(dialogue, research, 2)
         await drain(dialogue)
         assert fetch.calls == [article] and len(model.calls) == 1
         body = json.loads(model.calls[0]["input"])
-        assert body["current_message"]["text"] == USDT_QUESTION
+        assert body["current_message"]["text"] == question_text
         assert body["selected_material"]["messages"][0]["text"] == post_text
         (payload,) = await store.db.one("SELECT payload FROM outbox")
         assert json.loads(payload)["reply_id"] == 2
@@ -130,6 +142,8 @@ async def test_rich_forward_supplies_the_exact_post_and_separate_question(tmp_pa
         work = await answer(dialogue, research, number)
         snapshot = work["snapshot"]
         request = json.loads(snapshot["request"]["input"])
+        assert request["selected_material"]["messages"][0]["content_incomplete"] is True
+        assert "часть содержимого недоступна" in snapshot["request"]["instructions"]
         selected = request["selected_material"]["messages"]
         assert len(selected) == 1 and BODY in selected[0]["text"]
         assert sorted(ref["message_id"] for ref in snapshot["source_manifest"]) == (
@@ -209,10 +223,14 @@ async def test_unrelated_question_and_forward_do_not_share_search_material(tmp_p
         await private_ready(store)
         dialogue = DialogueEngine(store, FakeModel(ModelResult(text="Погода")))
         dialogue.research = research = ResearchEngine(store, ResearchModel(), Fetch())
-        question = "Какая сегодня погода в Казани?"
+        question = "Как сейчас с погодой в Казани?"
         now = int(time.time())
-        post = rich_post(3)
-        post["message"]["date"] = now
+        post = event(
+            3,
+            text="Как изменились правила провоза багажа",
+            date=now,
+            forward_origin={"type": "channel"},
+        )
         await store.ingest("999", "zarya_test", [event(2, text=question, date=now), post])
         assert await dialogue.claim("999") == {"skip": True}
         work = await research.claim("999")

@@ -369,6 +369,7 @@ class DialogueEngine:
                     settings_row[0],
                     material,
                     text_only=True,
+                    paired_post=bool(paired),
                 )
                 if waiting:
                     if payload.get("post_members"):
@@ -489,6 +490,7 @@ class DialogueEngine:
                     settings,
                     settings_row[0],
                     research_material,
+                    paired_post=bool(paired),
                 )
                 if waiting:
                     return {"skip": True}
