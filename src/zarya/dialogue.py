@@ -268,6 +268,7 @@ class DialogueEngine:
             forwarded_post = bool(
                 paired
                 or post_source
+                or material.get("restored_post")
                 or forwarded(material_message)
                 or forwarded(reply)
                 or "rich_message" in reply

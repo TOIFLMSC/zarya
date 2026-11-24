@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiogram.types import Update
-from test_dialogue import FakeModel, private_ready
+from test_dialogue import FakeModel, drain, private_ready
 from test_research import Fetch, ResearchModel
 from test_source_material import answer, deliver
 from test_telegram import event, store_at
@@ -317,9 +317,15 @@ async def test_news_comment_edit_keeps_post_and_link_through_replies(tmp_path, e
                     ),
                 ],
             )
-            await answer(dialogue, research, 8)
-            hosted = search.calls[-1]["input"]
-            assert article not in hosted and "https://example.org/updated" not in hosted
+            call_counts = len(search.calls), len(dialogue.adapter.calls)
+            await drain(dialogue)
+            (delivery,) = await store.db.one(
+                "SELECT o.payload FROM outbox o JOIN dialogue_runs r USING(job_id) "
+                "WHERE r.message_id=8 AND r.state='service'"
+            )
+            assert json.loads(delivery)["text"].startswith(UNREADABLE)
+            assert await research.claim("999") is None
+            assert (len(search.calls), len(dialogue.adapter.calls)) == call_counts
 
 
 async def test_followup_edit_recovers_post_without_using_erased_reply_text(tmp_path):
@@ -403,12 +409,15 @@ async def test_recovering_edited_question_does_not_read_revised_album_sibling(tm
                 ),
             ],
         )
-        initial_attempts = len(search.calls)
-        await answer(dialogue, research, 7)
-        assert all(
-            updated not in call["input"] and article not in call["input"]
-            for call in search.calls[initial_attempts:]
+        call_counts = len(search.calls), len(dialogue.adapter.calls)
+        await drain(dialogue)
+        (delivery,) = await store.db.one(
+            "SELECT o.payload FROM outbox o JOIN dialogue_runs r USING(job_id) "
+            "WHERE r.message_id=7 AND r.state='service'"
         )
+        assert json.loads(delivery)["text"].startswith(UNREADABLE)
+        assert await research.claim("999") is None
+        assert (len(search.calls), len(dialogue.adapter.calls)) == call_counts
 
 
 async def test_visible_rich_post_link_reaches_the_fetcher_without_hidden_targets(tmp_path):
