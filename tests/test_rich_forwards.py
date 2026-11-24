@@ -1,6 +1,7 @@
 """Private Telegram forwards bind the author's question to the chosen post."""
 
 import json
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -22,6 +23,7 @@ ASK = "тут большой пост, можешь его содержание 
 BODY = "Новый пост про сюжет игры и её героев."
 OLD = "Старый пост про Ялту"
 UNREADABLE = "Не получилось прочитать пересланный пост"
+USDT_QUESTION = "Реально будут брать НДС при покупке USDT? Я заплачу за 1000 как за 1220?"
 
 
 def rich_post(number, *, readable=True):
@@ -58,6 +60,67 @@ def rich_post(number, *, readable=True):
     return post
 
 
+@pytest.mark.parametrize("delivery", ["one_poll", "two_polls", "edited"])
+@pytest.mark.parametrize(
+    ("question_text", "post_text"),
+    [
+        (USDT_QUESTION, "Мосбиржа будет взимать НДС 22% со сделок с USDT."),
+        ("Сколько стоит вывод BTC на этой бирже?", "Тарифы биржи на вывод BTC."),
+        (
+            "Когда откроют новую станцию метро?",
+            "Открытие новой станции метрополитена состоится в декабре.",
+        ),
+    ],
+)
+async def test_private_question_and_forward_read_public_link_and_reply_once(
+    tmp_path, delivery, question_text, post_text
+):
+    article = "https://example.org/exchange-fee"
+    date = int(time.time())
+    question = event(2, text=question_text, date=date)
+    post = event(
+        3,
+        text=post_text,
+        date=date,
+        forward_origin={"type": "channel"},
+        entities=[{"type": "text_link", "offset": 0, "length": 8, "url": article}],
+    )
+    async with store_at(tmp_path) as store:
+        await private_ready(store)
+        model = FakeModel(ModelResult(text="Расчёт зависит от условий сделки."))
+        fetch = Fetch()
+        dialogue = DialogueEngine(store, model)
+        dialogue.research = research = ResearchEngine(store, ResearchModel(), fetch)
+        if delivery == "one_poll":
+            await store.ingest("999", "zarya_test", [question, post])
+        else:
+            await store.ingest("999", "zarya_test", [question])
+            assert await dialogue.claim("999") is None
+            assert await research.claim("999") is None
+            await store.ingest("999", "zarya_test", [post])
+        if delivery == "edited":
+            question_text += " В рублях."
+            edited = event(4, message_id=2, text=question_text)
+            await store.ingest(
+                "999", "zarya_test", [{"update_id": 4, "edited_message": edited["message"]}]
+            )
+        assert await dialogue.claim("999") == {"skip": True}
+        lookup = await research.claim("999")
+        assert lookup["question"] == question_text and post_text in lookup["material"]
+        await research.execute(lookup)
+        await answer(dialogue, research, 2)
+        await drain(dialogue)
+        assert fetch.calls == [article] and len(model.calls) == 1
+        body = json.loads(model.calls[0]["input"])
+        assert body["current_message"]["text"] == question_text
+        assert body["selected_material"]["messages"][0]["text"] == post_text
+        (payload,) = await store.db.one("SELECT payload FROM outbox")
+        assert json.loads(payload)["reply_id"] == 2
+        assert await store.db.all("SELECT message_id FROM dialogue_runs") == [
+            (2 if delivery == "edited" else 3,)
+        ]
+
+
 @pytest.mark.parametrize("scenario", ["alone", "comment", "same_poll_comment", "reply"])
 async def test_rich_forward_supplies_the_exact_post_and_separate_question(tmp_path, scenario):
     async with store_at(tmp_path) as store:
@@ -83,10 +146,12 @@ async def test_rich_forward_supplies_the_exact_post_and_separate_question(tmp_pa
                     "zarya_test",
                     [event(3, text=ASK, reply_to_message=post["message"])],
                 )
-        number = 2 if scenario == "alone" else 3
+        number = 3 if scenario == "reply" else 2
         work = await answer(dialogue, research, number)
         snapshot = work["snapshot"]
         request = json.loads(snapshot["request"]["input"])
+        assert request["selected_material"]["messages"][0]["content_incomplete"] is True
+        assert "часть содержимого недоступна" in snapshot["request"]["instructions"]
         selected = request["selected_material"]["messages"]
         assert len(selected) == 1 and BODY in selected[0]["text"]
         assert sorted(ref["message_id"] for ref in snapshot["source_manifest"]) == (
@@ -96,7 +161,7 @@ async def test_rich_forward_supplies_the_exact_post_and_separate_question(tmp_pa
             expected = "Как тебе?" if scenario == "same_poll_comment" else ASK
             assert request["current_message"]["text"] == expected
         if scenario in {"comment", "same_poll_comment"}:
-            assert len(model.calls) == 1
+            assert len(model.calls) == 1 and work["reply_id"] == 2
         assert not search.calls
         assert "https://example.org/private" not in snapshot["request"]["input"]
         assert "UNREAD_IMAGE_ID" not in snapshot["request"]["input"]
@@ -144,6 +209,7 @@ async def test_unreadable_post_never_summarizes_an_old_post(tmp_path, scenario):
             (reply_id,),
         )
         assert json.loads(payload)["text"].startswith(UNREADABLE)
+        assert json.loads(payload)["reply_id"] == (3 if scenario == "comment" else reply_id)
         assert not model.calls and not search.calls
         (snapshot,) = await store.db.one(
             "SELECT snapshot FROM dialogue_runs WHERE message_id=?", (reply_id,)
@@ -165,8 +231,15 @@ async def test_unrelated_question_and_forward_do_not_share_search_material(tmp_p
         await private_ready(store)
         dialogue = DialogueEngine(store, FakeModel(ModelResult(text="Погода")))
         dialogue.research = research = ResearchEngine(store, ResearchModel(), Fetch())
-        question = "Какая сегодня погода в Казани?"
-        await store.ingest("999", "zarya_test", [event(2, text=question), rich_post(3)])
+        question = "Как сейчас с погодой в Казани?"
+        now = int(time.time())
+        post = event(
+            3,
+            text="Как изменились правила провоза багажа",
+            date=now,
+            forward_origin={"type": "channel"},
+        )
+        await store.ingest("999", "zarya_test", [event(2, text=question, date=now), post])
         assert await dialogue.claim("999") == {"skip": True}
         work = await research.claim("999")
         assert work["question"] == question
@@ -252,7 +325,7 @@ async def test_news_comment_edit_keeps_post_and_link_through_replies(tmp_path, e
             if edit_at == "queued_search":
                 assert await dialogue.claim("999") == {"skip": True}
             if edit_at == "after_delivery":
-                work = await answer(dialogue, research, 3)
+                work = await answer(dialogue, research, 2)
                 await deliver(store, work, 100)
             await store.ingest("999", "zarya_test", [edit])
         if edit_at == "after_delivery":
@@ -264,7 +337,7 @@ async def test_news_comment_edit_keeps_post_and_link_through_replies(tmp_path, e
                 "SELECT state,response FROM dialogue_runs WHERE id=?", (work["run_id"],)
             ) == ("cancelled", None)
         else:
-            work = await answer(dialogue, research, 3 if edit_at == "before_forward" else 2)
+            work = await answer(dialogue, research, 2)
             await deliver(store, work, 100)
         assert len(search.calls) == 1
         first = json.loads(search.calls[0]["input"])
@@ -348,7 +421,7 @@ async def test_followup_edit_recovers_post_without_using_erased_reply_text(tmp_p
         post = rich_post(3)
         post["message"]["rich_message"]["blocks"].append({"type": "paragraph", "text": article})
         await store.ingest("999", "zarya_test", [event(2, text="Проверь этот пост"), post])
-        initial = await answer(dialogue, research, 3)
+        initial = await answer(dialogue, research, 2)
         await deliver(store, initial, 100)
         await store.ingest("999", "zarya_test", [reply(4, 100)])
         followup = await answer(dialogue, research, 4)
@@ -389,7 +462,7 @@ async def test_recovering_edited_question_does_not_read_revised_album_sibling(tm
             "zarya_test",
             [event(2, text="Проверь этот пост"), album(3, "Первый элемент"), album(4, article)],
         )
-        initial = await answer(dialogue, research, 3)
+        initial = await answer(dialogue, research, 2)
         assert article in search.calls[-1]["input"]
         await deliver(store, initial, 100)
         question = event(5, message_id=2, text="Уточни дату в этом посте")

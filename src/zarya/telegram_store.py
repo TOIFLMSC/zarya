@@ -30,10 +30,14 @@ from zarya.models import Settings
 from zarya.participant_context import admit as admit_participant
 from zarya.photo_logic import PHOTO_WAIT, admit, link_job
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
-from zarya.research_intent import expects_post_comment, text_factcheck
+from zarya.research_intent import text_factcheck
 from zarya.research_logic import RESEARCH_WAIT
 from zarya.research_logic import revision as research_revision
-from zarya.source_material import FORWARD_QUESTION_WAIT, preceding_forward_question
+from zarya.source_material import (
+    FORWARD_QUESTION_WAIT,
+    preceding_forward_question,
+    waits_for_forward,
+)
 from zarya.source_material import accepted as accepted_source
 from zarya.source_material import valid as source_valid
 from zarya.telegram_content import forwarded
@@ -119,7 +123,7 @@ async def pending_edit(
     elif (
         payload.get("post_wait_until")
         and not explicit_reply(message)
-        and expects_post_comment(message)
+        and waits_for_forward(message, time.time())
     ):
         binding["post_wait_until"] = payload["post_wait_until"]
     if binding.get("post_source"):
@@ -743,8 +747,7 @@ class TelegramStore:
                     elif (
                         can_pair_post
                         and not explicit_reply(message)
-                        and isinstance(message.get("text"), str)
-                        and expects_post_comment(message)
+                        and waits_for_forward(message, now)
                     ):
                         payload["post_wait_until"] = now + FORWARD_QUESTION_WAIT
                     job_cursor = await conn.execute(

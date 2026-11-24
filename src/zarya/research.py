@@ -98,6 +98,7 @@ class ResearchEngine:
         selected: dict[str, Any] | None = None,
         *,
         text_only: bool = False,
+        bound_post: bool = False,
     ) -> tuple[bool, dict[str, Any] | None]:
         existing = await row(conn, "SELECT id,state FROM research_runs WHERE job_id=?", (job,))
         if existing:
@@ -118,17 +119,15 @@ class ResearchEngine:
         selected = (
             selected if selected is not None else await resolve(conn, bot, chat, grant, message)
         )
-        quote = await resolve_quote(conn, bot, chat, grant, message, selected)
-        news = (
-            await fresh_news_sources(conn, bot, chat, grant, message)
-            if not quote and not text_only
-            else None
-        )
-        market_question = (
-            await resolve_market_question(conn, bot, chat, grant, message, selected)
-            if not quote and not news
-            else None
-        )
+        quote = news = market_question = None
+        if not bound_post:
+            quote = await resolve_quote(conn, bot, chat, grant, message, selected)
+            if not quote and not text_only:
+                news = await fresh_news_sources(conn, bot, chat, grant, message)
+            if not quote and not news:
+                market_question = await resolve_market_question(
+                    conn, bot, chat, grant, message, selected
+                )
         has_post = not selected.get("via_assistant") or any(
             source["forwarded"] or source["attachments"] or source["urls"]
             for source in selected["messages"]
