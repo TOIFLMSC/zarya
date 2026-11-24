@@ -17,6 +17,8 @@ const states: Record<string, string> = {
 };
 const evidenceErrors: Record<string, string> = {
   invalid_evidence: "Не удалось проверить структуру или ссылки результата.",
+  max_output_tokens: "Модель исчерпала лимит выходных токенов до завершения проверки.",
+  incomplete_other: "Модель не закончила проверку.",
   invalid_evidence_json: "Модель вернула результат в неверном формате.",
   invalid_evidence_schema: "Структура результата не соответствует формату проверки.",
   invalid_evidence_unknown_source: "Результат ссылается на неподтверждённый источник.",

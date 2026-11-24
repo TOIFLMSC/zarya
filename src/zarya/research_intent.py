@@ -105,6 +105,7 @@ POST_NOUN = (
     r"(?:(?:репост|пост|текст)(?:а|у|ом|е|ы|ов|ам|ами|ах)?|"
     r"стать(?:я|и|ю|ей|ёй|е|ям|ями|ях)|содержани(?:е|я|ю|ем|и))"
 )
+NEWS_REFERENCE = re.compile(r"\b(?:эт(?:у|ой)|пересланн\w+)\s+новост(?:ь|и|ью)\b", re.I)
 POST_TRANSFORM = (
     r"(?:ужать|ужми\w*|сократ\w*|переска[зж]\w*|резюмир\w*|суммиру\w*|"
     r"перевед\w*|перепиш\w*|о\s+ч[её]м)"
@@ -207,7 +208,7 @@ def expects_post_comment(message: dict[str, Any]) -> bool:
         expects_forwarded_quote(message)
         or post_text_request(message)
         or post_opinion_request(message)
-        or FORWARDED_POST_REFERENCE.search(text)
+        or (FORWARDED_POST_REFERENCE.search(text) or NEWS_REFERENCE.search(text))
         and not _has_inline_text(message)
         or POST_DISCUSSION.search(text)
     )

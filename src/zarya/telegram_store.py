@@ -34,6 +34,7 @@ from zarya.research_intent import expects_post_comment, text_factcheck
 from zarya.research_logic import RESEARCH_WAIT
 from zarya.research_logic import revision as research_revision
 from zarya.source_material import FORWARD_QUESTION_WAIT, preceding_forward_question
+from zarya.source_material import accepted as accepted_source
 from zarya.source_material import valid as source_valid
 from zarya.telegram_content import forwarded
 
@@ -53,22 +54,26 @@ async def pending_edit(
     chat: str,
     grant: int,
     message: dict[str, Any],
-) -> tuple[int, str] | None:
+) -> tuple[int, str, dict[str, Any]] | None:
     """Carry an unanswered text request to its new revision, never retry a dialogue call."""
     if not message.get("text") or str(message["text"]).startswith("/"):
         return None
     previous = await row(
         conn,
-        "SELECT j.id,j.state,j.attempts,j.payload,e.payload,j.created_at FROM jobs j "
-        "JOIN events e ON e.id=j.event_id JOIN research_messages m ON m.event_id=e.id "
-        "AND m.bot_id=e.bot_id AND m.chat_id=e.chat_id "
-        "WHERE e.bot_id=? AND e.chat_id=? AND m.message_id=? AND j.access_version=? "
-        "AND j.kind='telegram' ORDER BY j.id DESC LIMIT 1",
+        "SELECT j.id,j.payload,q.payload,j.created_at,e.id FROM jobs j "
+        "JOIN events e ON e.id=j.event_id JOIN research_messages m "
+        "ON m.bot_id=e.bot_id AND m.chat_id=e.chat_id JOIN events q ON q.id=m.event_id "
+        "WHERE e.bot_id=? AND e.chat_id=? AND m.message_id=? "
+        "AND m.access_version=j.access_version AND j.access_version=? "
+        "AND j.kind='telegram' AND j.state='pending' AND j.attempts=0 AND (m.event_id=e.id "
+        "OR (m.event_id=json_extract(j.payload,'$.post_question.event_id') "
+        "AND m.message_id=json_extract(j.payload,'$.post_question.message_id'))) "
+        "ORDER BY j.id DESC LIMIT 1",
         (bot, chat, message["message_id"], grant),
     )
-    if not previous or previous[1] != "pending" or previous[2] != 0:
+    if not previous:
         return None
-    job_id, _, _, raw, update, created = previous
+    job_id, raw, update, created, root_event = previous
     payload = json.loads(raw)
     original = json.loads(update)
     original = original.get("message") or original.get("edited_message") or {}
@@ -100,7 +105,28 @@ async def pending_edit(
         "('private','name','mention','reply','continuation'))",
         (job_id, job_id, bot, chat, job_id, sender, thread or 0),
     )
-    return None if blocked else (job_id, trigger)
+    if blocked:
+        return None
+    binding: dict[str, Any] = {}
+    if payload.get("post_question"):
+        binding["post_source"] = {"message_id": payload["message_id"], "event_id": root_event}
+    elif payload.get("post_source"):
+        binding["post_source"] = payload["post_source"]
+    elif not chat.startswith("-") and (reply_id := explicit_reply(original).get("message_id")):
+        source = await accepted_source(conn, bot, chat, grant, reply_id)
+        if source and forwarded(source[1]):
+            binding["post_source"] = {"message_id": reply_id, "event_id": source[0]}
+    elif (
+        payload.get("post_wait_until")
+        and not explicit_reply(message)
+        and expects_post_comment(message)
+    ):
+        binding["post_wait_until"] = payload["post_wait_until"]
+    if binding.get("post_source"):
+        binding["post_rebound"] = True
+        if payload.get("post_members"):
+            binding["post_members"] = payload["post_members"]
+    return job_id, trigger, binding
 
 
 class TelegramStore:
@@ -664,6 +690,8 @@ class TelegramStore:
                         ),
                         "sender_id": sender_id,
                     }
+                    if replacement:
+                        payload.update(replacement[2])
                     if service_text is not None:
                         payload["service_text"] = service_text
                     if batch_member:

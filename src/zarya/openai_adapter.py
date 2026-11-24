@@ -157,20 +157,27 @@ class OpenAIAdapter:
             citations: list[dict[str, Any]] = []
             for item in getattr(response, "output", []):
                 if getattr(item, "type", "") == "web_search_call":
-                    action = item.action.model_dump(exclude_none=True)
-                    actions.append({**action, "id": item.id, "status": item.status})
+                    if item.action is not None:
+                        action = item.action.model_dump(exclude_none=True)
+                        actions.append({**action, "id": item.id, "status": item.status})
                 if getattr(item, "type", "") == "message":
                     for part in getattr(item, "content", []):
                         for annotation in getattr(part, "annotations", []):
                             if getattr(annotation, "type", "") == "url_citation":
                                 citations.append(annotation.model_dump(exclude_none=True))
+            incomplete = getattr(getattr(response, "incomplete_details", None), "reason", None)
+            error = None if completed else "incomplete_or_empty"
+            if response.status == "incomplete" and incomplete:
+                error = (
+                    "max_output_tokens" if incomplete == "max_output_tokens" else "incomplete_other"
+                )
             return ModelResult(
                 text=response.output_text,
                 state="completed" if completed else "invalid",
                 usage=response.usage.model_dump() if response.usage else None,
                 response_id=response.id,
                 request_id=response._request_id,
-                error=None if completed else "incomplete_or_empty",
+                error=error,
                 service_tier=response.service_tier,
                 model=response.model,
                 search_actions=actions if request.get("tools") else None,

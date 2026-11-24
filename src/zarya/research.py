@@ -57,6 +57,9 @@ from zarya.x_post import (
 )
 from zarya.youtube import video_id
 
+INITIAL_OUTPUT_TOKENS = 12_000
+FOLLOWUP_OUTPUT_TOKENS = 6_000
+
 
 def evidence_url(value: str) -> str:
     checked = check_target(value)
@@ -449,7 +452,7 @@ class ResearchEngine:
                     "tool_choice": "required",
                     "max_tool_calls": limit,
                     "include": ["web_search_call.action.sources"],
-                    "max_output_tokens": 3000,
+                    "max_output_tokens": INITIAL_OUTPUT_TOKENS,
                     "text": {"verbosity": "low"},
                     "store": False,
                     "service_tier": "default",
@@ -884,7 +887,7 @@ class ResearchEngine:
                     "tool_choice": "required",
                     "max_tool_calls": FOLLOWUP_TOOLS,
                     "include": ["web_search_call.action.sources"],
-                    "max_output_tokens": 1800,
+                    "max_output_tokens": FOLLOWUP_OUTPUT_TOKENS,
                     "text": {"verbosity": "low"},
                     "store": False,
                     "service_tier": "default",

@@ -160,7 +160,7 @@ async def test_blocked_article_multihop_primary_source_reaches_requested_reply(t
         await research.execute(work)
         request = model.generate.call_args.args[0]
         assert request["max_tool_calls"] == 4
-        assert request["model"] == work["model"] and request["max_output_tokens"] == 3000
+        assert request["model"] == work["model"] and request["max_output_tokens"] == 12_000
         assert "Не повторяй одинаковое неудачное открытие" in request["instructions"]
         assert "Цель исследования задаёт текущий question" in request["instructions"]
         assert "не трать поиск на прежнюю тему вместо нового вопроса" in request["instructions"]
@@ -352,6 +352,10 @@ async def test_mini_research_keeps_evidence_and_uses_a_detailed_answer(tmp_path,
         assert "source_lookup" not in saved["result"]
         assert len(saved["result"]["claims"]) == (1 if unknown else 2)
         assert len(saved["calls"]) == 2
+        assert [call.args[0]["max_output_tokens"] for call in model.generate.await_args_list] == [
+            12_000,
+            6_000,
+        ]
         response = await run_one(dialogue)
         assert response["snapshot"]["answer_mode"] == "detailed"
         assert response["request"]["text"]["verbosity"] == "medium"

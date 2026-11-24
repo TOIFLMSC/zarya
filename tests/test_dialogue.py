@@ -520,6 +520,38 @@ async def test_real_adapter_request_contract_offline():
         await adapter.close()
 
 
+@pytest.mark.parametrize(
+    ("reason", "error"),
+    [("max_output_tokens", "max_output_tokens"), ("content_filter", "incomplete_other")],
+)
+async def test_adapter_preserves_incomplete_reason_with_unfinished_search(reason, error):
+    from types import SimpleNamespace
+
+    adapter = OpenAIAdapter("test-local-key")
+
+    async def create(**request):
+        return SimpleNamespace(
+            status="incomplete",
+            output_text="Неполный текст",
+            usage=None,
+            id="test-response",
+            _request_id="test-request",
+            service_tier="default",
+            model="gpt-6-luna",
+            incomplete_details=SimpleNamespace(reason=reason),
+            output=[SimpleNamespace(type="web_search_call", action=None)],
+        )
+
+    adapter.client.responses.create = create
+    try:
+        result = await adapter.generate({"tools": [{"type": "web_search"}]})
+        assert result.state == "invalid"
+        assert result.error == error
+        assert result.search_actions == []
+    finally:
+        await adapter.close()
+
+
 async def test_disable_during_generation_and_pending_delivery(tmp_path):
     async with store_at(tmp_path) as s:
         await private_ready(s)
