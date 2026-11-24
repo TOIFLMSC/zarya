@@ -111,7 +111,9 @@ async def test_fast_questions_are_both_current_and_target_their_own_replies(tmp_
                 text(3, "Заря, какого цвета небо?"),
             ],
         )
-        model = FakeModel(actions((2, [2], "Четыре"), (3, [3], "Голубое")))
+        first_answer = "Два плюс два — четыре."
+        second_answer = "Обычно голубое — оттенок зависит от погоды."
+        model = FakeModel(actions((2, [2], first_answer), (3, [3], second_answer)))
         dialogue = DialogueEngine(store, model)
         await drain(dialogue)
         assert not model.calls
@@ -126,10 +128,10 @@ async def test_fast_questions_are_both_current_and_target_their_own_replies(tmp_
         assert "current_message" not in body
         assert not ({2, 3} & {m["message_id"] for m in body["recent_chat"]})
         first = await delivery(store)
-        assert (first["reply_id"], first["text"]) == (2, "Четыре")
+        assert (first["reply_id"], first["text"]) == (2, first_answer)
         await store.delivery_result(first["id"], "sent", message_id=4)
         second = await delivery(store)
-        assert (second["reply_id"], second["text"]) == (3, "Голубое")
+        assert (second["reply_id"], second["text"]) == (3, second_answer)
         await store.delivery_result(second["id"], "sent", message_id=5)
         async with store.db.transaction() as conn:
             recent, _ = await assistants(conn, "999", "-100", 2, [{"message_id": 3}])

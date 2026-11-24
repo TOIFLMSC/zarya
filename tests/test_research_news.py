@@ -21,22 +21,18 @@ PRIVATE_NOTE = "Моя личная пометка ОЛЬХА-752"
 
 
 @pytest.mark.parametrize(
-    ("draft", "kept", "followup"),
+    ("draft", "followup"),
     [
-        ("Его восстановили 23 ноября", False, False),
-        ("Его восстановили 23.11.2026. [RESEARCH_DATES]", False, False),
-        ("Его восстановили сегодня. [RESEARCH_DATES]", False, False),
-        ("Его восстановили 23-го. Да, вопрос с датами важен.", True, True),
-        ("Да, вопрос с датами важен. [RESEARCH_DATES]", True, False),
+        ("Совет восстановил его 22 ноября. Компания сообщила об этом 23 ноября.", False),
+        ("Дата решения — 22 ноября 2026 года. Объявили о нём 23 ноября 2026 года.", True),
+        ("Его восстановили 23 ноября.", False),
     ],
 )
-async def test_news_reply_keeps_event_and_publication_dates_distinct(
-    tmp_path, draft, kept, followup
-):
+async def test_news_reply_supplies_dates_without_rewriting_model_prose(tmp_path, draft, followup):
     record = "https://example.org/board/decision"
     announcement = "https://example.com/news/announcement"
     async with store_at(tmp_path) as store:
-        dialogue, research, model, _ = await start_post(store, PUBLIC_POST, "metadata_only")
+        dialogue, research, model, _ = await start_post(store, PUBLIC_ARTICLE, "partial_text")
         first_pass = ModelResult(
             text=json.dumps({"summary": "Ищу объявление", "claims": [], "needs_followup": True}),
             search_actions=[
@@ -92,16 +88,31 @@ async def test_news_reply_keeps_event_and_publication_dates_distinct(
             "SELECT payload FROM outbox WHERE job_id=? ORDER BY part_index", (work["job_id"],)
         )
         sent = "\n".join(json.loads(payload)["text"] for (payload,) in parts)
-        assert "22 ноября 2026" in sent and "23 ноября 2026" in sent
-        assert "Его восстановили" not in sent
-        assert "[RESEARCH_DATES]" not in sent and "https://" not in sent
-        assert ("Да, вопрос с датами важен." in sent) is kept
-        assert "Вставь [RESEARCH_DATES]" in work["snapshot"]["request"]["instructions"]
+        assert sent == draft
+        request = work["snapshot"]["request"]
+        assert "[RESEARCH_DATES]" not in request["instructions"]
+        assert "dates.event.date" in request["instructions"]
+        assert "dates.publication.date" in request["instructions"]
+        assert "когда произошло событие" in request["instructions"]
+        assert "Объявленный срок описывай как план" in request["instructions"]
+        assert "скажи, что дата события неизвестна" in request["instructions"]
+        assert "привязывай каждую названную дату к её source_id" in request["instructions"]
         context = work["snapshot"]["research"]
-        with_links = research_answer_text("[RESEARCH_DATES]", context, show_links=True)
-        assert record in with_links and announcement in with_links
         claim = context["analysis"]["claims"][0]
-        assert claim["dates"]["event"]["source_id"] != claim["dates"]["publication"]["source_id"]
+        dates = claim["dates"]
+        assert json.loads(request["input"])["research"]["analysis"]["claims"][0]["dates"] == dates
+        with_links = research_answer_text(
+            f"Совет восстановил его 22 ноября [S{dates['event']['source_id']}]. "
+            f"Компания сообщила об этом 23 ноября [S{dates['publication']['source_id']}].",
+            context,
+            show_links=True,
+        )
+        assert record in with_links and announcement in with_links
+        assert dates["event"]["date"] == "2026-11-22"
+        assert dates["publication"]["date"] == "2026-11-23"
+        source_urls = {source["id"]: source["url"] for source in context["sources"]}
+        assert source_urls[dates["event"]["source_id"]] == record
+        assert source_urls[dates["publication"]["source_id"]] == announcement
         assert model.generate.await_count == (2 if followup else 1)
 
 

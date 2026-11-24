@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 from zarya import behavior, context_budget, message_batches, message_links, timings, verbatim_quote
 from zarya.avatar_logic import AVATAR_WAIT
 from zarya.avatar_logic import valid as avatar_valid
-from zarya.chat_style import chat_dashes
 from zarya.dialogue_logic import (
     TOPIC_CONTEXT_POLICY,
     answer_mode,
@@ -1021,7 +1020,7 @@ class DialogueEngine:
             plan = work.get("behavior_plan")
             if allowed and result.state == "completed":
                 if not work.get("batch_answers"):
-                    result.text = chat_dashes(display_text(result.text, work["snapshot"]))
+                    result.text = display_text(result.text, work["snapshot"])
                 if not result.text.strip() and (not plan or plan.action == "text"):
                     state, result.error = "invalid", "empty_after_link_filter"
                     allowed = False
@@ -1398,7 +1397,7 @@ class DialogueEngine:
             if work["snapshot"].get("current_messages") and result.state == "completed":
                 try:
                     parts = [
-                        (mid, covers, chat_dashes(display_text(text, work["snapshot"])))
+                        (mid, covers, display_text(text, work["snapshot"]))
                         for mid, covers, text in message_batches.answers(
                             result.text, work["snapshot"]["current_messages"]
                         )
