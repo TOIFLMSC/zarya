@@ -190,7 +190,7 @@ async def revised_post_question(
     grant: int,
     reply_id: int,
     message: dict[str, Any],
-) -> tuple[dict[str, int], dict[str, int]] | None:
+) -> tuple[dict[str, int], dict[str, int], list[dict[str, int]]] | None:
     """Recover the post reference alone after an edit erased a sent answer."""
     if chat.startswith("-"):
         return None
@@ -229,7 +229,9 @@ async def revised_post_question(
     current = await accepted(conn, bot, chat, grant, question["message_id"])
     if not current or current[0] == question["event_id"]:
         return None
-    return post, {"message_id": question["message_id"], "event_id": current[0]}
+    return post, {"message_id": question["message_id"], "event_id": current[0]}, (
+        payload.get("post_members") or []
+    )
 
 
 async def resolve(
@@ -240,6 +242,7 @@ async def resolve(
     message: dict[str, Any],
     *,
     post_source: dict[str, int] | None = None,
+    post_members: list[dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Walk only actual sent outbox messages and accepted current user revisions."""
     result: dict[str, Any] = {
@@ -291,18 +294,34 @@ async def resolve(
             if not post_source and not forwarded(original) and not chat.startswith("-"):
                 binding = await one(
                     conn,
-                    "SELECT json_extract(payload,'$.post_source') FROM jobs "
+                    "SELECT json_extract(payload,'$.post_source'),"
+                    "json_extract(payload,'$.post_members') FROM jobs "
                     "WHERE event_id=? AND kind='telegram' AND access_version=?",
                     (event, grant),
                 )
                 if binding and binding[0]:
                     post_source = json.loads(binding[0])
+                    post_members = json.loads(binding[1]) if binding[1] else None
                     target_id = post_source["message_id"]
                     continue
             if material or not reply_id:
                 result["messages"].append(describe(original))
                 album = original.get("media_group_id")
-                if album:
+                if post_members:
+                    for ref in post_members:
+                        if ref["message_id"] == target_id:
+                            continue
+                        other = await accepted(conn, bot, chat, grant, ref["message_id"])
+                        if not other or other[0] != ref["event_id"]:
+                            result["messages"] = []
+                            result["unavailable"] = True
+                            return result
+                        result["manifest"].append(ref)
+                        result["messages"].append(describe(other[1]))
+                elif album and result.get("restored_post"):
+                    # The original album revisions are unknown in older jobs.
+                    break
+                elif album:
                     async with conn.execute(
                         "SELECT m.message_id FROM research_messages m "
                         "JOIN events e ON e.id=m.event_id "
@@ -338,8 +357,9 @@ async def resolve(
         if not sent:
             revised = await revised_post_question(conn, bot, chat, grant, target_id, message)
             if revised:
-                post_source, question = revised
+                post_source, question, post_members = revised
                 result["via_assistant"] = True
+                result["restored_post"] = True
                 result["manifest"].append(question)
                 target_id = post_source["message_id"]
                 continue

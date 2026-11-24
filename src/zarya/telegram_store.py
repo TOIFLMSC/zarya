@@ -122,6 +122,10 @@ async def pending_edit(
         and expects_post_comment(message)
     ):
         binding["post_wait_until"] = payload["post_wait_until"]
+    if binding.get("post_source"):
+        binding["post_rebound"] = True
+        if payload.get("post_members"):
+            binding["post_members"] = payload["post_members"]
     return job_id, trigger, binding
 
 

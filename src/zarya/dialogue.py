@@ -236,9 +236,15 @@ class DialogueEngine:
             ):
                 # Own spoken reply is a question about its reply-chain, not a new post.
                 material_message = {key: value for key, value in message.items() if key != "voice"}
-            post_source = payload.get("post_source")
+            post_source = payload.get("post_source") if payload.get("post_rebound") else None
             material = await resolve(
-                conn, bot_id, chat_id, access_version, material_message, post_source=post_source
+                conn,
+                bot_id,
+                chat_id,
+                access_version,
+                material_message,
+                post_source=post_source,
+                post_members=payload.get("post_members") if post_source else None,
             )
             paired = payload.get("post_question")
             if paired:
@@ -339,6 +345,15 @@ class DialogueEngine:
                 else None
             )
             research_context = None
+            if payload["scope"] == "private" and material["messages"]:
+                first = material["messages"][0]
+                if first["forwarded"]:
+                    selected_ids = {item["message_id"] for item in material["messages"]}
+                    refs = [
+                        ref for ref in material["manifest"] if ref["message_id"] in selected_ids
+                    ]
+                    payload["post_source"] = refs[0]
+                    payload["post_members"] = refs
             if research_engine and text_first and not find_message_link:
                 waiting, research_context = await research_engine.prepare(
                     conn,
@@ -355,17 +370,12 @@ class DialogueEngine:
                     text_only=True,
                 )
                 if waiting:
+                    if payload.get("post_members"):
+                        await conn.execute(
+                            "UPDATE jobs SET payload=? WHERE id=?", (json.dumps(payload), job_id)
+                        )
                     return {"skip": True}
             payload.pop("post_text_first", None)
-            if payload["scope"] == "private" and forwarded_post and not (paired or post_source):
-                parent = reply.get("message_id")
-                if any(
-                    item["message_id"] == parent and item["forwarded"]
-                    for item in material["messages"]
-                ):
-                    payload["post_source"] = next(
-                        ref for ref in material["manifest"] if ref["message_id"] == parent
-                    )
             payload["source_message_ids"] = target_ids
             await conn.execute(
                 "UPDATE jobs SET payload=? WHERE id=?", (json.dumps(payload), job_id)
@@ -590,7 +600,11 @@ class DialogueEngine:
                     chat_id,
                     access_version,
                     [sender_id] + [str(item["sender_id"]) for item in context],
-                    query=question + " " + str(reply.get("text", ""))[:4000],
+                    query=(
+                        question
+                        if post_source or material.get("restored_post")
+                        else question + " " + str(reply.get("text", ""))[:4000]
+                    ),
                     current_query=question,
                     recent=context,
                     event_id=source[0],

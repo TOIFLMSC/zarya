@@ -11,6 +11,7 @@ from test_source_material import answer, deliver
 from test_telegram import event, store_at
 
 from zarya.dialogue import DialogueEngine
+from zarya.memory import MemoryEngine
 from zarya.openai_adapter import ModelResult
 from zarya.research import ResearchEngine
 from zarya.research_intent import expects_post_comment, local_post_request, needs_forwarded_text
@@ -319,6 +320,95 @@ async def test_news_comment_edit_keeps_post_and_link_through_replies(tmp_path, e
             await answer(dialogue, research, 8)
             hosted = search.calls[-1]["input"]
             assert article not in hosted and "https://example.org/updated" not in hosted
+
+
+async def test_followup_edit_recovers_post_without_using_erased_reply_text(tmp_path):
+    article = "https://example.org/post"
+    question = "Поищи по ссылке и проверь"
+    erased = "Текст уже аннулированного ответа"
+
+    def reply(number, parent, **extra):
+        return event(
+            number,
+            text=question,
+            reply_to_message={"message_id": parent, "from": {"id": 999, "is_bot": True}, **extra},
+        )
+
+    async with store_at(tmp_path) as store:
+        await private_ready(store)
+        search = ResearchModel()
+        dialogue = DialogueEngine(store, FakeModel(ModelResult(text="Ответ по посту")))
+        dialogue.research = research = ResearchEngine(store, search, Fetch())
+        post = rich_post(3)
+        post["message"]["rich_message"]["blocks"].append({"type": "paragraph", "text": article})
+        await store.ingest("999", "zarya_test", [event(2, text="Проверь этот пост"), post])
+        initial = await answer(dialogue, research, 3)
+        await deliver(store, initial, 100)
+        await store.ingest("999", "zarya_test", [reply(4, 100)])
+        followup = await answer(dialogue, research, 4)
+        await deliver(store, followup, 101)
+
+        edit = event(5, message_id=4, text="Проверь точную дату в источнике")
+        edit["edited_message"] = edit.pop("message")
+        await store.ingest("999", "zarya_test", [edit, reply(6, 101, text=erased)])
+        memory = MemoryEngine(store, FakeModel(), tmp_path)
+        memory.context = AsyncMock(wraps=memory.context)
+        dialogue.memory = memory
+        continued = await answer(dialogue, research, 6)
+        assert article in search.calls[-1]["input"]
+        assert erased not in continued["snapshot"]["request"]["input"]
+        assert erased not in memory.context.await_args.kwargs["query"]
+
+
+async def test_recovering_edited_question_does_not_read_revised_album_sibling(tmp_path):
+    article = "https://example.org/album-original"
+    updated = "https://example.org/album-edited"
+
+    def album(number, text, **extra):
+        return event(
+            number,
+            text=text,
+            forward_origin=rich_post(number)["message"]["forward_origin"],
+            media_group_id="album",
+            **extra,
+        )
+
+    async with store_at(tmp_path) as store:
+        await private_ready(store)
+        search = ResearchModel()
+        dialogue = DialogueEngine(store, FakeModel(ModelResult(text="Ответ по альбому")))
+        dialogue.research = research = ResearchEngine(store, search, Fetch())
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [event(2, text="Проверь этот пост"), album(3, "Первый элемент"), album(4, article)],
+        )
+        initial = await answer(dialogue, research, 3)
+        assert article in search.calls[-1]["input"]
+        await deliver(store, initial, 100)
+        question = event(5, message_id=2, text="Уточни дату в этом посте")
+        sibling = album(6, updated, message_id=4)
+        for edit in (question, sibling):
+            edit["edited_message"] = edit.pop("message")
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                question,
+                sibling,
+                event(
+                    7,
+                    text="Поищи по ссылке и проверь",
+                    reply_to_message={"message_id": 100, "from": {"id": 999, "is_bot": True}},
+                ),
+            ],
+        )
+        initial_attempts = len(search.calls)
+        await answer(dialogue, research, 7)
+        assert all(
+            updated not in call["input"] and article not in call["input"]
+            for call in search.calls[initial_attempts:]
+        )
 
 
 async def test_visible_rich_post_link_reaches_the_fetcher_without_hidden_targets(tmp_path):
