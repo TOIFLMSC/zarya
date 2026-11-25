@@ -124,6 +124,11 @@ POST_DISCUSSION = re.compile(
     r"почему\s+автор|как\s+это\s+понять)\b",
     re.I,
 )
+POST_COMMENT = re.compile(
+    r"\b(?:да(?:й|вай)(?:\s+мне)?\s+комментар(?:ий|ии)|прокомментируй(?:те)?)\b"
+    r"(?=\s*(?:[,.!?]|$|@))",
+    re.I,
+)
 POST_EXTERNAL = re.compile(
     r"\b(?:проверь\w*|поищи\w*|загугл\w*|найди\w*|сверь\w*|СМИ|"
     r"в\s+интернет\w*|официальн\w+\s+источник\w*|"
@@ -208,6 +213,7 @@ def expects_post_comment(message: dict[str, Any]) -> bool:
         expects_forwarded_quote(message)
         or post_text_request(message)
         or post_opinion_request(message)
+        or POST_COMMENT.search(text)
         or (FORWARDED_POST_REFERENCE.search(text) or NEWS_REFERENCE.search(text))
         and not _has_inline_text(message)
         or POST_DISCUSSION.search(text)
@@ -221,6 +227,7 @@ def local_post_request(message: dict[str, Any]) -> bool:
             post_text_request(message)
             or post_opinion_request(message)
             or POST_DISCUSSION.search(text)
+            or POST_COMMENT.search(text)
         )
         and not POST_EXTERNAL.search(text)
     )

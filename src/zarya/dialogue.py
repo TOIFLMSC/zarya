@@ -345,7 +345,7 @@ class DialogueEngine:
                 else None
             )
             research_context = None
-            if payload["scope"] == "private" and material["messages"]:
+            if (payload["scope"] == "private" or bound_post) and material["messages"]:
                 first = material["messages"][0]
                 if first["forwarded"]:
                     selected_ids = {item["message_id"] for item in material["messages"]}
@@ -523,7 +523,7 @@ class DialogueEngine:
                 )
             )
             incoming = {
-                "message_id": payload["message_id"],
+                "message_id": reply_id,
                 "thread_id": thread_id,
                 "sender_id": sender_id,
                 "name": str(message.get("from", {}).get("first_name", "Участник"))[:80],

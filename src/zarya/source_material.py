@@ -15,6 +15,7 @@ from zarya.telegram_content import content_text, extract_content, forwarded
 
 FORWARD_QUESTION_WAIT = 2.0
 FORWARD_QUESTION_FRESH = 10.0
+GROUP_FORWARD_TRIGGERS = {"name", "mention"}
 QUESTION_WORDS = frozenset(
     "будет будут вроде вопрос где если еще его зачем заря как какая какие каким какую какое какой "
     "когда кого кому кто куда мне можешь можно нужно оно откуда почему правда реально сейчас "
@@ -62,12 +63,22 @@ async def preceding_forward_question(
     grant: int,
     message: dict[str, Any],
     now: float,
-) -> tuple[int, dict[str, int]] | None:
-    """Bind only the immediately preceding, still-waiting private comment."""
+) -> tuple[int, dict[str, int], str, bool] | None:
+    """Bind only the immediately preceding, still-waiting question."""
+    if not forwarded(message) or type(message.get("date")) is not int:
+        return None
+    group = chat.startswith("-")
+    sender_info = message.get("from") or {}
+    post_text = content_text(message)
     if not (
-        forwarded(message)
-        and type(message.get("date")) is int
-        and (usable_post_text(content_text(message)) or "rich_message" in message)
+        usable_post_text(post_text)
+        or "rich_message" in message
+        or (group and visual_sizes(message))
+    ):
+        return None
+    if group and (
+        not sender_info.get("id") or sender_info.get("is_bot") or message.get("sender_chat")
+        or explicit_reply(message)
     ):
         return None
     previous = await one(
@@ -76,7 +87,7 @@ async def preceding_forward_question(
         "json_extract(j.payload,'$.post_wait_until'),COALESCE("
         "json_extract(e.payload,'$.message.date'),"
         "json_extract(e.payload,'$.edited_message.date')), "
-        "e.payload "
+        "e.payload,json_extract(j.payload,'$.trigger') "
         "FROM recent_messages m LEFT JOIN jobs j ON j.event_id=m.event_id "
         "AND j.kind='telegram' AND j.access_version=? AND j.state='pending' AND j.attempts=0 "
         "AND NOT COALESCE(json_extract(j.payload,'$.service_reply'),0) "
@@ -88,28 +99,50 @@ async def preceding_forward_question(
     )
     if not previous:
         return None
-    mid, event, sender, job, ready_at, date, raw = previous
+    mid, event, sender, job, ready_at, date, raw, trigger = previous
     if (
-        sender != str((message.get("from") or {}).get("id", ""))
+        sender != str(sender_info.get("id", ""))
         or job is None
         or not ready_at
-        or now > ready_at
+        or now >= ready_at
         or type(date) is not int
         or not 0 <= message["date"] - date <= FORWARD_QUESTION_WAIT
     ):
         return None
     update = json.loads(raw)
     question = update.get("message") or update["edited_message"]
+    batch = None
+    if group:
+        if (
+            trigger not in GROUP_FORWARD_TRIGGERS
+            or message["message_id"] != mid + 1
+            or explicit_reply(question)
+            or not waits_for_forward(question, now)
+        ):
+            return None
+        current = await accepted(conn, bot, chat, grant, mid)
+        if not current or current[0] != event:
+            return None
+        batch = await one(
+            conn,
+            "SELECT b.sealed=0 AND b.ready_at>? "
+            "AND (SELECT COUNT(*) FROM text_batch_members WHERE job_id=b.job_id)=1 "
+            "AND EXISTS (SELECT 1 FROM text_batch_members WHERE job_id=b.job_id "
+            "AND message_id=? AND event_id=?) FROM text_batches b WHERE b.job_id=?",
+            (now, mid, event, job),
+        )
+        if batch and not batch[0]:
+            return None
     if not expects_post_comment(question) and (
         message["message_id"] != mid + 1
-        or not question_terms(speaker_text(question)) & question_terms(content_text(message))
+        or not question_terms(speaker_text(question)) & question_terms(post_text)
     ):
         # The next forward is independent. Let the earlier question run in its original order.
         await conn.execute(
             "UPDATE jobs SET payload=json_remove(payload,'$.post_wait_until') WHERE id=?", (job,)
         )
         return None
-    return job, {"message_id": mid, "event_id": event}
+    return job, {"message_id": mid, "event_id": event}, trigger, batch is not None
 
 
 def visual_sizes(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -235,8 +268,6 @@ async def revised_post_question(
     message: dict[str, Any],
 ) -> tuple[dict[str, int], dict[str, int], list[dict[str, int]]] | None:
     """Recover the post reference alone after an edit erased a sent answer."""
-    if chat.startswith("-"):
-        return None
     sent = await one(
         conn,
         "SELECT j.event_id,j.payload FROM outbox o "
@@ -260,6 +291,8 @@ async def revised_post_question(
         return None
     event, raw = sent
     payload = json.loads(raw)
+    if chat.startswith("-") and not (payload.get("post_question") or payload.get("post_rebound")):
+        return None
     question = payload.get("post_question") or {
         "message_id": payload.get("message_id"),
         "event_id": event,
@@ -334,13 +367,16 @@ async def resolve(
                     for k in ("photo", "video", "animation", "voice", "video_note", "sticker")
                 )
             )
-            if not post_source and not forwarded(original) and not chat.startswith("-"):
+            if not post_source and not forwarded(original) and (
+                not chat.startswith("-") or result["via_assistant"]
+            ):
                 binding = await one(
                     conn,
                     "SELECT json_extract(payload,'$.post_source'),"
                     "json_extract(payload,'$.post_members') FROM jobs "
-                    "WHERE event_id=? AND kind='telegram' AND access_version=?",
-                    (event, grant),
+                    "WHERE event_id=? AND kind='telegram' AND access_version=? "
+                    "AND (? OR json_extract(payload,'$.post_rebound')=1)",
+                    (event, grant, not chat.startswith("-")),
                 )
                 if binding and binding[0]:
                     post_source = json.loads(binding[0])

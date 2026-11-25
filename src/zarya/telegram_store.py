@@ -35,6 +35,7 @@ from zarya.research_logic import RESEARCH_WAIT
 from zarya.research_logic import revision as research_revision
 from zarya.source_material import (
     FORWARD_QUESTION_WAIT,
+    GROUP_FORWARD_TRIGGERS,
     preceding_forward_question,
     waits_for_forward,
 )
@@ -550,8 +551,7 @@ class TelegramStore:
                     album = str(message.get("media_group_id") or "")
                     now = time.time()
                     can_pair_post = (
-                        scope == "private"
-                        and not edited
+                        not edited
                         and not private_start
                         and service_text is None
                         and settings.dialogue_enabled
@@ -722,7 +722,15 @@ class TelegramStore:
                         if not new_photo_job:
                             continue
                     if (
+                        can_pair_post
+                        and (scope == "private" or trigger in GROUP_FORWARD_TRIGGERS)
+                        and not explicit_reply(message)
+                        and waits_for_forward(message, now)
+                    ):
+                        payload["post_wait_until"] = now + FORWARD_QUESTION_WAIT
+                    if (
                         not batch
+                        and not previous_question
                         and not edited
                         and scope == "group"
                         and access[3]
@@ -735,21 +743,22 @@ class TelegramStore:
                     ):
                         continue
                     if previous_question:
-                        question_job, payload["post_question"] = previous_question
+                        question_job, question, question_trigger, batched = previous_question
+                        payload["post_question"] = question
+                        if scope == "group":
+                            payload["trigger"] = question_trigger
+                            payload["keep_addressed"] = True
                         if album:
                             payload["post_album"] = album
                         payload["post_text_first"] = True
-                        await conn.execute(
-                            "UPDATE jobs SET state='cancelled' WHERE id=?", (question_job,)
-                        )
+                        if batched:
+                            await message_batches.remove(conn, question_job, question["message_id"])
+                        else:
+                            await conn.execute(
+                                "UPDATE jobs SET state='cancelled' WHERE id=?", (question_job,)
+                            )
                     elif explicit_reply(message) and text_factcheck(message):
                         payload["post_text_first"] = True
-                    elif (
-                        can_pair_post
-                        and not explicit_reply(message)
-                        and waits_for_forward(message, now)
-                    ):
-                        payload["post_wait_until"] = now + FORWARD_QUESTION_WAIT
                     job_cursor = await conn.execute(
                         "INSERT INTO "
                         "jobs(kind,event_id,state,payload,created_at,access_version) "
