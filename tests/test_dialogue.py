@@ -577,6 +577,32 @@ async def test_edit_waiting_group_reply_keeps_closed_continuation(tmp_path):
         ) == ("ambient", "skipped")
 
 
+async def test_edit_waiting_group_reply_does_not_supersede_later_question(tmp_path):
+    async with store_at(tmp_path) as store:
+        await store.ingest("999", "zarya_test", [event(1, -100)])
+        await approve(store, "group", "-100")
+        settings = await store.db.settings()
+        await store.db.update_settings(
+            settings.version, settings.settings.model_copy(update={"memory_enabled": False})
+        )
+        target = {"message_id": 1, "from": {"id": 999, "is_bot": True}}
+        edited = event(4, -100, "Первый вопрос без опечатки", reply_to_message=target)["message"]
+        edited["message_id"] = 2
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(2, -100, "Первый впрос", reply_to_message=target),
+                event(3, -100, "Заря, сколько будет два плюс два?"),
+                {"update_id": 4, "edited_message": edited},
+            ],
+        )
+        await drain(DialogueEngine(store, FakeModel(ModelResult(text="Ответ."))))
+        assert await store.db.all(
+            "SELECT message_id,trigger,state FROM dialogue_runs ORDER BY message_id"
+        ) == [(2, "reply", "completed"), (3, "name", "completed")]
+
+
 async def test_replay_does_not_mutate_working_memory_jobs_outbox(tmp_path):
     async with store_at(tmp_path) as s:
         await private_ready(s)

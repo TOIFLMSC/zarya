@@ -10,7 +10,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from zarya.avatar_logic import AVATAR_WORD, FOLLOWUP, previous, purge, valid
-from zarya.dialogue_logic import SUPERSEDABLE_JOB, explicit_reply
+from zarya.dialogue_logic import NEWER_JOB, SUPERSEDABLE_JOB, explicit_reply
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
 from zarya.photos import MAX_BATCH_BYTES, image_part, normalize
@@ -179,7 +179,7 @@ class AvatarEngine:
         newer = await row(
             conn,
             "SELECT 1 FROM avatar_runs a JOIN jobs j ON j.id=a.job_id "
-            "JOIN jobs n ON n.id>j.id JOIN events e ON e.id=n.event_id "
+            f"JOIN jobs n ON {NEWER_JOB} JOIN events e ON e.id=n.event_id "
             "WHERE a.id=? AND e.bot_id=a.bot_id AND e.chat_id=a.chat_id "
             f"AND {SUPERSEDABLE_JOB} "
             "AND json_extract(n.payload,'$.sender_id')=json_extract(j.payload,'$.sender_id') "

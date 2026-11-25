@@ -6,7 +6,7 @@ from typing import Any
 
 import aiosqlite
 
-from zarya.dialogue_logic import SUPERSEDABLE_JOB
+from zarya.dialogue_logic import NEWER_JOB, SUPERSEDABLE_JOB
 from zarya.models import Settings
 from zarya.source_material import valid as source_valid
 
@@ -59,13 +59,13 @@ async def current_job(conn: aiosqlite.Connection, run: int, job: int | None = No
         "AND j.state='pending' AND e.payload!='{}' "
         "AND (? IS NULL OR j.id=?) "
         "AND CAST(strftime('%s',j.created_at) AS REAL)>=? "
-        "AND NOT EXISTS (SELECT 1 FROM jobs newer JOIN events ne ON ne.id=newer.event_id "
-        "WHERE ne.bot_id=e.bot_id AND ne.chat_id=e.chat_id AND newer.id>j.id "
-        f"AND {SUPERSEDABLE_JOB} "
-        "AND json_extract(newer.payload,'$.sender_id')=json_extract(j.payload,'$.sender_id') "
-        "AND COALESCE(json_extract(newer.payload,'$.thread_id'),0)="
+        "AND NOT EXISTS (SELECT 1 FROM jobs n JOIN events ne ON ne.id=n.event_id "
+        "WHERE ne.bot_id=e.bot_id AND ne.chat_id=e.chat_id "
+        f"AND {NEWER_JOB} AND {SUPERSEDABLE_JOB} "
+        "AND json_extract(n.payload,'$.sender_id')=json_extract(j.payload,'$.sender_id') "
+        "AND COALESCE(json_extract(n.payload,'$.thread_id'),0)="
         "COALESCE(json_extract(j.payload,'$.thread_id'),0) "
-        "AND json_extract(newer.payload,'$.trigger') IN "
+        "AND json_extract(n.payload,'$.trigger') IN "
         "('private','name','mention','reply','continuation')) ORDER BY j.id LIMIT 1",
         (run, job, job, time.time() - 600),
     ) as c:

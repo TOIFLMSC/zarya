@@ -15,6 +15,7 @@ from zarya.avatar_logic import valid as avatar_valid
 from zarya.configuration import prompts_at
 from zarya.database import ConflictError, Database
 from zarya.dialogue_logic import (
+    NEWER_JOB,
     SUPERSEDABLE_JOB,
     direct_trigger,
     explicit_reply,
@@ -109,7 +110,7 @@ async def pending_edit(
         conn,
         "SELECT 1 WHERE EXISTS (SELECT 1 FROM dialogue_runs WHERE job_id=?) "
         "OR EXISTS (SELECT 1 FROM outbox WHERE job_id=?) "
-        "OR EXISTS (SELECT 1 FROM jobs j JOIN jobs n ON n.id>j.id "
+        f"OR EXISTS (SELECT 1 FROM jobs j JOIN jobs n ON {NEWER_JOB} "
         "JOIN events e ON e.id=n.event_id "
         f"WHERE e.bot_id=? AND e.chat_id=? AND j.id=? AND {SUPERSEDABLE_JOB} "
         "AND json_extract(n.payload,'$.sender_id')=? "
@@ -123,6 +124,13 @@ async def pending_edit(
     binding: dict[str, Any] = {}
     if payload.get("no_continuation"):
         binding["no_continuation"] = True
+    if (
+        trigger == "reply"
+        and payload.get("scope") == "group"
+        and thread is None
+        and not original.get("chat", {}).get("is_forum")
+    ):
+        binding["original_job_id"] = payload.get("original_job_id", job_id)
     if payload.get("post_question"):
         binding["post_source"] = {"message_id": payload["message_id"], "event_id": root_event}
     elif payload.get("post_source"):
@@ -649,7 +657,8 @@ class TelegramStore:
                             "AND j.kind='telegram' AND j.event_id<? AND j.access_version=? "
                             "AND json_extract(j.payload,'$.sender_id')=? "
                             "AND json_extract(j.payload,'$.thread_id') IS NULL "
-                            "AND json_extract(j.payload,'$.trigger') IN ('name','mention','reply') "
+                            "AND json_extract(j.payload,'$.trigger') "
+                            "IN ('name','mention','reply','continuation') "
                             "AND EXISTS (SELECT 1 FROM events e WHERE e.id=j.event_id "
                             "AND e.bot_id=? AND e.chat_id=?)",
                             (bot_id, subject, event_id, access[1], sender_id, bot_id, subject),
@@ -1230,14 +1239,14 @@ class TelegramStore:
                 "AND source.chat_id=e.chat_id AND "
                 "source.message_id=json_extract(j.payload,'$.message_id') "
                 "AND source.event_id=j.event_id) "
-                "AND NOT EXISTS (SELECT 1 FROM jobs newer JOIN events ne ON ne.id=newer.event_id "
-                "WHERE ne.bot_id=e.bot_id AND ne.chat_id=e.chat_id AND newer.id>j.id "
-                f"AND {SUPERSEDABLE_JOB} "
+                "AND NOT EXISTS (SELECT 1 FROM jobs n JOIN events ne ON ne.id=n.event_id "
+                "WHERE ne.bot_id=e.bot_id AND ne.chat_id=e.chat_id "
+                f"AND {NEWER_JOB} AND {SUPERSEDABLE_JOB} "
                 "AND "
-                "json_extract(newer.payload,'$.sender_id')=json_extract(j.payload,'$.sender_id') "
-                "AND COALESCE(json_extract(newer.payload,'$.thread_id'),0)="
+                "json_extract(n.payload,'$.sender_id')=json_extract(j.payload,'$.sender_id') "
+                "AND COALESCE(json_extract(n.payload,'$.thread_id'),0)="
                 "COALESCE(json_extract(j.payload,'$.thread_id'),0) "
-                "AND json_extract(newer.payload,'$.trigger') "
+                "AND json_extract(n.payload,'$.trigger') "
                 "IN ('private','name','mention','reply','continuation')))) "
                 "AND NOT EXISTS (SELECT 1 FROM delivery_limits d WHERE d.bot_id=e.bot_id "
                 "AND d.chat_id=e.chat_id AND d.blocked_until>?) "

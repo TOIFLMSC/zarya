@@ -11,6 +11,7 @@ from zarya import behavior, context_budget, message_batches, message_links, timi
 from zarya.avatar_logic import AVATAR_WAIT
 from zarya.avatar_logic import valid as avatar_valid
 from zarya.dialogue_logic import (
+    NEWER_JOB,
     SUPERSEDABLE_JOB,
     TOPIC_CONTEXT_POLICY,
     answer_mode,
@@ -174,7 +175,7 @@ class DialogueEngine:
                 trigger, should_answer = "superseded", False
             newer = await row(
                 conn,
-                "SELECT 1 FROM jobs j JOIN jobs n ON n.id>j.id JOIN events e ON e.id=n.event_id "
+                f"SELECT 1 FROM jobs j JOIN jobs n ON {NEWER_JOB} JOIN events e ON e.id=n.event_id "
                 f"WHERE e.bot_id=? AND e.chat_id=? AND j.id=? AND {SUPERSEDABLE_JOB} AND "
                 "json_extract(n.payload,'$.sender_id')=? AND "
                 "COALESCE(json_extract(n.payload,'$.thread_id'),0)=? AND "

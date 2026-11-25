@@ -19,6 +19,9 @@ SUPERSEDABLE_JOB = (
     "json_extract(source.payload,'$.edited_message.chat.is_forum'),0)),0)"
 )
 
+# Pending edits of separate group replies keep their original queue order.
+NEWER_JOB = "n.id>j.id AND COALESCE(json_extract(n.payload,'$.original_job_id'),n.id)>j.id"
+
 
 def message_text(message: dict[str, Any]) -> str:
     text = content_text(message, 4000)
