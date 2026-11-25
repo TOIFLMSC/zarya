@@ -488,10 +488,11 @@ class ResearchEngine:
                     if fallback
                     else hosted_search_input(
                         work["public_question"] or work["question"],
-                        "" if work["public_question"] else work["material"],
+                        work["material"],
                         public_search_sources(work["sources"], sources)
                         if work.get("news_recheck")
                         else sources,
+                        links_only=bool(work["public_question"]),
                     )
                 )
                 request = {

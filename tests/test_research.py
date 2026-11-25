@@ -109,14 +109,22 @@ async def test_post_decision_controls_search_and_skips_telegram_navigation(tmp_p
     channel = "https://t.me/examplefeed"
     invite = "https://t.me/+synthetic"
     post_url = channel + "/42"
+    restricted_url = "https://example.org/report?access=LOCAL_ACCESS_TOKEN_438"
     private_marker = "PRIVATE_POST_TEXT_NOT_FOR_HOSTED_SEARCH"
+    fetched_marker = "LOCAL_FETCH_ONLY_438"
+
+    class AccessFetch(Fetch):
+        async def fetch(self, url):
+            return {**await super().fetch(url), "title": fetched_marker, "text": fetched_marker}
+
     async with store_at(tmp_path) as store:
         await store.ingest("999", "zarya_test", [event(1, -100)])
         await approve(store, "group", "-100")
         post = event(
             2,
             -100,
-            f"{private_marker} {channel} https://t.me/otherchannel {invite} {post_url}",
+            f"{private_marker} {channel} https://t.me/otherchannel {invite} {post_url} "
+            f"{restricted_url}",
             forward_origin={"type": "channel"},
             entities=[
                 {"type": "text_link", "offset": 0, "length": 1, "url": "tg://join?invite=synthetic"}
@@ -124,15 +132,16 @@ async def test_post_decision_controls_search_and_skips_telegram_navigation(tmp_p
         )
         reply = event(3, -100, question, reply_to_message={"message_id": 2})
         await store.ingest("999", "zarya_test", [post, reply])
-        fetch, model = Fetch(), ResearchModel()
+        fetch, model = AccessFetch(), ResearchModel()
         model.intent = mode
         dialogue = DialogueEngine(store, FakeModel(ModelResult(text="Годно.")))
         dialogue.research = research = ResearchEngine(store, model, fetch)
         work = await answer(dialogue, research, 3)
-        assert fetch.calls == [post_url]
+        assert fetch.calls == [post_url, restricted_url]
         (decision_request,) = model.intent_calls
         context = json.loads(decision_request["input"])
         assert context["question"] == question and private_marker in context["selected_material"]
+        assert context["sources"][1]["text"] == fetched_marker
         assert not decision_request.get("tools")
         assert await store.db.one(
             "SELECT search_cost_usd FROM model_calls WHERE operation='research_intent'"
@@ -143,7 +152,11 @@ async def test_post_decision_controls_search_and_skips_telegram_navigation(tmp_p
             search_input = json.loads(search_request["input"])
             assert search_input["provided_material"] == ""
             assert private_marker not in search_request["input"]
-            assert all(s["url"] == post_url for s in search_input["sources"])
+            assert fetched_marker not in search_request["input"]
+            assert "LOCAL_ACCESS_TOKEN_438" not in search_request["input"]
+            assert search_input["sources"] == [
+                {"url": post_url}, {"url": "https://example.org/report"}
+            ]
             assert search_request["tools"][0]["type"] == "web_search"
         else:
             assert not model.calls

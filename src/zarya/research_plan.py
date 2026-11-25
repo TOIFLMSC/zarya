@@ -79,7 +79,7 @@ ABSOLUTE_LINK = re.compile(
 
 
 def hosted_search_input(
-    question: str, material: str, sources: list[dict[str, Any]]
+    question: str, material: str, sources: list[dict[str, Any]], *, links_only: bool = False
 ) -> dict[str, Any]:
     """Carry only the links admitted by the bounded local fetch stage."""
     from zarya.x_post import (
@@ -155,10 +155,21 @@ def hosted_search_input(
             return [scrub(item) for item in value]
         return value
 
+    if links_only:
+        urls = dict.fromkeys(
+            allowed[url]
+            for source in sources
+            if isinstance((url := source.get("url")), str)
+            and url in allowed
+            and not source.get("error")
+        )
+        evidence = [{"url": url} for url in urls]
+    else:
+        evidence = scrub(sources)
     return {
         "question": scrub(question),
-        "provided_material": scrub(material),
-        "sources": scrub(sources),
+        "provided_material": "" if links_only else scrub(material),
+        "sources": evidence,
     }
 
 
