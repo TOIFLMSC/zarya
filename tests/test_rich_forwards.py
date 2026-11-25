@@ -17,7 +17,7 @@ from zarya.memory import MemoryEngine
 from zarya.openai_adapter import ModelResult
 from zarya.photos import PhotoEngine
 from zarya.research import ResearchEngine
-from zarya.research_intent import expects_post_comment, local_post_request, needs_forwarded_text
+from zarya.research_intent import expects_post_comment, needs_forwarded_text
 from zarya.telegram_content import content_text
 from zarya.telegram_runtime import AiogramTransport
 
@@ -528,7 +528,8 @@ async def test_news_comment_edit_keeps_post_and_link_through_replies(tmp_path, e
         assert len(search.calls) == 1
         first = json.loads(search.calls[0]["input"])
         assert first["question"] == (question if edit_at == "after_delivery" else revised)
-        assert body in str(first) and article in str(first)
+        assert body in search.intent_calls[0]["input"]
+        assert first["provided_material"] == "" and article in str(first)
         assert await dialogue.claim("999") is None
 
         for question_id, reply_id in ((5, 100), (6, 101)):
@@ -554,7 +555,8 @@ async def test_news_comment_edit_keeps_post_and_link_through_replies(tmp_path, e
             )
             hosted = search.calls[-1]["input"]
             assert body in selected and article in selected
-            assert body in hosted and article in hosted
+            assert body in search.intent_calls[-1]["input"]
+            assert body not in hosted and article in hosted
 
         if edit_at == "after_delivery":
             changed_post = event(
@@ -701,7 +703,8 @@ async def test_visible_rich_post_link_reaches_the_fetcher_without_hidden_targets
         await research.execute(await research.claim("999"))
         assert fetch.calls == [public]
         payload = json.loads(model.calls[0]["input"])
-        assert public in payload["provided_material"]
+        assert public in model.intent_calls[0]["input"]
+        assert payload["provided_material"] == ""
         assert public in {source["url"] for source in payload["sources"]}
         assert hidden not in model.calls[0]["input"]
 
@@ -744,7 +747,6 @@ def test_other_local_requests_do_not_wait_for_a_forward(question):
     message = {"text": question}
     assert not expects_post_comment(message)
     assert not needs_forwarded_text(message)
-    assert not local_post_request(message)
 
 
 def test_rich_text_extracts_nested_blocks_without_metadata():

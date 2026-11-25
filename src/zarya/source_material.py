@@ -211,7 +211,7 @@ def describe(message: dict[str, Any]) -> dict[str, Any]:
     return {
         "message_id": message["message_id"],
         "text": text,
-        "urls": urls(message),
+        "urls": urls(message, skip_navigation=True),
         "attachments": attachments,
         "forwarded": forwarded(message),
         **({"content_incomplete": True} if incomplete else {}),

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -12,10 +13,15 @@ from zarya.memory_logic import epoch
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
 from zarya.research_dates import claim_dates
-from zarya.research_fetch import Fetcher, SafeFetcher, check_target
+from zarya.research_fetch import (
+    Fetcher,
+    SafeFetcher,
+    check_target,
+    telegram_navigation,
+    telegram_post_url,
+)
 from zarya.research_intent import (
     blocks_external,
-    local_post_request,
     research_profile,
     speaker_text,
 )
@@ -38,7 +44,9 @@ from zarya.research_plan import (
     FOLLOWUP_INSTRUCTIONS,
     FOLLOWUP_TOOLS,
     INITIAL,
+    INTENT,
     OUTPUT_CONTRACT,
+    POST_INTENT_PROMPT,
     followup_input,
     hosted_search_input,
     merge_analysis,
@@ -113,25 +121,42 @@ class ResearchEngine:
         if blocks_external(message):
             return False, None
         question = str(message.get("text") or message.get("caption") or "")[:4000]
-        selected_urls = urls(message)
+        selected_urls = urls(message, skip_navigation=True)
         material = ""
         manifest = [{"message_id": message["message_id"], "event_id": event}]
         selected = (
             selected if selected is not None else await resolve(conn, bot, chat, grant, message)
         )
-        quote = news = market_question = None
-        if not bound_post:
-            quote = await resolve_quote(conn, bot, chat, grant, message, selected)
-            if not quote and not text_only:
-                news = await fresh_news_sources(conn, bot, chat, grant, message)
-            if not quote and not news:
-                market_question = await resolve_market_question(
-                    conn, bot, chat, grant, message, selected
-                )
+        forwarded = bool(message.get("forward_origin") or message.get("forward_date"))
         has_post = not selected.get("via_assistant") or any(
             source["forwarded"] or source["attachments"] or source["urls"]
             for source in selected["messages"]
         )
+        decide = (
+            not forwarded
+            and has_post
+            and (
+                bound_post
+                or any(
+                    source["forwarded"]
+                    or source["message_id"] != message["message_id"]
+                    and (source["attachments"] or source["urls"])
+                    or any(telegram_post_url(url) for url in source["urls"])
+                    and bool(re.sub(r"(?:https?|tg)://[^\s<>]+", "", question).strip())
+                    for source in selected["messages"]
+                )
+            )
+        )
+        quote = news = market_question = None
+        if not bound_post:
+            if not decide:
+                quote = await resolve_quote(conn, bot, chat, grant, message, selected)
+            if not quote and not text_only:
+                news = await fresh_news_sources(conn, bot, chat, grant, message)
+            if not decide and not quote and not news:
+                market_question = await resolve_market_question(
+                    conn, bot, chat, grant, message, selected
+                )
         if selected["messages"] and has_post and not news:
             parts = []
             for source in selected["messages"]:
@@ -161,15 +186,20 @@ class ResearchEngine:
             selected_urls = list(
                 dict.fromkeys(
                     selected_urls
-                    + [url for source in selected["messages"] for url in source["urls"]]
+                    + [
+                        url
+                        for source in selected["messages"]
+                        for url in source["urls"]
+                        if not telegram_navigation(url)
+                    ]
                 )
             )[:3]
         manifest += [ref for ref in selected["manifest"] if ref not in manifest]
-        forwarded = bool(message.get("forward_origin") or message.get("forward_date"))
         if forwarded:
             material = material or question
             question = "Кратко поясни переданный пост"
         if news:
+            decide = False
             selected_urls, dependencies = news
             manifest += [ref for ref in dependencies if ref not in manifest]
             question, material = RECHECK_QUESTION, ""
@@ -178,11 +208,17 @@ class ResearchEngine:
         elif market_question:
             question, material, selected_urls = market_question, "", []
         speaker_question = question if quote or market_question else speaker_text(message)
-        local_post = local_post_request(message) and any(
-            source["forwarded"] for source in selected["messages"]
+        if decide and speaker_question != question:
+            material = (material + "\n\n[Цитата или исходная запись вопроса]\n" + question)[:24000]
+            question = speaker_question
+        mode = (
+            "decide"
+            if decide
+            else "search"
+            if news or text_only or wants_search(speaker_question)
+            else "read"
         )
-        search = bool(news) or text_only or (not local_post and wants_search(speaker_question))
-        if not selected_urls and not material and not search:
+        if not selected_urls and not material and mode == "read":
             return False, None
         source_requests = [
             {"requested_url": url, "news_recheck": bool(news)} for url in selected_urls
@@ -198,7 +234,7 @@ class ResearchEngine:
                 chat,
                 scope,
                 grant,
-                "search" if search else "read",
+                mode,
                 question,
                 material,
                 json.dumps(manifest),
@@ -288,7 +324,8 @@ class ResearchEngine:
                 conn,
                 "SELECT "
                 "r.id,r.job_id,r.bot_id,r.chat_id,r.scope,r.question,r.material,r.sourc"
-                "es,r.model,r.reasoning,r.settings_version,r.created_at,r.profile FROM "
+                "es,r.model,r.reasoning,r.settings_version,r.created_at,r.profile,r.mode,"
+                "r.public_question FROM "
                 "research_runs r JOIN jobs j ON j.id=r.job_id WHERE r.bot_id=? AND "
                 "r.state='queued' AND j.state='pending' ORDER BY r.id LIMIT 1",
                 (bot,),
@@ -311,6 +348,8 @@ class ResearchEngine:
                         "settings_version",
                         "created_at",
                         "profile",
+                        "mode",
+                        "public_question",
                     ),
                     value,
                     strict=True,
@@ -360,9 +399,20 @@ class ResearchEngine:
         result = None
         try:
             for entry in work["sources"]:
-                source = await self.fetcher.fetch(entry["requested_url"])
+                if telegram_navigation(entry["requested_url"]):
+                    continue
+                source = (
+                    entry
+                    if "coverage" in entry
+                    else await self.fetcher.fetch(entry["requested_url"])
+                )
+                source.setdefault("requested_url", entry["requested_url"])
                 source["id"] = len(sources) + 1
                 sources.append(source)
+            if work["mode"] == "decide":
+                work["public_question"] = await self.decide_post(work, sources)
+                if not work["public_question"]:
+                    return
             async with self.store.gate, self.db.transaction() as conn:
                 run = await row(
                     conn, "SELECT mode,state FROM research_runs WHERE id=?", (work["id"],)
@@ -437,11 +487,12 @@ class ResearchEngine:
                     )
                     if fallback
                     else hosted_search_input(
-                        work["question"],
+                        work["public_question"] or work["question"],
                         work["material"],
                         public_search_sources(work["sources"], sources)
                         if work.get("news_recheck")
                         else sources,
+                        links_only=bool(work["public_question"]),
                     )
                 )
                 request = {
@@ -529,6 +580,147 @@ class ResearchEngine:
         except Exception:
             result = ModelResult(state="unknown", error="research_uncertain")
         await self.finish(work, sources, result, int((time.monotonic() - started) * 1000))
+
+    async def decide_post(self, work: dict[str, Any], sources: list[dict[str, Any]]) -> str | None:
+        """Commit a single no-tools decision before making a separate web request eligible."""
+        request = {
+            "model": work["model"],
+            "reasoning": {"effort": "low"},
+            "max_output_tokens": 700,
+            "store": False,
+            "instructions": POST_INTENT_PROMPT,
+            "input": json.dumps(
+                {
+                    "question": work["question"],
+                    "selected_material": work["material"],
+                    "sources": sources,
+                },
+                ensure_ascii=False,
+            ),
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "post_research_intent",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "mode": {"type": "string", "enum": ["read", "search"]},
+                            "public_question": {"type": "string"},
+                        },
+                        "required": ["mode", "public_question"],
+                    },
+                }
+            },
+        }
+        started = time.monotonic()
+        async with self.store.gate, self.db.transaction() as conn:
+            if not await self.search_current(conn, work, "fetching"):
+                await conn.execute(
+                    "UPDATE research_runs SET state='cancelled' WHERE id=?", (work["id"],)
+                )
+                return None
+            unsafe = any(
+                str(s.get("error") or "").startswith(("private", "unsafe")) for s in sources
+            )
+            if unsafe or self.adapter is None:
+                await conn.execute(
+                    "UPDATE research_runs SET mode='read',state='rejected',sources=?,"
+                    "error_code=?,finished_at=? WHERE id=?",
+                    (
+                        json.dumps(sources, ensure_ascii=False),
+                        "unsafe_source" if unsafe else "not_configured",
+                        stamp(),
+                        work["id"],
+                    ),
+                )
+                return None
+            await conn.execute(
+                "UPDATE research_runs SET state='search_started',sources=? WHERE id=?",
+                (json.dumps(sources, ensure_ascii=False), work["id"]),
+            )
+            await conn.execute(
+                "INSERT INTO model_calls(job_id,provider,model,state,created_at,settings_version,"
+                "request_json,pricing_profile,research_run_id,operation,search_cost_usd) "
+                "VALUES (?,'openai',?,'started',?,?,?,?,?,?,0)",
+                (
+                    work["job_id"],
+                    work["model"],
+                    stamp(),
+                    work["settings_version"],
+                    json.dumps(request, ensure_ascii=False),
+                    pricing_profile(work["model"]),
+                    work["id"],
+                    INTENT,
+                ),
+            )
+        cancelled = False
+        try:
+            result = await self.adapter.generate(request)
+        except asyncio.CancelledError:
+            result = ModelResult(state="unknown", error="interrupted")
+            cancelled = True
+        except Exception:
+            result = ModelResult(state="unknown", error="research_intent_uncertain")
+        public_question = None
+        if result.state == "completed":
+            try:
+                decision = json.loads(result.text)
+                if not isinstance(decision, dict) or set(decision) != {"mode", "public_question"}:
+                    raise ValueError
+                query = decision["public_question"]
+                if not isinstance(query, str) or decision["mode"] not in ("read", "search"):
+                    raise ValueError
+                query = query.strip()
+                if decision["mode"] == "search":
+                    if not 0 < len(query) <= 700:
+                        raise ValueError
+                    public_question = query
+            except (ValueError, TypeError):
+                result.state, result.error = "invalid", "invalid_research_intent"
+        async with self.store.gate, self.db.transaction() as conn:
+            valid = await self.search_current(conn, work)
+            updated = await conn.execute(
+                "UPDATE model_calls SET state=?,model=COALESCE(?,model),pricing_profile=?,"
+                "usage_json=?,response_id=?,request_id=?,latency_ms=?,cost_usd=?,error_code=?,"
+                "finished_at=?,request_json=CASE WHEN ? THEN request_json ELSE NULL END "
+                "WHERE research_run_id=? AND operation=? AND state='started'",
+                (
+                    result.state,
+                    result.model,
+                    pricing_profile(result.model or work["model"]),
+                    json.dumps(result.usage) if result.usage else None,
+                    result.response_id,
+                    result.request_id,
+                    int((time.monotonic() - started) * 1000),
+                    estimate_cost(result, work["model"]),
+                    result.error,
+                    stamp(),
+                    valid,
+                    work["id"],
+                    INTENT,
+                ),
+            )
+            if updated.rowcount == 1:
+                next_state = (
+                    "cancelled" if not valid else "fetching" if public_question else result.state
+                )
+                await conn.execute(
+                    "UPDATE research_runs SET mode=?,state=?,public_question=?,error_code=?,"
+                    "finished_at=? WHERE id=? AND state='search_started'",
+                    (
+                        "search" if valid and public_question else "read",
+                        next_state,
+                        public_question if valid else None,
+                        result.error,
+                        None if next_state == "fetching" else stamp(),
+                        work["id"],
+                    ),
+                )
+        if cancelled:
+            raise asyncio.CancelledError
+        return public_question if updated.rowcount == 1 and valid else None
 
     async def search_current(
         self,
