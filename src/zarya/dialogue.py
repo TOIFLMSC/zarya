@@ -11,6 +11,7 @@ from zarya import behavior, context_budget, message_batches, message_links, timi
 from zarya.avatar_logic import AVATAR_WAIT
 from zarya.avatar_logic import valid as avatar_valid
 from zarya.dialogue_logic import (
+    SUPERSEDABLE_JOB,
     TOPIC_CONTEXT_POLICY,
     answer_mode,
     delivery_chunks,
@@ -173,11 +174,11 @@ class DialogueEngine:
                 trigger, should_answer = "superseded", False
             newer = await row(
                 conn,
-                "SELECT 1 FROM jobs j JOIN events e ON e.id=j.event_id "
-                "WHERE e.bot_id=? AND e.chat_id=? AND j.id>? AND "
-                "json_extract(j.payload,'$.sender_id')=? AND "
-                "COALESCE(json_extract(j.payload,'$.thread_id'),0)=? AND "
-                "json_extract(j.payload,'$.trigger') "
+                "SELECT 1 FROM jobs j JOIN jobs n ON n.id>j.id JOIN events e ON e.id=n.event_id "
+                f"WHERE e.bot_id=? AND e.chat_id=? AND j.id=? AND {SUPERSEDABLE_JOB} AND "
+                "json_extract(n.payload,'$.sender_id')=? AND "
+                "COALESCE(json_extract(n.payload,'$.thread_id'),0)=? AND "
+                "json_extract(n.payload,'$.trigger') "
                 "IN ('private','name','mention','reply','continuation') "
                 "LIMIT 1",
                 (bot_id, chat_id, job_id, sender_id, thread_id or 0),
@@ -531,6 +532,8 @@ class DialogueEngine:
                 "name": str(message.get("from", {}).get("first_name", "Участник"))[:80],
                 "text": message_text(message),
             }
+            if (reply_target_id := explicit_reply(message).get("message_id")) is not None:
+                incoming["in_reply_to"] = reply_target_id
             photo_refs: list[dict[str, Any]] = []
             selected_material = [dict(m) for m in material["messages"]]
             if (

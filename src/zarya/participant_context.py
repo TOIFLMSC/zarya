@@ -175,6 +175,8 @@ async def window(
         if not human(message) or str(message["from"]["id"]) != sender:
             continue
         item = describe(message)
+        if (reply_id := explicit_reply(message).get("message_id")) is not None:
+            item["in_reply_to"] = reply_id
         item.update(
             sender_id=sender,
             name=str(message["from"].get("first_name") or "Участник")[:80],

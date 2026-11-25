@@ -63,6 +63,30 @@ async def test_group_default_and_individual_opt_out(tmp_path):
         assert by_chat["-200"]["message_batches_enabled"] is True
 
 
+async def test_reply_to_another_participant_releases_open_group_series(tmp_path):
+    async with store_at(tmp_path) as store:
+        await pilot(store)
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(2, -100, "Заря, без поиска назови число"),
+                event(
+                    3,
+                    -100,
+                    "Обсидиан отключён",
+                    reply_to_message={"message_id": 1, "from": {"id": 77}},
+                ),
+                event(4, -100, "Вообще не используется"),
+            ],
+        )
+        assert await store.db.all("SELECT message_id FROM text_batch_members") == [(2,)]
+        model = FakeModel(ModelResult(text="Семь."))
+        await drain(DialogueEngine(store, model))
+        assert len(model.calls) == 1
+        assert json.loads(model.calls[0]["input"])["current_message"]["message_id"] == 2
+
+
 def text(mid, value, topic=8, sender=42, **extra):
     return event(
         mid,
