@@ -1,4 +1,4 @@
-"""Private Telegram forwards bind the author's question to the chosen post."""
+"""Telegram forwards bind the author's question to the chosen post."""
 
 import json
 import time
@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram.types import Update
 from test_dialogue import FakeModel, drain, private_ready
+from test_photos import PhotoTransport, VisionModel, analyze, photo, ready
 from test_research import Fetch, ResearchModel
 from test_source_material import answer, deliver
 from test_telegram import event, store_at
@@ -14,6 +15,7 @@ from test_telegram import event, store_at
 from zarya.dialogue import DialogueEngine
 from zarya.memory import MemoryEngine
 from zarya.openai_adapter import ModelResult
+from zarya.photos import PhotoEngine
 from zarya.research import ResearchEngine
 from zarya.research_intent import expects_post_comment, local_post_request, needs_forwarded_text
 from zarya.telegram_content import content_text
@@ -24,6 +26,190 @@ BODY = "Новый пост про сюжет игры и её героев."
 OLD = "Старый пост про Ялту"
 UNREADABLE = "Не получилось прочитать пересланный пост"
 USDT_QUESTION = "Реально будут брать НДС при покупке USDT? Я заплачу за 1000 как за 1220?"
+GROUP_ASK = "Давай комментарии, Заря"
+GROUP_NAMED_SUBJECT = "Дай комментарий, Заря, по поводу закрытия стадиона"
+GROUP_CAPTION = "Тарифы биржи на вывод BTC. Подробности"
+GROUP_URL = "https://example.org/tariffs"
+
+
+def group_post(number, date, **extra):
+    post = photo(number, -100, caption=GROUP_CAPTION, file="timetable")
+    post["message"].update(
+        date=date,
+        forward_origin={"type": "channel"},
+        caption_entities=[{"type": "text_link", "offset": 0, "length": 1, "url": GROUP_URL}],
+        **extra,
+    )
+    return post
+
+
+@pytest.mark.parametrize(
+    "delivery",
+    [
+        "one_poll",
+        "two_polls",
+        "without_batch",
+        "edited",
+        "edited_after_delivery",
+        "mention",
+        "related_subject",
+    ],
+)
+async def test_addressed_group_question_binds_forward_with_photo_and_link(tmp_path, delivery):
+    date = int(time.time())
+    question_text = GROUP_ASK
+    question_extra = {}
+    caption = GROUP_CAPTION
+    if delivery == "mention":
+        mention = "@zarya_test"
+        question_text = f"{mention}, прокомментируй"
+        question_extra["entities"] = [{"type": "mention", "offset": 0, "length": len(mention)}]
+    if delivery == "related_subject":
+        question_text = GROUP_NAMED_SUBJECT
+        caption = "Стала известна причина закрытия стадиона. Подробности"
+    question = event(2, -100, question_text, date=date, **question_extra)
+    post = group_post(3, date, caption=caption)
+    async with store_at(tmp_path) as store:
+        await ready(store, -100, message_batches=delivery != "without_batch")
+        model = FakeModel(ModelResult(text="Подробности в публикации."))
+        fetch = Fetch()
+        transport = PhotoTransport()
+        dialogue = DialogueEngine(store, model)
+        dialogue.photos = photos = PhotoEngine(store, VisionModel(), tmp_path)
+        dialogue.research = research = ResearchEngine(store, ResearchModel(), fetch)
+        if delivery == "one_poll":
+            await store.ingest("999", "zarya_test", [question, post])
+        else:
+            await store.ingest("999", "zarya_test", [question])
+            assert await dialogue.claim("999") is None
+            await store.ingest("999", "zarya_test", [post])
+        jobs = await store.db.all("SELECT state,payload FROM jobs ORDER BY id")
+        assert [(state, json.loads(p)["message_id"]) for state, p in jobs] == [
+            ("cancelled", 2),
+            ("pending", 3),
+        ]
+        assert json.loads(jobs[-1][1])["post_question"]["message_id"] == 2
+        if delivery == "edited":
+            question_text = "Заря, поясни, что меняется в тарифах"
+            edited = event(4, -100, question_text, date=date, message_id=2)
+            await store.ingest(
+                "999", "zarya_test", [{"update_id": 4, "edited_message": edited["message"]}]
+            )
+        assert await dialogue.claim("999") == {"skip": True}
+        await analyze(photos, transport)
+        work = await answer(dialogue, research, 2)
+        await drain(dialogue)
+        body = json.loads(work["request"]["input"])
+        assert body["current_message"]["text"] == question_text
+        assert caption in body["selected_material"]["messages"][0]["text"]
+        assert {r["message_id"] for r in work["snapshot"]["source_manifest"]} == (
+            {3} if delivery == "edited" else {2, 3}
+        )
+        assert transport.downloads == ["timetable"]
+        assert fetch.calls == [GROUP_URL] and len(model.calls) == 1
+        (payload,) = await store.db.one("SELECT payload FROM outbox")
+        assert json.loads(payload)["reply_id"] == 2
+        if delivery in {"edited", "edited_after_delivery"}:
+            await deliver(store, work, 100)
+            if delivery == "edited_after_delivery":
+                edited = event(4, -100, "Заря, про тарифы биржи", date=date, message_id=2)
+                await store.ingest(
+                    "999", "zarya_test", [{"update_id": 4, "edited_message": edited["message"]}]
+                )
+            followup_text = "Сколько стоит вывод BTC на этой бирже?"
+            followup = event(
+                5,
+                -100,
+                followup_text,
+                date=date,
+                reply_to_message={"message_id": 100, "from": {"id": 999, "is_bot": True}},
+            )
+            await store.ingest("999", "zarya_test", [followup])
+            work = await answer(dialogue, research, 5)
+            selected = json.loads(work["request"]["input"])["selected_material"]
+            assert selected["messages"][0]["message_id"] == 3
+            assert selected["messages"][0]["urls"] == [GROUP_URL]
+            stored = await store.db.one(
+                "SELECT question,sources FROM research_runs WHERE job_id=?", (work["job_id"],)
+            )
+            assert stored[0] == followup_text
+            assert GROUP_URL in stored[1] and fetch.calls.count(GROUP_URL) == 2
+
+
+async def test_group_pair_adds_album_tail_to_open_photo_batch(tmp_path):
+    date = int(time.time())
+    first = group_post(3, date, media_group_id="tariffs")
+    tail = photo(4, -100, album="tariffs", file="tariffs-tail")
+    async with store_at(tmp_path) as store:
+        await ready(store, -100, message_batches=True)
+        model = FakeModel(ModelResult(text="Тарифы указаны в посте."))
+        vision = VisionModel()
+        dialogue = DialogueEngine(store, model)
+        dialogue.photos = photos = PhotoEngine(store, vision, tmp_path)
+        await store.ingest("999", "zarya_test", [event(2, -100, GROUP_ASK, date=date), first])
+        assert await dialogue.claim("999") == {"skip": True}
+        await store.ingest("999", "zarya_test", [tail])
+        transport = PhotoTransport()
+        await analyze(photos, transport)
+        assert transport.downloads == ["timetable", "tariffs-tail"] and len(vision.calls) == 1
+        work = await answer(dialogue, None, 2)
+        assert {r["message_id"] for r in work["snapshot"]["photo_refs"]} == {3, 4}
+        assert len(model.calls) == 1
+        assert await dialogue.claim("999") is None
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "other_author",
+        "other_topic",
+        "two_texts",
+        "unaddressed",
+        "unrelated",
+        "named_subject",
+        "inline_quote",
+        "blockquote_entity",
+        "late",
+    ],
+)
+async def test_group_question_does_not_capture_unrelated_forward(tmp_path, boundary):
+    date = int(time.time())
+    text = {
+        "unaddressed": "Давай комментарии",
+        "unrelated": "Как пожарить кабачки, Заря?",
+        "named_subject": GROUP_NAMED_SUBJECT,
+        "inline_quote": f"{GROUP_ASK}\n«Стадион закрывают на ремонт»",
+        "blockquote_entity": f"{GROUP_ASK}\nСтадион закрывают на ремонт",
+    }.get(boundary, GROUP_ASK)
+    question_extra = {"message_thread_id": 8} if boundary == "other_topic" else {}
+    if boundary == "blockquote_entity":
+        offset = len(GROUP_ASK) + 1
+        question_extra["entities"] = [
+            {"type": "blockquote", "offset": offset, "length": len(text) - offset}
+        ]
+    question = event(2, -100, text, date=date, **question_extra)
+    post = group_post(4 if boundary == "two_texts" else 3, date + (3 if boundary == "late" else 0))
+    if boundary == "other_author":
+        post["message"]["from"]["id"] = 43
+    if boundary == "other_topic":
+        post["message"]["chat"]["is_forum"] = True
+        post["message"]["message_thread_id"] = 9
+    updates = [question]
+    if boundary == "two_texts":
+        updates.append(event(3, -100, "Заря, назови цвет неба", date=date))
+    updates.append(post)
+    async with store_at(tmp_path) as store:
+        await ready(store, -100, message_batches=True)
+        await store.ingest("999", "zarya_test", updates)
+        jobs = await store.db.all("SELECT state,payload FROM jobs ORDER BY id")
+        assert all(
+            state == "pending" and not json.loads(p).get("post_question") for state, p in jobs
+        )
+        assert json.loads(jobs[-1][1])["trigger"] == "forwarded"
+        if boundary == "two_texts":
+            assert await store.db.all(
+                "SELECT message_id FROM text_batch_members ORDER BY message_id"
+            ) == [(2,), (3,)]
 
 
 def rich_post(number, *, readable=True):

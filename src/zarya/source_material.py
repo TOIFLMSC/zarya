@@ -15,8 +15,12 @@ from zarya.telegram_content import content_text, extract_content, forwarded
 
 FORWARD_QUESTION_WAIT = 2.0
 FORWARD_QUESTION_FRESH = 10.0
+GROUP_FORWARD_TRIGGERS = {"name", "mention"}
+BARE_COMMENT = r"(?:да(?:й|вай)(?:\s+мне)?\s+комментар(?:ий|ии)|прокомментируй(?:те)?)"
+COMMENT_REQUEST = re.compile(rf"\b{BARE_COMMENT}\b", re.I)
 QUESTION_WORDS = frozenset(
-    "будет будут вроде вопрос где если еще его зачем заря как какая какие каким какую какое какой "
+    "будет будут вроде вопрос где дай давай если еще его зачем заря как какая какие каким какую "
+    "какое какой комментарий комментарии комментария поводу прокомментируй прокомментируйте "
     "когда кого кому кто куда мне можешь можно нужно оно откуда почему правда реально сейчас "
     "свой себя сегодня скажи сколько там так того тут хочу чем чего чтобы "
     "что эта эти это этот".split()
@@ -42,17 +46,40 @@ def question_terms(text: str) -> set[str]:
     return {word[:6] if re.fullmatch(r"[а-я]+", word) else word for word in words}
 
 
-def waits_for_forward(message: dict[str, Any], now: float) -> bool:
-    if not isinstance(message.get("text"), str) or message["text"].lstrip().startswith("/"):
+def expects_forward_post(message: dict[str, Any], group_address: tuple[str, ...]) -> bool:
+    text = speaker_text(message).strip()
+    if group_address and text != (message.get("text") or "").strip():
         return False
     if expects_post_comment(message):
+        return True
+    if not group_address:
+        return False
+    address = "(?:" + "|".join(re.escape(alias) for alias in group_address) + ")"
+    return bool(
+        re.fullmatch(
+            rf"(?:{address}[\s,!:]+{BARE_COMMENT}|{BARE_COMMENT}[\s,]+{address})[.!?…\s]*",
+            text,
+            re.I,
+        )
+    )
+
+
+def waits_for_forward(
+    message: dict[str, Any], now: float, group_address: tuple[str, ...] = ()
+) -> bool:
+    if not isinstance(message.get("text"), str) or message["text"].lstrip().startswith("/"):
+        return False
+    if expects_forward_post(message, group_address):
         return True
     sent = message.get("date")
     # A delayed poll should not hold every older question before processing its backlog.
     if type(sent) is not int or not -FORWARD_QUESTION_WAIT <= now - sent <= FORWARD_QUESTION_FRESH:
         return False
-    text = speaker_text(message)
-    return bool(QUESTION.search(text) and question_terms(text))
+    text = speaker_text(message).strip()
+    group_comment = (
+        group_address and text == message["text"].strip() and COMMENT_REQUEST.search(text)
+    )
+    return bool((QUESTION.search(text) or group_comment) and question_terms(text))
 
 
 async def preceding_forward_question(
@@ -62,12 +89,23 @@ async def preceding_forward_question(
     grant: int,
     message: dict[str, Any],
     now: float,
-) -> tuple[int, dict[str, int]] | None:
-    """Bind only the immediately preceding, still-waiting private comment."""
+    group_address: tuple[str, ...] = (),
+) -> tuple[int, dict[str, int], str, bool] | None:
+    """Bind only the immediately preceding, still-waiting question."""
+    if not forwarded(message) or type(message.get("date")) is not int:
+        return None
+    group = chat.startswith("-")
+    sender_info = message.get("from") or {}
+    post_text = content_text(message)
     if not (
-        forwarded(message)
-        and type(message.get("date")) is int
-        and (usable_post_text(content_text(message)) or "rich_message" in message)
+        usable_post_text(post_text)
+        or "rich_message" in message
+        or (group and visual_sizes(message))
+    ):
+        return None
+    if group and (
+        not sender_info.get("id") or sender_info.get("is_bot") or message.get("sender_chat")
+        or explicit_reply(message)
     ):
         return None
     previous = await one(
@@ -76,7 +114,7 @@ async def preceding_forward_question(
         "json_extract(j.payload,'$.post_wait_until'),COALESCE("
         "json_extract(e.payload,'$.message.date'),"
         "json_extract(e.payload,'$.edited_message.date')), "
-        "e.payload "
+        "e.payload,json_extract(j.payload,'$.trigger') "
         "FROM recent_messages m LEFT JOIN jobs j ON j.event_id=m.event_id "
         "AND j.kind='telegram' AND j.access_version=? AND j.state='pending' AND j.attempts=0 "
         "AND NOT COALESCE(json_extract(j.payload,'$.service_reply'),0) "
@@ -88,28 +126,50 @@ async def preceding_forward_question(
     )
     if not previous:
         return None
-    mid, event, sender, job, ready_at, date, raw = previous
+    mid, event, sender, job, ready_at, date, raw, trigger = previous
     if (
-        sender != str((message.get("from") or {}).get("id", ""))
+        sender != str(sender_info.get("id", ""))
         or job is None
         or not ready_at
-        or now > ready_at
+        or now >= ready_at
         or type(date) is not int
         or not 0 <= message["date"] - date <= FORWARD_QUESTION_WAIT
     ):
         return None
     update = json.loads(raw)
     question = update.get("message") or update["edited_message"]
-    if not expects_post_comment(question) and (
+    batch = None
+    if group:
+        if (
+            trigger not in GROUP_FORWARD_TRIGGERS
+            or message["message_id"] != mid + 1
+            or explicit_reply(question)
+            or not waits_for_forward(question, now, group_address)
+        ):
+            return None
+        current = await accepted(conn, bot, chat, grant, mid)
+        if not current or current[0] != event:
+            return None
+        batch = await one(
+            conn,
+            "SELECT b.sealed=0 AND b.ready_at>? "
+            "AND (SELECT COUNT(*) FROM text_batch_members WHERE job_id=b.job_id)=1 "
+            "AND EXISTS (SELECT 1 FROM text_batch_members WHERE job_id=b.job_id "
+            "AND message_id=? AND event_id=?) FROM text_batches b WHERE b.job_id=?",
+            (now, mid, event, job),
+        )
+        if batch and not batch[0]:
+            return None
+    if not expects_forward_post(question, group_address) and (
         message["message_id"] != mid + 1
-        or not question_terms(speaker_text(question)) & question_terms(content_text(message))
+        or not question_terms(speaker_text(question)) & question_terms(post_text)
     ):
         # The next forward is independent. Let the earlier question run in its original order.
         await conn.execute(
             "UPDATE jobs SET payload=json_remove(payload,'$.post_wait_until') WHERE id=?", (job,)
         )
         return None
-    return job, {"message_id": mid, "event_id": event}
+    return job, {"message_id": mid, "event_id": event}, trigger, batch is not None
 
 
 def visual_sizes(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -235,8 +295,6 @@ async def revised_post_question(
     message: dict[str, Any],
 ) -> tuple[dict[str, int], dict[str, int], list[dict[str, int]]] | None:
     """Recover the post reference alone after an edit erased a sent answer."""
-    if chat.startswith("-"):
-        return None
     sent = await one(
         conn,
         "SELECT j.event_id,j.payload FROM outbox o "
@@ -260,6 +318,8 @@ async def revised_post_question(
         return None
     event, raw = sent
     payload = json.loads(raw)
+    if chat.startswith("-") and not (payload.get("post_question") or payload.get("post_rebound")):
+        return None
     question = payload.get("post_question") or {
         "message_id": payload.get("message_id"),
         "event_id": event,
@@ -334,13 +394,16 @@ async def resolve(
                     for k in ("photo", "video", "animation", "voice", "video_note", "sticker")
                 )
             )
-            if not post_source and not forwarded(original) and not chat.startswith("-"):
+            if not post_source and not forwarded(original) and (
+                not chat.startswith("-") or result["via_assistant"]
+            ):
                 binding = await one(
                     conn,
                     "SELECT json_extract(payload,'$.post_source'),"
                     "json_extract(payload,'$.post_members') FROM jobs "
-                    "WHERE event_id=? AND kind='telegram' AND access_version=?",
-                    (event, grant),
+                    "WHERE event_id=? AND kind='telegram' AND access_version=? "
+                    "AND (? OR json_extract(payload,'$.post_rebound')=1)",
+                    (event, grant, not chat.startswith("-")),
                 )
                 if binding and binding[0]:
                     post_source = json.loads(binding[0])
@@ -387,7 +450,9 @@ async def resolve(
             continue
         sent = await one(
             conn,
-            "SELECT j.event_id,r.snapshot,o.payload "
+            "SELECT j.event_id,r.snapshot,o.payload,"
+            "json_extract(j.payload,'$.post_question') IS NOT NULL "
+            "OR json_extract(j.payload,'$.post_rebound')=1 "
             "FROM outbox o JOIN jobs j ON j.id=o.job_id "
             "JOIN dialogue_runs r ON r.job_id=j.id JOIN recent_messages recent ON "
             "recent.bot_id=o.bot_id AND recent.chat_id=o.chat_id "
@@ -442,6 +507,8 @@ async def resolve(
         current = await accepted(conn, bot, chat, grant, original.get("message_id", 0))
         if not current or current[0] != sent[0]:
             break
+        if chat.startswith("-") and sent[3]:
+            result["bound_post"] = True
         target_id = original["message_id"]
     result["messages"] = []
     result["unavailable"] = True
