@@ -265,7 +265,9 @@ class DialogueEngine:
                     "entities": accepted_question[1].get("entities", []),
                 }
             reply_id = paired["message_id"] if paired else payload["message_id"]
-            bound_post = bool(paired or post_source or material.get("restored_post"))
+            bound_post = bool(
+                paired or post_source or material.get("restored_post") or material.get("bound_post")
+            )
             forwarded_post = bool(
                 bound_post
                 or forwarded(material_message)
@@ -523,7 +525,7 @@ class DialogueEngine:
                 )
             )
             incoming = {
-                "message_id": reply_id,
+                "message_id": payload["message_id"],
                 "thread_id": thread_id,
                 "sender_id": sender_id,
                 "name": str(message.get("from", {}).get("first_name", "Участник"))[:80],
@@ -543,7 +545,7 @@ class DialogueEngine:
                     bot_id,
                     chat_id,
                     access_version,
-                    (selected_material if text_first else selected_material + [incoming])
+                    (selected_material if text_first or paired else selected_material + [incoming])
                     if selected_material or material["unavailable"]
                     else context + [incoming],
                 )
@@ -557,7 +559,7 @@ class DialogueEngine:
                     bot_id,
                     chat_id,
                     access_version,
-                    selected_material if text_first else selected_material + [incoming],
+                    selected_material if text_first or paired else selected_material + [incoming],
                     question_id=payload["message_id"],
                     manifest=material["manifest"],
                 )

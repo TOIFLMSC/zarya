@@ -16,6 +16,7 @@ from zarya.telegram_content import content_text, extract_content, forwarded
 FORWARD_QUESTION_WAIT = 2.0
 FORWARD_QUESTION_FRESH = 10.0
 GROUP_FORWARD_TRIGGERS = {"name", "mention"}
+BARE_COMMENT = r"(?:да(?:й|вай)(?:\s+мне)?\s+комментар(?:ий|ии)|прокомментируй(?:те)?)"
 QUESTION_WORDS = frozenset(
     "будет будут вроде вопрос где если еще его зачем заря как какая какие каким какую какое какой "
     "когда кого кому кто куда мне можешь можно нужно оно откуда почему правда реально сейчас "
@@ -43,10 +44,27 @@ def question_terms(text: str) -> set[str]:
     return {word[:6] if re.fullmatch(r"[а-я]+", word) else word for word in words}
 
 
-def waits_for_forward(message: dict[str, Any], now: float) -> bool:
+def expects_forward_post(message: dict[str, Any], group_address: tuple[str, ...]) -> bool:
+    if expects_post_comment(message):
+        return True
+    if not group_address:
+        return False
+    address = "(?:" + "|".join(re.escape(alias) for alias in group_address) + ")"
+    return bool(
+        re.fullmatch(
+            rf"(?:{address}[\s,!:]+{BARE_COMMENT}|{BARE_COMMENT}[\s,]+{address})[.!?…\s]*",
+            speaker_text(message).strip(),
+            re.I,
+        )
+    )
+
+
+def waits_for_forward(
+    message: dict[str, Any], now: float, group_address: tuple[str, ...] = ()
+) -> bool:
     if not isinstance(message.get("text"), str) or message["text"].lstrip().startswith("/"):
         return False
-    if expects_post_comment(message):
+    if expects_forward_post(message, group_address):
         return True
     sent = message.get("date")
     # A delayed poll should not hold every older question before processing its backlog.
@@ -63,6 +81,7 @@ async def preceding_forward_question(
     grant: int,
     message: dict[str, Any],
     now: float,
+    group_address: tuple[str, ...] = (),
 ) -> tuple[int, dict[str, int], str, bool] | None:
     """Bind only the immediately preceding, still-waiting question."""
     if not forwarded(message) or type(message.get("date")) is not int:
@@ -117,7 +136,7 @@ async def preceding_forward_question(
             trigger not in GROUP_FORWARD_TRIGGERS
             or message["message_id"] != mid + 1
             or explicit_reply(question)
-            or not waits_for_forward(question, now)
+            or not waits_for_forward(question, now, group_address)
         ):
             return None
         current = await accepted(conn, bot, chat, grant, mid)
@@ -133,7 +152,7 @@ async def preceding_forward_question(
         )
         if batch and not batch[0]:
             return None
-    if not expects_post_comment(question) and (
+    if not expects_forward_post(question, group_address) and (
         message["message_id"] != mid + 1
         or not question_terms(speaker_text(question)) & question_terms(post_text)
     ):
@@ -423,7 +442,9 @@ async def resolve(
             continue
         sent = await one(
             conn,
-            "SELECT j.event_id,r.snapshot,o.payload "
+            "SELECT j.event_id,r.snapshot,o.payload,"
+            "json_extract(j.payload,'$.post_question') IS NOT NULL "
+            "OR json_extract(j.payload,'$.post_rebound')=1 "
             "FROM outbox o JOIN jobs j ON j.id=o.job_id "
             "JOIN dialogue_runs r ON r.job_id=j.id JOIN recent_messages recent ON "
             "recent.bot_id=o.bot_id AND recent.chat_id=o.chat_id "
@@ -478,6 +499,8 @@ async def resolve(
         current = await accepted(conn, bot, chat, grant, original.get("message_id", 0))
         if not current or current[0] != sent[0]:
             break
+        if chat.startswith("-") and sent[3]:
+            result["bound_post"] = True
         target_id = original["message_id"]
     result["messages"] = []
     result["unavailable"] = True
