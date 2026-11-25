@@ -9,6 +9,7 @@ from typing import Any
 
 import aiosqlite
 
+from zarya.dialogue_logic import NEWER_JOB, SUPERSEDABLE_JOB
 from zarya.memory_logic import epoch
 from zarya.models import Settings
 from zarya.openai_adapter import ModelAdapter, ModelResult, estimate_cost, pricing_profile
@@ -287,13 +288,14 @@ class ResearchEngine:
         value = await row(
             conn,
             "SELECT j.state FROM jobs j JOIN events e ON e.id=j.event_id "
-            "WHERE j.id=? AND NOT EXISTS (SELECT 1 FROM jobs newer JOIN events ne "
-            "ON ne.id=newer.event_id WHERE ne.bot_id=e.bot_id AND ne.chat_id=e.chat_id "
-            "AND newer.id>j.id AND json_extract(newer.payload,'$.sender_id')="
+            "WHERE j.id=? AND NOT EXISTS (SELECT 1 FROM jobs n JOIN events ne "
+            "ON ne.id=n.event_id WHERE ne.bot_id=e.bot_id AND ne.chat_id=e.chat_id "
+            f"AND {NEWER_JOB} AND {SUPERSEDABLE_JOB} "
+            "AND json_extract(n.payload,'$.sender_id')="
             "json_extract(j.payload,'$.sender_id') AND "
-            "COALESCE(json_extract(newer.payload,'$.thread_id'),0)="
+            "COALESCE(json_extract(n.payload,'$.thread_id'),0)="
             "COALESCE(json_extract(j.payload,'$.thread_id'),0) AND "
-            "json_extract(newer.payload,'$.trigger') IN "
+            "json_extract(n.payload,'$.trigger') IN "
             "('private','name','mention','reply','continuation'))",
             (job,),
         )

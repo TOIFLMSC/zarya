@@ -8,6 +8,20 @@ from zarya.models import Settings
 from zarya.prompts import DEFAULT_PROMPTS, PromptBundle
 from zarya.telegram_content import content_text, forwarded
 
+# SQL predicate for a job aliased as j. An explicit group reply has its own
+# target even when Telegram supplies no forum topic to separate reply branches.
+SUPERSEDABLE_JOB = (
+    "NOT COALESCE(json_extract(j.payload,'$.scope')='group' "
+    "AND json_extract(j.payload,'$.trigger')='reply' "
+    "AND json_extract(j.payload,'$.thread_id') IS NULL "
+    "AND NOT EXISTS (SELECT 1 FROM events source WHERE source.id=j.event_id AND "
+    "COALESCE(json_extract(source.payload,'$.message.chat.is_forum'),"
+    "json_extract(source.payload,'$.edited_message.chat.is_forum'),0)),0)"
+)
+
+# Pending edits of separate group replies keep their original queue order.
+NEWER_JOB = "n.id>j.id AND COALESCE(json_extract(n.payload,'$.original_job_id'),n.id)>j.id"
+
 
 def message_text(message: dict[str, Any]) -> str:
     text = content_text(message, 4000)
@@ -194,7 +208,10 @@ def writing_style(draw: float) -> str:
 
 def followup_policy() -> str:
     return (
-        "\nОтвечай на current_message с учётом доступного recent_chat. "
+        "\nСначала определи тему по current_message или current_messages и явной цепочке "
+        "in_reply_to и selected_material, когда она есть. Используй recent_chat и memory "
+        "для уточнений, которые по смыслу относятся к этой теме. Имя или шутка из соседнего "
+        "разговора могут пригодиться, если текущий собеседник сам к ним возвращается. "
         "Если собеседник уточняет условия задачи, исправляет тебя или сообщает, что "
         "предложенный ресурс отсутствует либо шаг уже не помог, пересмотри прежний план, "
         "сохрани остальные известные условия. Начни с того, что меняется из-за уточнения; "

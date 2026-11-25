@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -420,6 +421,186 @@ async def test_group_continuation_same_sender_topic_and_bounded(tmp_path):
         triggers = dict(await s.db.all("SELECT message_id,trigger FROM dialogue_runs"))
         assert triggers[3] == triggers[4] == "ambient" and triggers[5] == "continuation"
         assert len(engine.adapter.calls) == 2
+
+
+@pytest.mark.parametrize("stage", ["queued", "running", "ready"])
+async def test_group_reply_survives_other_reply_branches(tmp_path, stage):
+    async with store_at(tmp_path) as store:
+        await store.ingest("999", "zarya_test", [event(1, -100)])
+        await approve(store, "group", "-100", message_batches=True)
+        async with store.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO active_dialogues VALUES ('999','-100',0,'42',?,2)",
+                (time.time() + 90,),
+            )
+
+        def plain(mid, text, **extra):
+            update = event(mid, -100, text, **extra)
+            update["message"]["chat"]["is_forum"] = False
+            return update
+
+        bot = {"id": 999, "is_bot": True}
+        sergey = {"id": 77, "is_bot": False, "first_name": "Сергей"}
+        model = FakeModel(ModelResult(text="Да, пользоваться можно."))
+        engine = DialogueEngine(store, model)
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                plain(2, "Предлагаю RAG", **{"from": sergey}),
+                plain(
+                    10,
+                    "А Razer можно?",
+                    message_thread_id=6,
+                    reply_to_message={"message_id": 8, "from": bot},
+                ),
+            ],
+        )
+        await run_one(engine)  # Sergey's ambient message.
+        first = await engine.claim("999") if stage != "queued" else None
+        if stage == "ready":
+            assert first
+            await engine.execute(first)
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                plain(
+                    11,
+                    "Obsidian отключён",
+                    message_thread_id=2,
+                    reply_to_message={"message_id": 2, "from": sergey},
+                ),
+                plain(12, "Им вообще не пользуемся"),
+                plain(
+                    20,
+                    "А как хранить заметки?",
+                    message_thread_id=18,
+                    reply_to_message={"message_id": 19, "from": bot},
+                ),
+            ],
+        )
+        if stage == "running":
+            assert first
+            await engine.execute(first)
+        await drain(engine)
+        runs = await store.db.all(
+            "SELECT message_id,trigger,state FROM dialogue_runs ORDER BY message_id"
+        )
+        assert runs == [
+            (2, "ambient", "skipped"),
+            (10, "reply", "completed"),
+            (11, "ambient", "skipped"),
+            (12, "ambient", "skipped"),
+            (20, "reply", "completed"),
+        ]
+        assert len(model.calls) == 2
+        body = json.loads(model.calls[1]["input"])
+        assert body["current_message"]["in_reply_to"] == 19
+        recent = {item["message_id"]: item for item in body["recent_chat"]}
+        assert recent[10]["in_reply_to"] == 8
+        assert recent[11]["in_reply_to"] == 2
+        async with store.db.transaction() as conn:
+            await conn.execute("UPDATE outbox SET next_attempt=0")
+        delivery = await store.claim_delivery("999")
+        assert delivery is not None and delivery["reply_id"] == 10
+        await store.delivery_result(delivery["id"], "sent", message_id=21)
+        await store.ingest("999", "zarya_test", [plain(22, "Пока так и оставим")])
+        await drain(engine)
+        assert await store.db.one(
+            "SELECT trigger,state FROM dialogue_runs WHERE message_id=22"
+        ) == ("ambient", "skipped")
+        async with store.db.transaction() as conn:
+            await conn.execute("UPDATE delivery_limits SET last_attempt=0")
+        delivery = await store.claim_delivery("999")
+        assert delivery is not None and delivery["reply_id"] == 20
+        await store.delivery_result(delivery["id"], "sent", message_id=23)
+        assert await store.db.one("SELECT remaining FROM active_dialogues") == (2,)
+
+
+async def test_forum_general_keeps_ordinary_continuation(tmp_path):
+    async with store_at(tmp_path) as store:
+        await store.ingest("999", "zarya_test", [event(1, -100)])
+        await approve(store, "group", "-100")
+        async with store.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO active_dialogues VALUES ('999','-100',0,'42',?,2)",
+                (time.time() + 90,),
+            )
+        direct = event(
+            2, -100, "Первый вопрос",
+            reply_to_message={"message_id": 1, "from": {"id": 999, "is_bot": True}},
+        )
+        followup = event(
+            3, -100, "А второй вариант?",
+            reply_to_message={"message_id": 1, "from": {"id": 77}},
+        )
+        for update in (direct, followup):
+            update["message"]["chat"]["is_forum"] = True
+        await store.ingest("999", "zarya_test", [direct, followup])
+        model = FakeModel(ModelResult(text="Второй вариант подходит."))
+        await drain(DialogueEngine(store, model))
+        assert await store.db.all(
+            "SELECT message_id,trigger,state FROM dialogue_runs ORDER BY message_id"
+        ) == [(2, "superseded", "skipped"), (3, "continuation", "completed")]
+
+
+async def test_edit_waiting_group_reply_keeps_closed_continuation(tmp_path):
+    async with store_at(tmp_path) as store:
+        await store.ingest("999", "zarya_test", [event(1, -100)])
+        await approve(store, "group", "-100")
+        target = {"message_id": 1, "from": {"id": 999, "is_bot": True}}
+        original = event(2, -100, "Можно Rzaer?", reply_to_message=target)
+        elsewhere = event(
+            3, -100, "Obsidian отключён", reply_to_message={"message_id": 1, "from": {"id": 77}}
+        )
+        edited = event(4, -100, "Можно Razer?", reply_to_message=target)["message"]
+        edited["message_id"] = 2
+        await store.ingest(
+            "999", "zarya_test", [original, elsewhere, {"update_id": 4, "edited_message": edited}]
+        )
+        model = FakeModel(ModelResult(text="Да."))
+        engine = DialogueEngine(store, model)
+        await drain(engine)
+        assert [json.loads(call["input"])["current_message"]["text"] for call in model.calls] == [
+            "Можно Razer?"
+        ]
+        async with store.db.transaction() as conn:
+            await conn.execute("UPDATE outbox SET next_attempt=0")
+        delivery = await store.claim_delivery("999")
+        assert delivery is not None and delivery["reply_id"] == 2
+        await store.delivery_result(delivery["id"], "sent", message_id=5)
+        await store.ingest("999", "zarya_test", [event(6, -100, "Так и оставим")])
+        await drain(engine)
+        assert await store.db.one(
+            "SELECT trigger,state FROM dialogue_runs WHERE message_id=6"
+        ) == ("ambient", "skipped")
+
+
+async def test_edit_waiting_group_reply_does_not_supersede_later_question(tmp_path):
+    async with store_at(tmp_path) as store:
+        await store.ingest("999", "zarya_test", [event(1, -100)])
+        await approve(store, "group", "-100")
+        settings = await store.db.settings()
+        await store.db.update_settings(
+            settings.version, settings.settings.model_copy(update={"memory_enabled": False})
+        )
+        target = {"message_id": 1, "from": {"id": 999, "is_bot": True}}
+        edited = event(4, -100, "Первый вопрос без опечатки", reply_to_message=target)["message"]
+        edited["message_id"] = 2
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(2, -100, "Первый впрос", reply_to_message=target),
+                event(3, -100, "Заря, сколько будет два плюс два?"),
+                {"update_id": 4, "edited_message": edited},
+            ],
+        )
+        await drain(DialogueEngine(store, FakeModel(ModelResult(text="Ответ."))))
+        assert await store.db.all(
+            "SELECT message_id,trigger,state FROM dialogue_runs ORDER BY message_id"
+        ) == [(2, "reply", "completed"), (3, "name", "completed")]
 
 
 async def test_replay_does_not_mutate_working_memory_jobs_outbox(tmp_path):

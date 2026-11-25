@@ -63,6 +63,73 @@ async def test_group_default_and_individual_opt_out(tmp_path):
         assert by_chat["-200"]["message_batches_enabled"] is True
 
 
+async def test_reply_to_another_participant_releases_open_group_series(tmp_path):
+    async with store_at(tmp_path) as store:
+        await pilot(store)
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(2, -100, "Заря, без поиска назови число"),
+                event(
+                    3,
+                    -100,
+                    "Обсидиан отключён",
+                    reply_to_message={"message_id": 1, "from": {"id": 77}},
+                ),
+                event(4, -100, "Вообще не используется"),
+            ],
+        )
+        assert await store.db.all("SELECT message_id FROM text_batch_members") == [(2,)]
+        model = FakeModel(ModelResult(text="Семь."))
+        await drain(DialogueEngine(store, model))
+        assert len(model.calls) == 1
+        assert json.loads(model.calls[0]["input"])["current_message"]["message_id"] == 2
+
+
+async def test_edit_detached_from_closed_continuation_does_not_reopen_it(tmp_path):
+    async with store_at(tmp_path) as store:
+        await pilot(store)
+        async with store.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO active_dialogues VALUES ('999','-100',0,'42',?,2)",
+                (time.time() + 90,),
+            )
+        edited = event(5, -100, "Заря, назови число. https://example.org")["message"]
+        edited["message_id"] = 3
+        await store.ingest(
+            "999",
+            "zarya_test",
+            [
+                event(2, -100, "А число?"),
+                event(3, -100, "Заря, назови число"),
+                event(
+                    4,
+                    -100,
+                    "Пока оставим",
+                    reply_to_message={"message_id": 1, "from": {"id": 77}},
+                ),
+                {"update_id": 5, "edited_message": edited},
+            ],
+        )
+        engine = DialogueEngine(store, FakeModel(ModelResult(text="Семь.")))
+        await drain(engine)
+        assert await store.db.all(
+            "SELECT message_id,trigger,state FROM dialogue_runs "
+            "WHERE message_id IN (2,3) ORDER BY message_id"
+        ) == [(2, "continuation", "completed"), (3, "name", "completed")]
+        for message_id in (6, 7):
+            item = await delivery(store)
+            assert item
+            await store.delivery_result(item["id"], "sent", message_id=message_id)
+        assert item["reply_id"] == 3
+        await store.ingest("999", "zarya_test", [event(8, -100, "Договорились")])
+        assert await store.db.one(
+            "SELECT json_extract(payload,'$.trigger') FROM jobs "
+            "WHERE json_extract(payload,'$.message_id')=8"
+        ) == ("ambient",)
+
+
 def text(mid, value, topic=8, sender=42, **extra):
     return event(
         mid,

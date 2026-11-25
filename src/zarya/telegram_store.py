@@ -14,7 +14,14 @@ from zarya.avatar_logic import purge as purge_avatars
 from zarya.avatar_logic import valid as avatar_valid
 from zarya.configuration import prompts_at
 from zarya.database import ConflictError, Database
-from zarya.dialogue_logic import direct_trigger, explicit_reply, message_text, topic_id
+from zarya.dialogue_logic import (
+    NEWER_JOB,
+    SUPERSEDABLE_JOB,
+    direct_trigger,
+    explicit_reply,
+    message_text,
+    topic_id,
+)
 from zarya.media_logic import MEDIA_WAIT
 from zarya.media_logic import refs_valid as media_refs_valid
 from zarya.memory_logic import (
@@ -103,17 +110,27 @@ async def pending_edit(
         conn,
         "SELECT 1 WHERE EXISTS (SELECT 1 FROM dialogue_runs WHERE job_id=?) "
         "OR EXISTS (SELECT 1 FROM outbox WHERE job_id=?) "
-        "OR EXISTS (SELECT 1 FROM jobs j JOIN events e ON e.id=j.event_id "
-        "WHERE e.bot_id=? AND e.chat_id=? AND j.id>? "
-        "AND json_extract(j.payload,'$.sender_id')=? "
-        "AND COALESCE(json_extract(j.payload,'$.thread_id'),0)=? "
-        "AND json_extract(j.payload,'$.trigger') IN "
+        f"OR EXISTS (SELECT 1 FROM jobs j JOIN jobs n ON {NEWER_JOB} "
+        "JOIN events e ON e.id=n.event_id "
+        f"WHERE e.bot_id=? AND e.chat_id=? AND j.id=? AND {SUPERSEDABLE_JOB} "
+        "AND json_extract(n.payload,'$.sender_id')=? "
+        "AND COALESCE(json_extract(n.payload,'$.thread_id'),0)=? "
+        "AND json_extract(n.payload,'$.trigger') IN "
         "('private','name','mention','reply','continuation'))",
         (job_id, job_id, bot, chat, job_id, sender, thread or 0),
     )
     if blocked:
         return None
     binding: dict[str, Any] = {}
+    if payload.get("no_continuation"):
+        binding["no_continuation"] = True
+    if (
+        trigger == "reply"
+        and payload.get("scope") == "group"
+        and thread is None
+        and not original.get("chat", {}).get("is_forum")
+    ):
+        binding["original_job_id"] = payload.get("original_job_id", job_id)
     if payload.get("post_question"):
         binding["post_source"] = {"message_id": payload["message_id"], "event_id": root_event}
     elif payload.get("post_source"):
@@ -610,7 +627,43 @@ class TelegramStore:
                             settings, edited,
                         )
                     )
-                    if trigger == "ambient" and not edited and not message.get("photo"):
+                    if (
+                        trigger == "ambient"
+                        and not edited
+                        and scope == "group"
+                        and thread_id is None
+                        and not message.get("chat", {}).get("is_forum")
+                        and explicit_reply(message)
+                    ):
+                        # An explicit reply elsewhere ends the implicit continuation.
+                        await conn.execute(
+                            "DELETE FROM active_dialogues WHERE bot_id=? AND chat_id=? "
+                            "AND thread_id=0 AND sender_id=?",
+                            (bot_id, subject, sender_id),
+                        )
+                        await conn.execute(
+                            "UPDATE text_batches SET ready_at=? WHERE bot_id=? AND chat_id=? "
+                            "AND thread_id=0 AND sender_id=? AND access_version=? "
+                            "AND sealed=0 AND ready_at>?",
+                            (now, bot_id, subject, sender_id, access[1], now),
+                        )
+                        # Earlier replies can still be delivered, but must not reopen this window.
+                        await conn.execute(
+                            "UPDATE jobs AS j SET payload=json_set(payload,'$.no_continuation',1) "
+                            "WHERE j.id IN (SELECT id FROM jobs WHERE kind='telegram' "
+                            "AND state IN ('pending','running') "
+                            "UNION SELECT o.job_id FROM outbox o WHERE o.bot_id=? "
+                            "AND o.chat_id=? AND o.state IN ('pending','sending')) "
+                            "AND j.kind='telegram' AND j.event_id<? AND j.access_version=? "
+                            "AND json_extract(j.payload,'$.sender_id')=? "
+                            "AND json_extract(j.payload,'$.thread_id') IS NULL "
+                            "AND json_extract(j.payload,'$.trigger') "
+                            "IN ('name','mention','reply','continuation') "
+                            "AND EXISTS (SELECT 1 FROM events e WHERE e.id=j.event_id "
+                            "AND e.bot_id=? AND e.chat_id=?)",
+                            (bot_id, subject, event_id, access[1], sender_id, bot_id, subject),
+                        )
+                    elif trigger == "ambient" and not edited and not message.get("photo"):
                         active = await row(
                             conn,
                             "SELECT 1 FROM active_dialogues WHERE bot_id=? AND chat_id=? "
@@ -651,33 +704,35 @@ class TelegramStore:
                         and not album_leader
                         and trigger in {"private", "name", "mention", "reply", "continuation"}
                     ):
-                        await conn.execute(
-                            "UPDATE jobs SET state='cancelled' WHERE id IN (SELECT job_id FROM "
-                            "dialogue_runs WHERE bot_id=? AND chat_id=? AND sender_id=? "
-                            "AND COALESCE(thread_id,0)=? "
-                            + (
-                                "AND message_id=? "
-                                if edited
-                                else "AND NOT EXISTS (SELECT 1 FROM text_batches b "
-                                "WHERE b.job_id=dialogue_runs.job_id) "
+                        earlier = (
+                            "SELECT r.job_id FROM dialogue_runs r JOIN jobs j ON j.id=r.job_id "
+                            "WHERE r.bot_id=? AND r.chat_id=? AND r.sender_id=? "
+                            "AND COALESCE(r.thread_id,0)=? "
+                        )
+                        earlier_args: tuple[object, ...] = (
+                            bot_id,
+                            subject,
+                            sender_id,
+                            thread_id or 0,
+                        )
+                        if edited:
+                            earlier += "AND r.message_id=? "
+                            earlier_args += (message["message_id"],)
+                        else:
+                            earlier += (
+                                f"AND {SUPERSEDABLE_JOB} "
+                                "AND NOT EXISTS (SELECT 1 FROM text_batches b "
+                                "WHERE b.job_id=r.job_id) "
                             )
-                            + ") AND state IN ('pending','running')",
-                            (bot_id, subject, sender_id, thread_id or 0)
-                            + ((message["message_id"],) if edited else ()),
+                        await conn.execute(
+                            f"UPDATE jobs SET state='cancelled' WHERE id IN ({earlier}) "
+                            "AND state IN ('pending','running')",
+                            earlier_args,
                         )
                         await conn.execute(
-                            "UPDATE outbox SET state='cancelled' WHERE state='pending' AND job_id "
-                            "IN (SELECT job_id FROM dialogue_runs WHERE bot_id=? AND chat_id=? "
-                            "AND sender_id=? AND COALESCE(thread_id,0)=? "
-                            + (
-                                "AND message_id=? "
-                                if edited
-                                else "AND NOT EXISTS (SELECT 1 FROM text_batches b "
-                                "WHERE b.job_id=dialogue_runs.job_id) "
-                            )
-                            + ")",
-                            (bot_id, subject, sender_id, thread_id or 0)
-                            + ((message["message_id"],) if edited else ()),
+                            "UPDATE outbox SET state='cancelled' "
+                            f"WHERE state='pending' AND job_id IN ({earlier})",
+                            earlier_args,
                         )
                     await conn.execute(
                         "INSERT INTO recent_messages VALUES (?,?,?,?,?,?,?,?,?,?) "
@@ -716,13 +771,20 @@ class TelegramStore:
                     if service_text is not None:
                         payload["service_text"] = service_text
                     if batch_member:
-                        _, old_trigger, open_batch = batch_member
+                        old_job, old_trigger, open_batch = batch_member
                         if not open_batch or kept_batch_edit or not message.get("text"):
                             continue
                         payload["trigger"] = (
                             old_trigger if old_trigger in message_batches.DIRECT else "continuation"
                         )
                         payload["keep_addressed"] = True
+                        if await row(
+                            conn,
+                            "SELECT 1 FROM jobs WHERE id=? "
+                            "AND json_extract(payload,'$.no_continuation')",
+                            (old_job,),
+                        ):
+                            payload["no_continuation"] = True
                     if batch:
                         payload["photo_batch_id"] = batch
                         if album_job:
@@ -1056,9 +1118,11 @@ class TelegramStore:
                 )
                 run = await row(
                     conn,
-                    "SELECT sender_id,thread_id,trigger,state='completed' OR "
-                    "COALESCE(json_extract(snapshot,'$.verbatim_quote'),0)=0 FROM dialogue_runs "
-                    "WHERE job_id=? AND mode='live'",
+                    "SELECT r.sender_id,r.thread_id,r.trigger,(r.state='completed' OR "
+                    "COALESCE(json_extract(r.snapshot,'$.verbatim_quote'),0)=0) "
+                    "AND NOT COALESCE(json_extract(j.payload,'$.no_continuation'),0) "
+                    "FROM dialogue_runs r JOIN jobs j ON j.id=r.job_id "
+                    "WHERE r.job_id=? AND r.mode='live'",
                     (item[3],),
                 )
                 if run:
@@ -1175,13 +1239,14 @@ class TelegramStore:
                 "AND source.chat_id=e.chat_id AND "
                 "source.message_id=json_extract(j.payload,'$.message_id') "
                 "AND source.event_id=j.event_id) "
-                "AND NOT EXISTS (SELECT 1 FROM jobs newer JOIN events ne ON ne.id=newer.event_id "
-                "WHERE ne.bot_id=e.bot_id AND ne.chat_id=e.chat_id AND newer.id>j.id "
+                "AND NOT EXISTS (SELECT 1 FROM jobs n JOIN events ne ON ne.id=n.event_id "
+                "WHERE ne.bot_id=e.bot_id AND ne.chat_id=e.chat_id "
+                f"AND {NEWER_JOB} AND {SUPERSEDABLE_JOB} "
                 "AND "
-                "json_extract(newer.payload,'$.sender_id')=json_extract(j.payload,'$.sender_id') "
-                "AND COALESCE(json_extract(newer.payload,'$.thread_id'),0)="
+                "json_extract(n.payload,'$.sender_id')=json_extract(j.payload,'$.sender_id') "
+                "AND COALESCE(json_extract(n.payload,'$.thread_id'),0)="
                 "COALESCE(json_extract(j.payload,'$.thread_id'),0) "
-                "AND json_extract(newer.payload,'$.trigger') "
+                "AND json_extract(n.payload,'$.trigger') "
                 "IN ('private','name','mention','reply','continuation')))) "
                 "AND NOT EXISTS (SELECT 1 FROM delivery_limits d WHERE d.bot_id=e.bot_id "
                 "AND d.chat_id=e.chat_id AND d.blocked_until>?) "
