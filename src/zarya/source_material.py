@@ -17,8 +17,10 @@ FORWARD_QUESTION_WAIT = 2.0
 FORWARD_QUESTION_FRESH = 10.0
 GROUP_FORWARD_TRIGGERS = {"name", "mention"}
 BARE_COMMENT = r"(?:да(?:й|вай)(?:\s+мне)?\s+комментар(?:ий|ии)|прокомментируй(?:те)?)"
+COMMENT_REQUEST = re.compile(rf"\b{BARE_COMMENT}\b", re.I)
 QUESTION_WORDS = frozenset(
-    "будет будут вроде вопрос где если еще его зачем заря как какая какие каким какую какое какой "
+    "будет будут вроде вопрос где дай давай если еще его зачем заря как какая какие каким какую "
+    "какое какой комментарий комментарии комментария поводу прокомментируй прокомментируйте "
     "когда кого кому кто куда мне можешь можно нужно оно откуда почему правда реально сейчас "
     "свой себя сегодня скажи сколько там так того тут хочу чем чего чтобы "
     "что эта эти это этот".split()
@@ -45,6 +47,9 @@ def question_terms(text: str) -> set[str]:
 
 
 def expects_forward_post(message: dict[str, Any], group_address: tuple[str, ...]) -> bool:
+    text = speaker_text(message).strip()
+    if group_address and text != (message.get("text") or "").strip():
+        return False
     if expects_post_comment(message):
         return True
     if not group_address:
@@ -53,7 +58,7 @@ def expects_forward_post(message: dict[str, Any], group_address: tuple[str, ...]
     return bool(
         re.fullmatch(
             rf"(?:{address}[\s,!:]+{BARE_COMMENT}|{BARE_COMMENT}[\s,]+{address})[.!?…\s]*",
-            speaker_text(message).strip(),
+            text,
             re.I,
         )
     )
@@ -70,8 +75,11 @@ def waits_for_forward(
     # A delayed poll should not hold every older question before processing its backlog.
     if type(sent) is not int or not -FORWARD_QUESTION_WAIT <= now - sent <= FORWARD_QUESTION_FRESH:
         return False
-    text = speaker_text(message)
-    return bool(QUESTION.search(text) and question_terms(text))
+    text = speaker_text(message).strip()
+    group_comment = (
+        group_address and text == message["text"].strip() and COMMENT_REQUEST.search(text)
+    )
+    return bool((QUESTION.search(text) or group_comment) and question_terms(text))
 
 
 async def preceding_forward_question(

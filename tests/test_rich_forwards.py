@@ -27,6 +27,7 @@ OLD = "Старый пост про Ялту"
 UNREADABLE = "Не получилось прочитать пересланный пост"
 USDT_QUESTION = "Реально будут брать НДС при покупке USDT? Я заплачу за 1000 как за 1220?"
 GROUP_ASK = "Давай комментарии, Заря"
+GROUP_NAMED_SUBJECT = "Дай комментарий, Заря, по поводу закрытия стадиона"
 GROUP_CAPTION = "Тарифы биржи на вывод BTC. Подробности"
 GROUP_URL = "https://example.org/tariffs"
 
@@ -44,21 +45,33 @@ def group_post(number, date, **extra):
 
 @pytest.mark.parametrize(
     "delivery",
-    ["one_poll", "two_polls", "without_batch", "edited", "edited_after_delivery", "mention"],
+    [
+        "one_poll",
+        "two_polls",
+        "without_batch",
+        "edited",
+        "edited_after_delivery",
+        "mention",
+        "related_subject",
+    ],
 )
 async def test_addressed_group_question_binds_forward_with_photo_and_link(tmp_path, delivery):
     date = int(time.time())
     question_text = GROUP_ASK
     question_extra = {}
+    caption = GROUP_CAPTION
     if delivery == "mention":
         mention = "@zarya_test"
         question_text = f"{mention}, прокомментируй"
         question_extra["entities"] = [{"type": "mention", "offset": 0, "length": len(mention)}]
+    if delivery == "related_subject":
+        question_text = GROUP_NAMED_SUBJECT
+        caption = "Стала известна причина закрытия стадиона. Подробности"
     question = event(2, -100, question_text, date=date, **question_extra)
-    post = group_post(3, date)
+    post = group_post(3, date, caption=caption)
     async with store_at(tmp_path) as store:
         await ready(store, -100, message_batches=delivery != "without_batch")
-        model = FakeModel(ModelResult(text="Расписание изменится."))
+        model = FakeModel(ModelResult(text="Подробности в публикации."))
         fetch = Fetch()
         transport = PhotoTransport()
         dialogue = DialogueEngine(store, model)
@@ -88,7 +101,7 @@ async def test_addressed_group_question_binds_forward_with_photo_and_link(tmp_pa
         await drain(dialogue)
         body = json.loads(work["request"]["input"])
         assert body["current_message"]["text"] == question_text
-        assert GROUP_CAPTION in body["selected_material"]["messages"][0]["text"]
+        assert caption in body["selected_material"]["messages"][0]["text"]
         assert {r["message_id"] for r in work["snapshot"]["source_manifest"]} == (
             {3} if delivery == "edited" else {2, 3}
         )
@@ -154,6 +167,8 @@ async def test_group_pair_adds_album_tail_to_open_photo_batch(tmp_path):
         "unaddressed",
         "unrelated",
         "named_subject",
+        "inline_quote",
+        "blockquote_entity",
         "late",
     ],
 )
@@ -162,9 +177,16 @@ async def test_group_question_does_not_capture_unrelated_forward(tmp_path, bound
     text = {
         "unaddressed": "Давай комментарии",
         "unrelated": "Как пожарить кабачки, Заря?",
-        "named_subject": "Дай комментарий, Заря, по поводу закрытия стадиона",
+        "named_subject": GROUP_NAMED_SUBJECT,
+        "inline_quote": f"{GROUP_ASK}\n«Стадион закрывают на ремонт»",
+        "blockquote_entity": f"{GROUP_ASK}\nСтадион закрывают на ремонт",
     }.get(boundary, GROUP_ASK)
     question_extra = {"message_thread_id": 8} if boundary == "other_topic" else {}
+    if boundary == "blockquote_entity":
+        offset = len(GROUP_ASK) + 1
+        question_extra["entities"] = [
+            {"type": "blockquote", "offset": offset, "length": len(text) - offset}
+        ]
     question = event(2, -100, text, date=date, **question_extra)
     post = group_post(4 if boundary == "two_texts" else 3, date + (3 if boundary == "late" else 0))
     if boundary == "other_author":
