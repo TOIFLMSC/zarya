@@ -9,7 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 import aiosqlite
 
 from zarya.dialogue_logic import explicit_reply, topic_id
-from zarya.research_fetch import check_target
+from zarya.research_fetch import check_target, telegram_post_url
 from zarya.research_intent import QUESTION, local_task, speaker_text
 from zarya.research_plan import followup_input
 from zarya.source_material import one, valid
@@ -89,16 +89,9 @@ def social_post_url(value: str) -> str | None:
     if identifier := post_id(value):
         return post_url(identifier)
     try:
-        parts = urlsplit(check_target(value))
+        return telegram_post_url(check_target(value))
     except ValueError:
         return None
-    if parts.hostname in {"t.me", "telegram.me", "www.t.me"}:
-        post = re.fullmatch(
-            r"/(?:s/)?([A-Za-z][A-Za-z0-9_]{3,31})/([1-9][0-9]{0,11})/?", parts.path
-        )
-        if post and post[1].lower() not in {"joinchat", "addlist", "share", "login"}:
-            return f"https://t.me/{post[1]}/{post[2]}"
-    return None
 
 
 def news_article_url(value: str) -> str | None:

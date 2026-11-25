@@ -3,10 +3,11 @@
 import asyncio
 import hashlib
 import posixpath
+import re
 import socket
 from html.parser import HTMLParser
 from typing import Any, Protocol
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 import aiohttp
 from aiohttp.abc import AbstractResolver
@@ -14,6 +15,12 @@ from aiohttp.abc import AbstractResolver
 from zarya.research_logic import public_address, public_url
 
 MAX_BYTES = 1_000_000
+TELEGRAM_HOSTS = {"t.me", "telegram.me", "telegram.dog", "www.t.me"}
+TELEGRAM_BARE = re.compile(r"^(?:t\.me|telegram\.me|telegram\.dog|www\.t\.me)/", re.I)
+TELEGRAM_POST = re.compile(
+    r"/(?:s/)?([A-Za-z][A-Za-z0-9_]{3,31})/(?:[1-9][0-9]{0,11}/)?([1-9][0-9]{0,11})/?"
+)
+TELEGRAM_RESERVED = {"joinchat", "addlist", "share", "login", "contact", "proxy", "socks"}
 
 
 def fetch_error(exc: Exception) -> str:
@@ -49,19 +56,69 @@ def fetch_error(exc: Exception) -> str:
     return "fetch_failed"
 
 
-def check_target(url: str) -> str:
-    current = public_url(url)
-    parsed = urlsplit(current)
+def telegram_path(url: str) -> str | None:
+    parsed = urlsplit(url)
+    if (parsed.hostname or "").lower().rstrip(".") not in TELEGRAM_HOSTS:
+        return None
     path = parsed.path
     for _ in range(3):
         path = unquote(path)
-    path = posixpath.normpath("/" + path.lstrip("/").replace("\\", "/"))
-    if (parsed.hostname or "").lower().rstrip(".") in {
-        "t.me",
-        "telegram.me",
-        "www.t.me",
-    } and path.startswith(("/c/", "/+", "/joinchat/")):
-        raise ValueError("private_telegram_post")
+    return posixpath.normpath("/" + path.lstrip("/").replace("\\", "/"))
+
+
+def source_http_url(url: str) -> str:
+    parts = urlsplit(url)
+    if parts.scheme == "tg" and parts.netloc.lower() == "resolve":
+        query = parse_qs(parts.query, keep_blank_values=True)
+        domains, posts = query.get("domain", []), query.get("post", [])
+        if (
+            len(domains) == len(posts) == 1 and "comment" not in query
+            and "/" not in domains[0] and "/" not in posts[0]
+        ):
+            match = TELEGRAM_POST.fullmatch(f"/{domains[0]}/{posts[0]}")
+            if match and match[1].lower() not in TELEGRAM_RESERVED:
+                return f"https://t.me/{match[1]}/{match[2]}"
+    return public_url(f"https://{url}" if TELEGRAM_BARE.match(url) else url)
+
+
+def telegram_post_url(url: str) -> str | None:
+    try:
+        url = source_http_url(url)
+    except ValueError:
+        return None
+    path = telegram_path(url)
+    match = TELEGRAM_POST.fullmatch(path or "")
+    if (
+        match
+        and match[1].lower() not in TELEGRAM_RESERVED
+        and "comment" not in parse_qs(urlsplit(url).query, keep_blank_values=True)
+    ):
+        return f"https://t.me/{match[1]}/{match[2]}"
+    return None
+
+
+def telegram_navigation(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme == "tg":
+            name = parsed.netloc.lower()
+            if name in {"join", "resolve"}:
+                return name == "join" or telegram_post_url(url) is None
+        checked = source_http_url(url)
+        path = telegram_path(checked)
+        return bool(path and not path.lower().startswith("/c/") and not telegram_post_url(checked))
+    except ValueError:
+        return False
+
+
+def check_target(url: str) -> str:
+    current = source_http_url(url)
+    path = telegram_path(current)
+    if path:
+        if path.lower().startswith(("/c/", "/+", "/joinchat/")):
+            raise ValueError("private_telegram_post")
+        if not telegram_post_url(current):
+            raise ValueError("unsupported_telegram_target")
     return current
 
 
@@ -97,6 +154,44 @@ class TextParser(HTMLParser):
             self.title += data[:300]
         elif not self.skip:
             self.parts.append(data)
+
+
+class TelegramPostParser(TextParser):
+    def __init__(self, address: str) -> None:
+        super().__init__()
+        self.post = urlsplit(address).path.lstrip("/").casefold()
+        self.depth = 0
+        self.widget: int | None = None
+        self.body: int | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "div":
+            self.depth += 1
+            attributes = dict(attrs)
+            classes = (attributes.get("class") or "").split()
+            if (
+                "tgme_widget_message" in classes
+                and (attributes.get("data-post") or "").casefold() == self.post
+            ):
+                self.widget = self.depth
+            if self.widget is not None and "tgme_widget_message_text" in classes:
+                self.body = self.depth
+        if self.body is not None:
+            super().handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.body is not None:
+            super().handle_endtag(tag)
+        if tag == "div":
+            if self.depth == self.body:
+                self.body = None
+            if self.depth == self.widget:
+                self.widget = None
+            self.depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self.body is not None:
+            super().handle_data(data)
 
 
 class PublicResolver(AbstractResolver):
@@ -147,6 +242,9 @@ class SafeFetcher:
         }
         try:
             current = check_target(url)
+            post = telegram_post_url(current)
+            if post:
+                current = post + "?embed=1"
             connector = aiohttp.TCPConnector(
                 resolver=PublicResolver(), use_dns_cache=False, limit=1
             )
@@ -169,11 +267,16 @@ class SafeFetcher:
                     check_target(current)
                     async with client.get(current, allow_redirects=False) as response:
                         # A public destination was reached even if it declined the request.
-                        source["verified_url"] = current
+                        source["verified_url"] = post or current
                         if response.status in {301, 302, 303, 307, 308}:
                             if attempt == 3 or not response.headers.get("Location"):
                                 raise ValueError("redirect_limit")
                             current = check_target(urljoin(current, response.headers["Location"]))
+                            redirected_post = telegram_post_url(current)
+                            if post and redirected_post != post:
+                                raise ValueError("unsupported_telegram_redirect")
+                            if redirected_post:
+                                post, current = redirected_post, redirected_post + "?embed=1"
                             continue
                         if response.status != 200:
                             raise ValueError("http_" + str(response.status))
@@ -191,7 +294,9 @@ class SafeFetcher:
                             if len(data) > MAX_BYTES:
                                 raise ValueError("size_limit")
                         text = bytes(data).decode(response.charset or "utf-8", "replace")
-                        parser = TextParser()
+                        parser = TelegramPostParser(post) if post else TextParser()
+                        if post and kind == "text/plain":
+                            raise ValueError("no_readable_text")
                         if kind != "text/plain":
                             parser.feed(text)
                             text = "\n".join(
@@ -213,7 +318,7 @@ class SafeFetcher:
                         if video:
                             text = (parser.title + "\n" + parser.description).strip()
                         source.update(
-                            url=current,
+                            url=post or current,
                             title=parser.title.strip()[:300] or host,
                             text=text[:12000],
                             coverage="metadata_only" if video else "partial_text",
@@ -221,6 +326,8 @@ class SafeFetcher:
                         )
                         if not text:
                             source.update(coverage="unavailable", error="no_readable_text")
+                            if post:
+                                source.pop("verified_url", None)
                         return source
         except (ValueError, LookupError) as exc:
             source["error"] = (

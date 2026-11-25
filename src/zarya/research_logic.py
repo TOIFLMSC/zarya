@@ -82,22 +82,26 @@ def public_address(value: str) -> bool:
     return address.is_global and not address.is_multicast and not address.is_reserved
 
 
-def urls(message: dict[str, Any]) -> list[str]:
+def urls(message: dict[str, Any], *, skip_navigation: bool = False) -> list[str]:
     text = str(message.get("text") or message.get("caption") or "")
     rich_only = not text.strip() and "rich_message" in message
     if rich_only:
         text = content_text(message)
-    values = [trim_url(v) for v in re.findall(r"https?://[^\s<>]+", text)]
-    if rich_only:
-        # Rich-text link labels are visible text. Their hidden targets and offsets are not.
-        return list(dict.fromkeys(values))[:3]
-    encoded = text.encode("utf-16-le")
-    for entity in message.get("entities") or message.get("caption_entities") or []:
-        if entity.get("type") == "text_link":
-            values.append(str(entity.get("url", "")))
-        elif entity.get("type") == "url":
-            offset, size = int(entity.get("offset", 0)), int(entity.get("length", 0))
-            values.append(encoded[offset * 2 : (offset + size) * 2].decode("utf-16-le", "replace"))
+    values = [trim_url(v) for v in re.findall(r"(?:https?|tg)://[^\s<>]+", text)]
+    if not rich_only:
+        # A rich post contributes only its visible link text.
+        encoded = text.encode("utf-16-le")
+        for entity in message.get("entities") or message.get("caption_entities") or []:
+            if entity.get("type") == "text_link":
+                values.append(str(entity.get("url", "")))
+            elif entity.get("type") == "url":
+                offset, size = int(entity.get("offset", 0)), int(entity.get("length", 0))
+                raw = encoded[offset * 2 : (offset + size) * 2]
+                values.append(raw.decode("utf-16-le", "replace"))
+    if skip_navigation:
+        from zarya.research_fetch import telegram_navigation
+
+        values = [url for url in values if not telegram_navigation(url)]
     return list(dict.fromkeys(values))[:3]
 
 
@@ -162,7 +166,7 @@ async def purge(conn: aiosqlite.Connection, where: str, args: tuple[object, ...]
     )
     await conn.execute(
         "UPDATE research_runs SET "
-        "question='',material='',manifest='[]',sources='[]',result=NULL,actions"
+        "question='',public_question=NULL,material='',manifest='[]',sources='[]',result=NULL,actions"
         "='[]',state='cancelled',error_code='source_changed' WHERE " + where,
         args,
     )

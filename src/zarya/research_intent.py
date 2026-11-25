@@ -214,18 +214,6 @@ def expects_post_comment(message: dict[str, Any]) -> bool:
     )
 
 
-def local_post_request(message: dict[str, Any]) -> bool:
-    text = speaker_text(message)
-    return bool(
-        (
-            post_text_request(message)
-            or post_opinion_request(message)
-            or POST_DISCUSSION.search(text)
-        )
-        and not POST_EXTERNAL.search(text)
-    )
-
-
 def needs_forwarded_text(message: dict[str, Any]) -> bool:
     text = speaker_text(message)
     return bool(

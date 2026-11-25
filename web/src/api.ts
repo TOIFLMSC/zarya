@@ -475,7 +475,7 @@ export type ResearchDetail = ResearchItem & {
   calls?: ResearchCall[];
 };
 type ResearchCall = {
-  phase?: "research_initial" | "research_gap";
+  phase?: "research_intent" | "research_initial" | "research_gap";
   model: string;
   pricing: string | null;
   state: string;

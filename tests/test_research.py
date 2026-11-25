@@ -15,7 +15,15 @@ from zarya.dialogue_logic import delivery_chunks
 from zarya.memory import MemoryEngine
 from zarya.openai_adapter import ModelResult
 from zarya.research import ResearchEngine
-from zarya.research_fetch import PublicResolver, SafeFetcher, TextParser
+from zarya.research_fetch import (
+    PublicResolver,
+    SafeFetcher,
+    TelegramPostParser,
+    TextParser,
+    check_target,
+    telegram_navigation,
+)
+from zarya.research_intent import POST_EXTERNAL, post_opinion_request, post_text_request
 from zarya.research_logic import evidence_text, public_address, public_url, urls, wants_search
 from zarya.research_plan import hosted_search_input
 from zarya.telegram_runtime import TelegramRuntime
@@ -43,7 +51,27 @@ class Fetch:
 
 
 class ResearchModel(FakeModel):
+    intent: str | None = None
+
     async def generate(self, request):
+        if request.get("text", {}).get("format", {}).get("name") == "post_research_intent":
+            data = json.loads(request["input"])
+            if not hasattr(self, "intent_calls"):
+                self.intent_calls = []
+            self.intent_calls.append(request)
+            question = data["question"]
+            message = {"text": question}
+            local = (post_opinion_request(message) or post_text_request(message)) and not (
+                POST_EXTERNAL.search(question)
+            )
+            mode = self.intent or (
+                "search" if wants_search(question) and not local else "read"
+            )
+            return ModelResult(
+                text=json.dumps(
+                    {"mode": mode, "public_question": question if mode == "search" else ""}
+                )
+            )
         self.calls.append(request)
         if request.get("tools"):
             return ModelResult(
@@ -71,6 +99,110 @@ class ResearchModel(FakeModel):
                 ],
             )
         return ModelResult(text="Тезис подтверждается [S1]")
+
+
+@pytest.mark.parametrize("mode", ["read", "search", "invalid"])
+async def test_post_decision_controls_search_and_skips_telegram_navigation(tmp_path, mode):
+    from test_source_material import answer
+
+    question = "Заря, мнение? Годнота?"
+    channel = "https://t.me/examplefeed"
+    invite = "https://t.me/+synthetic"
+    post_url = channel + "/42"
+    private_marker = "PRIVATE_POST_TEXT_NOT_FOR_HOSTED_SEARCH"
+    async with store_at(tmp_path) as store:
+        await store.ingest("999", "zarya_test", [event(1, -100)])
+        await approve(store, "group", "-100")
+        post = event(
+            2,
+            -100,
+            f"{private_marker} {channel} https://t.me/otherchannel {invite} {post_url}",
+            forward_origin={"type": "channel"},
+            entities=[
+                {"type": "text_link", "offset": 0, "length": 1, "url": "tg://join?invite=synthetic"}
+            ],
+        )
+        reply = event(3, -100, question, reply_to_message={"message_id": 2})
+        await store.ingest("999", "zarya_test", [post, reply])
+        fetch, model = Fetch(), ResearchModel()
+        model.intent = mode
+        dialogue = DialogueEngine(store, FakeModel(ModelResult(text="Годно.")))
+        dialogue.research = research = ResearchEngine(store, model, fetch)
+        work = await answer(dialogue, research, 3)
+        assert fetch.calls == [post_url]
+        (decision_request,) = model.intent_calls
+        context = json.loads(decision_request["input"])
+        assert context["question"] == question and private_marker in context["selected_material"]
+        assert not decision_request.get("tools")
+        assert await store.db.one(
+            "SELECT search_cost_usd FROM model_calls WHERE operation='research_intent'"
+        ) == (0.0,)
+        evidence = work["snapshot"]["research"]
+        if mode == "search":
+            (search_request,) = model.calls
+            search_input = json.loads(search_request["input"])
+            assert search_input["provided_material"] == ""
+            assert private_marker not in search_request["input"]
+            assert all(s["url"] == post_url for s in search_input["sources"])
+            assert search_request["tools"][0]["type"] == "web_search"
+        else:
+            assert not model.calls
+            assert evidence["mode"] == "read"
+            assert evidence["state"] == ("completed" if mode == "read" else "invalid")
+
+
+def test_telegram_deep_links_keep_post_identity_and_skip_navigation():
+    assert telegram_navigation("tg://resolve?domain=examplefeed")
+    assert telegram_navigation("tg://join?invite=test")
+    message = "tg://resolve?domain=examplefeed&post=42"
+    assert not telegram_navigation(message)
+    assert check_target(message) == "https://t.me/examplefeed/42"
+
+
+def test_telegram_post_extracts_text_only_from_exact_widget():
+    parser = TelegramPostParser("https://t.me/examplefeed/42")
+    parser.feed("""<div class="tgme_widget_message" data-post="examplefeed/41">
+    <div class="tgme_widget_message_text">Другой пост</div></div>
+    <div class="tgme_widget_message" data-post="examplefeed/42">
+    <div class="tgme_widget_message_text">Точный <b>пост</b><br>с текстом</div>
+    <div>Подпишись на канал</div></div>""")
+    assert "".join(parser.parts).split() == ["Точный", "пост", "с", "текстом"]
+
+
+async def test_interrupted_post_decision_never_starts_search_or_retries(tmp_path):
+    class InterruptedModel(ResearchModel):
+        async def generate(self, request):
+            assert not request.get("tools")
+            started.set()
+            await asyncio.Event().wait()
+
+    started = asyncio.Event()
+    async with store_at(tmp_path) as store:
+        await store.ingest("999", "zarya_test", [event(1, -100)])
+        await approve(store, "group", "-100")
+        post = event(2, -100, "Пересланный материал", forward_origin={"type": "channel"})
+        reply = event(3, -100, "Заря, что думаешь?", reply_to_message={"message_id": 2})
+        await store.ingest("999", "zarya_test", [post, reply])
+        dialogue = DialogueEngine(store, FakeModel(ModelResult(text="Ответ по посту.")))
+        dialogue.research = research = ResearchEngine(store, InterruptedModel(), Fetch())
+        assert (await dialogue.claim("999"))["skip"]
+        assert await dialogue.claim("999") == {"skip": True}
+        work = await research.claim("999")
+        task = asyncio.create_task(research.execute(work))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await research.recover("999")
+        assert await research.claim("999") is None
+        assert await store.db.all("SELECT operation,state FROM model_calls") == [
+            ("research_intent", "unknown")
+        ]
+        assert await store.db.one("SELECT mode,state,public_question FROM research_runs") == (
+            "read",
+            "unknown",
+            None,
+        )
 
 
 async def research_ready(store, question="Заря, проверь публичный тезис", *, entities=None):
@@ -369,7 +501,9 @@ async def test_read_reply_uses_accepted_revision_and_untrusted_post(tmp_path):
         dialogue = DialogueEngine(
             s, FakeModel(ModelResult(text="Коротко: статья говорит о тесте [S1]"))
         )
-        research = ResearchEngine(s, dialogue.adapter, Fetch())
+        read_model = ResearchModel()
+        read_model.intent = "read"
+        research = ResearchEngine(s, read_model, Fetch())
         dialogue.research = research
         # Earlier addressed private forwarding is superseded by the latest question.
         await dialogue.claim("999")
@@ -627,7 +761,16 @@ async def test_actual_model_and_tariff_are_recorded(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "scenario", ["redirect", "telegram_redirect", "compressed", "oversize", "video", "closed"]
+    "scenario",
+    [
+        "redirect",
+        "telegram_redirect",
+        "telegram_post_redirect",
+        "compressed",
+        "oversize",
+        "video",
+        "closed",
+    ],
 )
 async def test_fetch_redirect_size_compression_and_video_coverage(monkeypatch, scenario):
     class Response:
@@ -643,6 +786,12 @@ async def test_fetch_redirect_size_compression_and_video_coverage(monkeypatch, s
             pass
 
         async def iter_chunked(self, size):
+            if scenario == "telegram_post_redirect":
+                yield (
+                    b'<div class="tgme_widget_message" data-post="examplefeed/41">'
+                    b'<div class="tgme_widget_message_text">Different post</div></div>'
+                )
+                return
             yield (
                 b"a" * 1_000_001
                 if scenario == "oversize"
@@ -656,6 +805,8 @@ async def test_fetch_redirect_size_compression_and_video_coverage(monkeypatch, s
         response.status, response.headers = 302, {"Location": "http://127.0.0.1/secret"}
     elif scenario == "telegram_redirect":
         response.status, response.headers = 302, {"Location": "https://T.ME./public/../%2bSECRET"}
+    elif scenario == "telegram_post_redirect":
+        response.status, response.headers = 302, {"Location": "https://t.me/examplefeed/42"}
     elif scenario == "compressed":
         response.headers = {"Content-Type": "text/html", "Content-Encoding": "gzip"}
     elif scenario == "closed":
@@ -671,6 +822,11 @@ async def test_fetch_redirect_size_compression_and_video_coverage(monkeypatch, s
         def get(self, url, **kwargs):
             assert kwargs == {"allow_redirects": False}
             assert "SECRET" not in url
+            if scenario == "telegram_post_redirect" and url.startswith("https://t.me/"):
+                assert url == "https://t.me/examplefeed/42?embed=1"
+                preview = Response()
+                preview.content = preview
+                return preview
             return response
 
     def session(**kwargs):
@@ -685,6 +841,8 @@ async def test_fetch_redirect_size_compression_and_video_coverage(monkeypatch, s
     )
     if scenario == "telegram_redirect":
         assert result["error"] == "private_telegram_post"
+    if scenario == "telegram_post_redirect":
+        assert result["error"] == "no_readable_text"
     if scenario == "video":
         assert result["coverage"] == "metadata_only" and "Not a transcript" not in result["text"]
     else:

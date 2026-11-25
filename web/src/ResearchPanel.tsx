@@ -16,6 +16,7 @@ const states: Record<string, string> = {
   failed: "Ошибка действия",
 };
 const evidenceErrors: Record<string, string> = {
+  invalid_research_intent: "Модель не вернула решение о веб-поиске.",
   invalid_evidence: "Не удалось проверить структуру или ссылки результата.",
   max_output_tokens: "Модель исчерпала лимит выходных токенов до завершения проверки.",
   incomplete_other: "Модель не закончила проверку.",
@@ -27,6 +28,10 @@ const evidenceErrors: Record<string, string> = {
   invalid_evidence_output_limit: "Результат превышает допустимую длину.",
   invalid_evidence_source_limit: "Результат превышает допустимое число источников.",
 };
+const researchState = (state: string, mode: string) =>
+  mode === "decide" && state === "search_started"
+    ? "Выбор действия"
+    : (states[state] ?? state);
 const coverage: Record<string, string> = {
   partial_text: "Фрагмент текста",
   metadata_only: "Только заголовок и описание",
@@ -225,7 +230,7 @@ export function ResearchPanel({
                   {item.question || "Содержимое удалено"}
                 </span>
               </span>
-              <span className="badge">{states[item.state] ?? item.state}</span>
+              <span className="badge">{researchState(item.state, item.mode)}</span>
             </button>
           ))}
         </div>
@@ -266,7 +271,7 @@ export function ResearchPanel({
               <div className="section-head">
                 <h2>Проверка #{detail.id}</h2>
                 <span className="badge">
-                  {states[detail.state] ?? detail.state}
+                  {researchState(detail.state, detail.mode)}
                 </span>
               </div>
               <p className="muted">
@@ -493,7 +498,11 @@ export function ResearchPanel({
                 {detail.call ? (detail.calls ?? [detail.call]).map((call, index) => (
                   <div className="research-source" key={index}>
                     <strong>
-                      {call.phase === "research_gap" ? "Дополнительная проверка" : "Первый поиск"}
+                      {call.phase === "research_intent"
+                        ? "Решение о веб-поиске"
+                        : call.phase === "research_gap"
+                          ? "Дополнительная проверка"
+                          : "Первый поиск"}
                       {" · "}{states[call.state] ?? call.state}
                     </strong>
                     <p>
