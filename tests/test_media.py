@@ -209,12 +209,20 @@ async def test_ambient_video_not_downloaded_then_reply_chain_selects_original(tm
         await store.ingest(
             "999",
             "zarya_test",
-            [event(3, -100, "Заря, объясни пост", reply_to_message=post["message"])],
+            [event(3, -100, "Заря, мнение? Годнота?", reply_to_message=post["message"])],
         )
         assert (await dialogue.claim("999"))["skip"]
         work = await process(media)
         answer = await dialogue.claim("999")
         await dialogue.execute(answer)
+        request = model.calls[-1]
+        instructions = request["instructions"]
+        assert "подхвати шутку из поста или обыграй конкретную деталь" in instructions
+        assert "только если это влияет на ответ на текущий вопрос" in instructions
+        assert "дай результат проверки текста" not in instructions
+        material = json.loads(request["input"])["selected_material"]["messages"][0]
+        assert "Пост" in material["text"] and "Красный фон" in material["text"]
+        assert material["attachments"][0]["coverage"] == "sampled_media"
         async with store.db.transaction() as conn:
             await conn.execute("UPDATE outbox SET next_attempt=0")
         delivery = await store.claim_delivery("999")
